@@ -54,13 +54,13 @@ if (!(Test-Path $envFile)) {
         GETFY_QUEUE_WORKER_MAX_TIME = if ($env:GETFY_QUEUE_WORKER_MAX_TIME) { $env:GETFY_QUEUE_WORKER_MAX_TIME } else { "3600" }
         GETFY_QUEUE_WORKER_MAX_JOBS = if ($env:GETFY_QUEUE_WORKER_MAX_JOBS) { $env:GETFY_QUEUE_WORKER_MAX_JOBS } else { "1000" }
         GETFY_CADDY_HOST = if ($env:GETFY_CADDY_HOST) { $env:GETFY_CADDY_HOST } else { ":80" }
-        GETFY_COMPOSE_FILES = if ($env:GETFY_COMPOSE_FILES) { $env:GETFY_COMPOSE_FILES } else { "docker-compose.yml;docker-compose.hostports.yml" }
-        GETFY_CADDY_PUBLIC_HOST = if ($env:GETFY_CADDY_PUBLIC_HOST) { $env:GETFY_CADDY_PUBLIC_HOST } else { "" }
-        GETFY_LE_EMAIL = if ($env:GETFY_LE_EMAIL) { $env:GETFY_LE_EMAIL } else { "" }
     }
 } else {
     $content = Get-Content $envFile -Raw
-    $needsRotate = $content -match '^\s*GETFY_DB_USERNAME\s*=\s*(getfy)?\s*$' -or $content -match '^\s*GETFY_DB_PASSWORD\s*=\s*(getfy)?\s*$'
+    # Só gera credenciais novas se USERNAME/PASSWORD estiverem vazios.
+    # NÃO rotaciona username "getfy" em stack já existente (quebra volume Postgres → 522).
+    $needsRotate = $content -match '(?m)^\s*GETFY_DB_USERNAME\s*=\s*$' -or $content -match '(?m)^\s*GETFY_DB_PASSWORD\s*=\s*$' `
+        -or $content -notmatch '(?m)^\s*GETFY_DB_USERNAME\s*=' -or $content -notmatch '(?m)^\s*GETFY_DB_PASSWORD\s*='
     if ($needsRotate) {
         $dbUser = New-RandomDbUser
         $dbPass = New-RandomSecret 32
@@ -81,39 +81,13 @@ if (!(Test-Path $envFile)) {
         $wh = if ($env:GETFY_WEBHOOK_PUBLIC_URL) { $env:GETFY_WEBHOOK_PUBLIC_URL } else { $valApp }
         Write-EnvFile $envFile @{ GETFY_WEBHOOK_PUBLIC_URL = $wh }
     }
-    $contentMerge2 = Get-Content $envFile -Raw
-    if ($contentMerge2 -notmatch '(?m)^\s*GETFY_COMPOSE_FILES\s*=') {
-        Write-EnvFile $envFile @{ GETFY_COMPOSE_FILES = "docker-compose.yml;docker-compose.hostports.yml" }
-    }
-    elseif ($contentMerge2 -match '(?m)^\s*GETFY_COMPOSE_FILES\s*=\s*docker-compose\.yml\s*$') {
-        Write-EnvFile $envFile @{ GETFY_COMPOSE_FILES = "docker-compose.yml;docker-compose.hostports.yml" }
-    }
-    $contentMerge3 = Get-Content $envFile -Raw
-    if ($contentMerge3 -notmatch '(?m)^\s*GETFY_CADDY_PUBLIC_HOST\s*=') {
-        Write-EnvFile $envFile @{ GETFY_CADDY_PUBLIC_HOST = "" }
-    }
-    $contentMerge4 = Get-Content $envFile -Raw
-    if ($contentMerge4 -notmatch '(?m)^\s*GETFY_LE_EMAIL\s*=') {
-        Write-EnvFile $envFile @{ GETFY_LE_EMAIL = "" }
-    }
 }
 
-$composeFilesRaw = if ($env:GETFY_COMPOSE_FILES) { $env:GETFY_COMPOSE_FILES } else { "" }
-if ([string]::IsNullOrWhiteSpace($composeFilesRaw) -and (Test-Path $envFile)) {
-    $line = Get-Content $envFile | Where-Object { $_ -match '^\s*GETFY_COMPOSE_FILES\s*=' } | Select-Object -First 1
-    if ($line -match '^\s*GETFY_COMPOSE_FILES\s*=\s*(.+)\s*$') { $composeFilesRaw = $matches[1].Trim() }
-}
-if ([string]::IsNullOrWhiteSpace($composeFilesRaw)) { $composeFilesRaw = "docker-compose.yml;docker-compose.hostports.yml" }
+$composeFilesRaw = if ($env:GETFY_COMPOSE_FILES) { $env:GETFY_COMPOSE_FILES } else { "docker-compose.yml" }
 $composeFiles = $composeFilesRaw -split ';' | Where-Object { $_ -and $_.Trim() -ne "" } | ForEach-Object { $_.Trim() }
 $composeArgs = @()
 foreach ($f in $composeFiles) {
     $composeArgs += @("-f", $f)
-}
-
-# BuildKit no Docker Desktop (Windows) pode falhar ao exportar layers (tls: bad record MAC). Classic builder evita isso.
-if ($env:GETFY_USE_BUILDKIT -ne "1") {
-    $env:DOCKER_BUILDKIT = "0"
-    $env:COMPOSE_DOCKER_CLI_BUILD = "0"
 }
 
 docker compose @composeArgs --env-file $envFile up --build -d

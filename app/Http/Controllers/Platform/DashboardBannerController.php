@@ -4,19 +4,21 @@ namespace App\Http\Controllers\Platform;
 
 use App\Http\Controllers\Controller;
 use App\Models\Setting;
+use App\Services\StorageService;
+use App\Support\DashboardBannerSettings;
+use App\Support\DashboardBannerSpecs;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 
 class DashboardBannerController extends Controller
 {
-    private const KEY = 'dashboard_banners';
-
     public function data(): JsonResponse
     {
         return response()->json([
-            'banners' => $this->getBanners(),
+            'banners' => DashboardBannerSettings::banners(activeOnly: false, resolveUrls: true),
+            'specs' => DashboardBannerSpecs::toFrontendSpecs(),
         ]);
     }
 
@@ -37,8 +39,8 @@ class DashboardBannerController extends Controller
                 return [
                     'id' => (string) ($item['id'] ?? ('banner-'.$idx)),
                     'title' => trim((string) ($item['title'] ?? '')),
-                    'desktop_url' => trim((string) ($item['desktop_url'] ?? '')),
-                    'mobile_url' => trim((string) ($item['mobile_url'] ?? '')),
+                    'desktop_url' => $this->normalizeStoredUrl($item['desktop_url'] ?? ''),
+                    'mobile_url' => $this->normalizeStoredUrl($item['mobile_url'] ?? ''),
                     'active' => (bool) ($item['active'] ?? true),
                     'sort_order' => (int) ($item['sort_order'] ?? ($idx + 1)),
                 ];
@@ -48,7 +50,7 @@ class DashboardBannerController extends Controller
             ->values()
             ->all();
 
-        Setting::set(self::KEY, $normalized, null);
+        Setting::set(DashboardBannerSettings::KEY, $normalized, null);
 
         return response()->json([
             'ok' => true,
@@ -59,48 +61,50 @@ class DashboardBannerController extends Controller
     public function upload(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'file' => ['required', 'file', 'max:8192', 'mimes:jpg,jpeg,png,webp,gif,svg'],
+            'file' => ['required', 'file', 'max:8192', 'mimes:jpg,jpeg,png,webp,gif'],
             'variant' => ['required', 'string', Rule::in(['desktop', 'mobile'])],
         ]);
 
-        $path = $request->file('file')->store('dashboard-banners', 'public');
-        $url = Storage::disk('public')->url($path);
-        if (! str_starts_with($url, 'http')) {
-            $url = rtrim((string) config('app.url'), '/').'/'.ltrim($url, '/');
+        $file = $request->file('file');
+        $variant = (string) $validated['variant'];
+        $size = @getimagesize($file->getRealPath());
+        if (! is_array($size) || ! isset($size[0], $size[1])) {
+            throw ValidationException::withMessages([
+                'file' => 'Não foi possível ler as dimensões da imagem.',
+            ]);
         }
+
+        $width = (int) $size[0];
+        $height = (int) $size[1];
+        if (! DashboardBannerSpecs::validateSize($width, $height, $variant)) {
+            throw ValidationException::withMessages([
+                'file' => DashboardBannerSpecs::mismatchMessage($width, $height, $variant),
+            ]);
+        }
+
+        $uploaded = $this->platformStorage()->storeUploadedPublicFile($file, 'dashboard-banners');
 
         return response()->json([
             'ok' => true,
-            'url' => $url,
+            'url' => $uploaded['url'],
             'variant' => $validated['variant'],
         ]);
     }
 
-    /**
-     * @return array<int, array{id:string,title:string,desktop_url:string,mobile_url:string,active:bool,sort_order:int}>
-     */
-    private function getBanners(): array
+    private function normalizeStoredUrl(mixed $value): string
     {
-        $raw = Setting::get(self::KEY, [], null);
-        $rows = is_string($raw) ? json_decode($raw, true) : $raw;
-        if (! is_array($rows)) {
-            return [];
+        if (! is_string($value) || trim($value) === '') {
+            return '';
         }
 
-        return collect($rows)
-            ->filter(fn ($item) => is_array($item))
-            ->map(function (array $item, int $idx) {
-                return [
-                    'id' => (string) ($item['id'] ?? ('banner-'.$idx)),
-                    'title' => (string) ($item['title'] ?? ''),
-                    'desktop_url' => (string) ($item['desktop_url'] ?? ''),
-                    'mobile_url' => (string) ($item['mobile_url'] ?? ''),
-                    'active' => (bool) ($item['active'] ?? true),
-                    'sort_order' => (int) ($item['sort_order'] ?? ($idx + 1)),
-                ];
-            })
-            ->sortBy('sort_order')
-            ->values()
-            ->all();
+        return $this->platformStorage()->toStoragePath($value) ?? trim($value);
+    }
+
+    /**
+     * Banners da dashboard são asset global (tenant null), inclusive com R2.
+     */
+    private function platformStorage(): StorageService
+    {
+        return new StorageService(null);
     }
 }

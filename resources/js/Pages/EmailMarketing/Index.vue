@@ -38,11 +38,13 @@ function confirmSend(campaign) {
         <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
             <h1 class="text-2xl font-bold text-zinc-900 dark:text-white">E-mail Marketing</h1>
             <div class="flex gap-2">
-                <Link v-if="activeTab === 'campanhas'" href="/plataforma/email-marketing/create">
-                    <Button variant="primary" class="inline-flex items-center gap-2">
-                        <Plus class="h-4 w-4" />
-                        Nova campanha
-                    </Button>
+                <Link
+                    v-if="activeTab === 'campanhas'"
+                    href="/plataforma/email-marketing/create"
+                    class="inline-flex items-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2 text-sm font-medium text-white hover:opacity-90"
+                >
+                    <Plus class="h-4 w-4" />
+                    Nova campanha
                 </Link>
             </div>
         </div>
@@ -92,14 +94,17 @@ function confirmSend(campaign) {
                 v-if="cloud_mode"
                 class="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-200"
             >
-                Se você estiver usando o gatewayLab em modo cloud, não é necessário configurar o cron; o envio já vem
+                Se você estiver usando o Getfy em modo cloud, não é necessário configurar o cron; o envio já vem
                 configurado automaticamente.
             </div>
 
             <div v-if="campaigns.length === 0" class="rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white p-8 text-center dark:bg-zinc-800/50">
                 <p class="text-zinc-600 dark:text-zinc-400">Nenhuma campanha ainda.</p>
-                <Link href="/plataforma/email-marketing/create" class="mt-4 inline-block">
-                    <Button variant="primary">Criar primeira campanha</Button>
+                <Link
+                    href="/plataforma/email-marketing/create"
+                    class="mt-4 inline-flex items-center justify-center rounded-lg bg-[var(--color-primary)] px-4 py-2 text-sm font-medium text-white hover:opacity-90"
+                >
+                    Criar primeira campanha
                 </Link>
             </div>
 
@@ -150,7 +155,7 @@ function confirmSend(campaign) {
             >
                 <p class="font-medium text-emerald-800 dark:text-emerald-200">Modo cloud</p>
                 <p class="mt-1 text-sm text-emerald-700 dark:text-emerald-300">
-                    Se você estiver usando o gatewayLab em modo cloud, não é necessário configurar o cron; o envio já vem
+                    Se você estiver usando o Getfy em modo cloud, não é necessário configurar o cron; o envio já vem
                     configurado automaticamente.
                 </p>
             </div>

@@ -6,15 +6,18 @@ use App\Models\CheckoutSession;
 use App\Models\Order;
 use App\Models\Product;
 use App\Models\User;
+use App\Services\Checkout\CheckoutAbandonmentMetrics;
+use App\Services\SellerIntegrationVisibility;
 use App\Support\SqlDialect;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
 use Inertia\Response;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class RelatoriosController extends Controller
 {
-    private const PERIODS = ['hoje', 'ontem', '7dias', 'mes', 'ano', 'total'];
+    private const PERIODS = ['hoje', 'ontem', '7dias', 'mes', 'ano', 'total', 'personalizado'];
 
     public function index(Request $request): Response
     {
@@ -24,7 +27,7 @@ class RelatoriosController extends Controller
         }
 
         $tenantId = auth()->user()->tenant_id;
-        [$start, $end] = $this->rangeForPeriod($period);
+        [$start, $end] = $this->resolveDateRange($request, $period);
 
         $ordersQuery = Order::forTenant($tenantId);
         if ($start && $end) {
@@ -51,18 +54,23 @@ class RelatoriosController extends Controller
 
         $formasPagamento = (clone $ordersQuery)
             ->where('status', 'completed')
-            ->selectRaw('gateway, SUM(amount) as total, COUNT(*) as quantidade')
-            ->groupBy('gateway')
+            ->select(['payment_method', 'metadata', 'gateway', 'amount'])
             ->get()
-            ->map(function ($row) {
-                $label = $this->gatewayLabel($row->gateway);
-
+            ->groupBy(fn (Order $o) => $o->paymentMethodReportKey())
+            ->map(function ($rows, $method) {
                 return [
-                    'metodo' => $row->gateway ?? 'outro',
-                    'label' => $label,
-                    'total' => (float) $row->total,
-                    'quantidade' => (int) $row->quantidade,
+                    'metodo' => $method,
+                    'label' => Order::paymentMethodReportLabel($method),
+                    'total' => (float) $rows->sum(fn (Order $o) => (float) $o->amount),
+                    'quantidade' => (int) $rows->count(),
+                    '_sort' => Order::paymentMethodReportSort($method),
                 ];
+            })
+            ->sortBy('_sort')
+            ->map(function (array $row) {
+                unset($row['_sort']);
+
+                return $row;
             })
             ->values()
             ->all();
@@ -104,53 +112,23 @@ class RelatoriosController extends Controller
             $sessionsQuery->where('created_at', '<=', $end);
         }
 
-        $abandonadosVisit = (clone $sessionsQuery)
-            ->where('step', CheckoutSession::STEP_VISIT)
-            ->whereNull('order_id')
-            ->count();
-
-        $abandonadosForm = (clone $sessionsQuery)
-            ->whereIn('step', [CheckoutSession::STEP_FORM_STARTED, CheckoutSession::STEP_FORM_FILLED])
-            ->where('updated_at', '<=', now()->subMinutes(10))
-            ->where(function ($q) {
-                $q->whereNull('order_id')
-                    ->orWhereDoesntHave('order', fn ($orderQuery) => $orderQuery->where('status', 'completed'));
-            })
-            ->count();
+        $metrics = app(CheckoutAbandonmentMetrics::class);
+        $abandonadosTotal = $metrics->countValidAbandoned($tenantId, null, $start, $end);
 
         $converted = (clone $sessionsQuery)
-            ->where('step', CheckoutSession::STEP_CONVERTED)
+            ->whereFunnelConversionCompleted()
             ->count();
 
-        $abandonadosTotal = $abandonadosVisit + $abandonadosForm;
-        $totalSessions = $abandonadosVisit + $abandonadosForm + $converted;
+        $totalSessions = (clone $sessionsQuery)->count();
         $taxaConversao = $totalSessions > 0 ? round((float) $converted / $totalSessions * 100, 1) : 0.0;
 
-        $abandonadosComEmail = CheckoutSession::forTenant($tenantId)
-            ->whereIn('step', [CheckoutSession::STEP_FORM_STARTED, CheckoutSession::STEP_FORM_FILLED])
-            ->where('updated_at', '<=', now()->subMinutes(10))
-            ->where(function ($q) {
-                $q->whereNull('order_id')
-                    ->orWhereDoesntHave('order', fn ($orderQuery) => $orderQuery->where('status', 'completed'));
-            })
-            ->whereNotNull('email')
-            ->where('email', '!=', '');
-        if ($start && $end) {
-            $abandonadosComEmail->whereBetween('created_at', [$start, $end]);
-        } elseif ($start) {
-            $abandonadosComEmail->where('created_at', '>=', $start);
-        } elseif ($end) {
-            $abandonadosComEmail->where('created_at', '<=', $end);
-        }
-        $abandonadosComEmail = $abandonadosComEmail
-            ->with('product:id,name')
-            ->orderByDesc('updated_at')
-            ->limit(20)
-            ->get()
+        $abandonadosComEmail = $metrics
+            ->latestValidAbandonedSessions($tenantId, null, $start, $end, 20)
             ->map(fn ($s) => [
                 'id' => $s->id,
                 'email' => $s->email,
                 'name' => $s->name,
+                'phone' => $s->phone,
                 'product_name' => $s->product?->name ?? '–',
                 'updated_at' => $s->updated_at?->toIso8601String(),
             ])
@@ -159,6 +137,8 @@ class RelatoriosController extends Controller
 
         return Inertia::render('Relatorios/Index', [
             'period' => $period,
+            'date_from' => $period === 'personalizado' ? ($this->normalizeDateQuery($request->query('date_from')) ?? '') : null,
+            'date_to' => $period === 'personalizado' ? ($this->normalizeDateQuery($request->query('date_to')) ?? '') : null,
             'receita_total' => round($receitaTotal, 2),
             'quantidade_vendas' => $quantidadeVendas,
             'ticket_medio' => round($ticketMedio, 2),
@@ -167,14 +147,120 @@ class RelatoriosController extends Controller
             'formas_pagamento' => $formasPagamento,
             'grafico_receita' => $graficoReceita,
             'receita_por_produto' => $receitaPorProduto,
-            'abandonados_visit' => $abandonadosVisit,
-            'abandonados_form' => $abandonadosForm,
+            'abandonados_visit' => 0,
+            'abandonados_form' => 0,
             'abandonados_total' => $abandonadosTotal,
             'taxa_conversao' => $taxaConversao,
             'abandonados_com_email' => $abandonadosComEmail,
             'reembolsos_count' => $reembolsosCount,
             'reembolsos_total' => round($reembolsosTotal, 2),
+            'whatsapp_recovery_available' => $tenantId !== null && (
+                SellerIntegrationVisibility::effectiveForTenant(SellerIntegrationVisibility::UAZAPI, (int) $tenantId)
+                || SellerIntegrationVisibility::effectiveForTenant(SellerIntegrationVisibility::EVOLUTION, (int) $tenantId)
+            ),
         ]);
+    }
+
+    public function exportAbandonedCarts(Request $request): StreamedResponse
+    {
+        $period = $request->query('period', 'hoje');
+        if (! in_array($period, self::PERIODS, true)) {
+            $period = 'hoje';
+        }
+
+        $tenantId = auth()->user()->tenant_id;
+        [$start, $end] = $this->resolveDateRange($request, $period);
+
+        $query = app(CheckoutAbandonmentMetrics::class)
+            ->validAbandonedQuery($tenantId, null, $start, $end)
+            ->with(['product:id,name', 'productOffer:id,name']);
+
+        $filename = 'carrinhos_abandonados_'.date('Y-m-d_His').'.csv';
+
+        return response()->streamDownload(function () use ($query) {
+            $out = fopen('php://output', 'w');
+            fprintf($out, chr(0xEF).chr(0xBB).chr(0xBF));
+            fputcsv($out, [
+                'ID',
+                'Criado em',
+                'Atualizado em',
+                'Etapa',
+                'E-mail',
+                'Nome',
+                'Telefone',
+                'Produto',
+                'Oferta',
+                'Checkout',
+                'utm_source',
+                'utm_medium',
+                'utm_campaign',
+                'Pedido',
+            ], ';');
+
+            $query->chunkById(500, function ($sessions) use ($out) {
+                foreach ($sessions as $s) {
+                    fputcsv($out, [
+                        $s->id,
+                        $s->created_at?->format('d/m/Y H:i'),
+                        $s->updated_at?->format('d/m/Y H:i'),
+                        $s->step,
+                        $s->email ?? '',
+                        $s->name ?? '',
+                        $s->phone ?? '',
+                        $s->product?->name ?? '',
+                        $s->productOffer?->name ?? '',
+                        $s->checkout_slug ?? '',
+                        $s->utm_source ?? '',
+                        $s->utm_medium ?? '',
+                        $s->utm_campaign ?? '',
+                        $s->order_id ? (string) $s->order_id : '',
+                    ], ';');
+                }
+            }, 'id');
+        }, $filename, [
+            'Content-Type' => 'text/csv; charset=UTF-8',
+        ]);
+    }
+
+    private function normalizeDateQuery(mixed $v): ?string
+    {
+        if (! is_string($v)) {
+            return null;
+        }
+        $v = trim($v);
+        if ($v === '' || ! preg_match('/^\d{4}-\d{2}-\d{2}$/', $v)) {
+            return null;
+        }
+
+        return $v;
+    }
+
+    /**
+     * @return array{0: ?string, 1: ?string} [$start, $end] as datetime strings for SQL
+     */
+    private function resolveDateRange(Request $request, string $period): array
+    {
+        if ($period === 'personalizado') {
+            $df = $this->normalizeDateQuery($request->query('date_from'));
+            $dt = $this->normalizeDateQuery($request->query('date_to'));
+            if ($df !== null && $dt !== null) {
+                $start = Carbon::parse($df)->startOfDay();
+                $end = Carbon::parse($dt)->endOfDay();
+                if ($start->gt($end)) {
+                    $tmp = $start->copy();
+                    $start = $end->copy()->startOfDay();
+                    $end = $tmp->endOfDay();
+                }
+
+                return [$start->toDateTimeString(), $end->toDateTimeString()];
+            }
+
+            $now = Carbon::now();
+
+            return [$now->copy()->subDays(6)->startOfDay()->toDateTimeString(), $now->copy()->endOfDay()->toDateTimeString()];
+        }
+
+        return $this->rangeForPeriod($period);
     }
 
     private function rangeForPeriod(string $period): array
@@ -209,25 +295,6 @@ class RelatoriosController extends Controller
         }
 
         return [$start?->toDateTimeString(), $end?->toDateTimeString()];
-    }
-
-    private function gatewayLabel(?string $gateway): string
-    {
-        if ($gateway === null || $gateway === '') {
-            return 'Outro';
-        }
-        $g = strtolower($gateway);
-        if (str_contains($g, 'pix') || in_array($g, ['spacepag'], true)) {
-            return 'Pix';
-        }
-        if (str_contains($g, 'card') || str_contains($g, 'cartao') || str_contains($g, 'cartão') || str_contains($g, 'credito')) {
-            return 'Cartão';
-        }
-        if (str_contains($g, 'boleto')) {
-            return 'Boleto';
-        }
-
-        return ucfirst($gateway);
     }
 
     private function buildGraficoReceita(?int $tenantId, ?string $start, ?string $end): array

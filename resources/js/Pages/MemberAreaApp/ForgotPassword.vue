@@ -30,12 +30,12 @@ const backgroundStyle = () => {
 <template>
     <Head>
         <title>Recuperar senha – {{ product.title || product.name || 'Área de Membros' }}</title>
-        <meta name="theme-color" :content="product.primary_color || '#8A2BE2'" />
+        <meta name="theme-color" :content="product.primary_color || '#0ea5e9'" />
     </Head>
     <div
         class="flex min-h-screen flex-col items-center justify-center bg-cover bg-center px-4 py-12 transition-colors"
         :style="{
-            '--ma-primary': product.primary_color || '#8A2BE2',
+            '--ma-primary': product.primary_color || '#0ea5e9',
             ...backgroundStyle(),
         }"
     >
@@ -79,7 +79,7 @@ const backgroundStyle = () => {
                 <button
                     type="submit"
                     class="w-full rounded-xl px-4 py-3.5 font-semibold text-white shadow-lg transition hover:opacity-95 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-zinc-900 disabled:opacity-50"
-                    :style="{ backgroundColor: product.primary_color || '#8A2BE2' }"
+                    :style="{ backgroundColor: product.primary_color || '#0ea5e9' }"
                     :disabled="form.processing"
                 >
                     {{ form.processing ? 'Enviando…' : 'Enviar link' }}
@@ -90,7 +90,7 @@ const backgroundStyle = () => {
                 <a
                     :href="`/m/${slug}/login`"
                     class="text-sm font-medium transition hover:underline"
-                    :style="{ color: product.primary_color || '#8A2BE2' }"
+                    :style="{ color: product.primary_color || '#0ea5e9' }"
                 >
                     Voltar ao login
                 </a>

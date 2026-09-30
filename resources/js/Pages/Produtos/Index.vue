@@ -5,7 +5,10 @@ import LayoutInfoprodutor from '@/Layouts/LayoutInfoprodutor.vue';
 import Button from '@/components/ui/Button.vue';
 import ProdutosTabs from '@/components/produtos/ProdutosTabs.vue';
 import ProdutoCreateSidebar from '@/components/produtos/ProdutoCreateSidebar.vue';
+import AuroraPageHeader from '@/components/aurora/AuroraPageHeader.vue';
+import AuroraPageSection from '@/components/aurora/AuroraPageSection.vue';
 import { useI18n } from '@/composables/useI18n';
+import { usePanelThemeClasses } from '@/composables/usePanelThemeClasses';
 import {
     MoreVertical,
     Pencil,
@@ -14,17 +17,28 @@ import {
     Package,
     ExternalLink,
 } from 'lucide-vue-next';
+import { htmlToText } from '@/lib/sanitizeHtml';
 
 defineOptions({ layout: LayoutInfoprodutor });
 const { t } = useI18n();
+const { pageClass, mobileCardClass, isKawaii, isAurora } = usePanelThemeClasses();
 
 const props = defineProps({
     produtos: { type: [Array, Object], default: () => [] },
     productTypes: { type: Array, default: () => [] },
     billingTypes: { type: Array, default: () => [] },
+    productCategories: { type: Array, default: () => [] },
+    marketplaceCategories: { type: Array, default: () => [] },
     exchange_rates: { type: Object, default: () => ({ brl_eur: 0.16, brl_usd: 0.18 }) },
     plugin_card_actions: { type: Object, default: () => ({}) },
     plugin_form_sections: { type: Array, default: () => [] },
+    checkout_gateway_ui: {
+        type: Object,
+        default: () => ({
+            card_show_installments: false,
+            platform_card_installments_max: 12,
+        }),
+    },
 });
 
 const produtosList = computed(() => props.produtos?.data ?? (Array.isArray(props.produtos) ? props.produtos : []));
@@ -74,6 +88,12 @@ function duplicate(p) {
     closeMenu();
 }
 
+function resubmit(p) {
+    if (!confirm(`Reenviar "${p.name}" para análise?`)) return;
+    router.post(`/produtos/${p.id}/reenviar-analise`, {}, { preserveScroll: true });
+    closeMenu();
+}
+
 function openDeleteModal(p) {
     closeMenu();
     productToDelete.value = p;
@@ -96,26 +116,29 @@ function pluginActions(productId) {
 </script>
 
 <template>
-    <div class="space-y-6">
-        <div>
-            <h1 class="text-2xl font-bold tracking-tight text-zinc-900 dark:text-white">{{ t('sidebar.products', 'Produtos') }}</h1>
-            <p class="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-                {{ t('products.subtitle', 'Gerencie seus produtos, ofertas e acessos de checkout.') }}
-            </p>
-        </div>
+    <div :class="pageClass">
+        <AuroraPageHeader
+            :title="t('sidebar.products', 'Produtos')"
+            :subtitle="t('products.subtitle', 'Gerencie seus produtos, ofertas e acessos de checkout.')"
+        />
 
         <ProdutosTabs />
-        <div class="flex justify-end">
-            <Button @click="openSidebar">
-                Novo produto
-            </Button>
-        </div>
 
-        <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <AuroraPageSection>
+            <div class="flex justify-end">
+                <Button @click="openSidebar">
+                    Novo produto
+                </Button>
+            </div>
+
+            <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             <div
                 v-for="p in produtosList"
                 :key="p.id"
-                class="group relative flex flex-row gap-3 rounded-xl border border-zinc-200 bg-white p-3 pr-2 shadow-sm transition hover:shadow-md dark:border-zinc-700 dark:bg-zinc-800"
+                :class="[
+                    'group relative flex flex-row gap-3 p-3 pr-2 transition',
+                    mobileCardClass,
+                ]"
             >
                 <!-- Coluna da imagem: clicável → edição -->
                 <Link
@@ -155,6 +178,12 @@ function pluginActions(productId) {
                                     {{ p.billing_type_label ?? 'Pagamento único' }}
                                 </span>
                                 <span
+                                    v-if="p.is_coproduction"
+                                    class="inline-block rounded bg-sky-100 px-1.5 py-0.5 text-xs font-medium text-sky-800 dark:bg-sky-900/40 dark:text-sky-200"
+                                >
+                                    Co-produção{{ p.coproduction_percent != null ? ' · ' + p.coproduction_percent + '%' : '' }}
+                                </span>
+                                <span
                                     :class="[
                                         'inline-block rounded px-2 py-0.5 text-xs font-medium',
                                         p.is_active
@@ -164,6 +193,39 @@ function pluginActions(productId) {
                                 >
                                     {{ p.is_active ? 'Ativo' : 'Inativo' }}
                                 </span>
+                                <span
+                                    v-if="p.approval && p.approval.status !== 'approved'"
+                                    :class="[
+                                        'inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium',
+                                        p.approval.status === 'pending'
+                                            ? 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200'
+                                            : 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300',
+                                    ]"
+                                    :title="p.approval.description"
+                                >
+                                    {{ p.approval.label }}
+                                </span>
+                                <span
+                                    v-else-if="p.approval?.status === 'approved'"
+                                    class="inline-flex items-center rounded-md bg-sky-100 px-2 py-0.5 text-xs font-medium text-sky-800 dark:bg-sky-900/40 dark:text-sky-200"
+                                    :title="p.approval.description"
+                                >
+                                    {{ p.approval.label }}
+                                </span>
+                            </div>
+                            <div
+                                v-if="p.approval?.status === 'pending'"
+                                class="mt-2 rounded-lg border border-amber-200/80 bg-amber-50/90 px-2.5 py-2 text-xs text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100"
+                            >
+                                <p class="font-medium">Checkout offline até a aprovação</p>
+                                <p class="mt-0.5 opacity-90">Você pode editar o produto; o link `/c/…` só vende depois da análise da plataforma.</p>
+                            </div>
+                            <div
+                                v-else-if="p.approval?.status === 'rejected'"
+                                class="mt-2 rounded-lg border border-red-200/80 bg-red-50/90 px-2.5 py-2 text-xs text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-100"
+                            >
+                                <p class="font-medium">Não aprovado — checkout offline</p>
+                                <p class="mt-0.5 opacity-90">Motivo: {{ p.approval.reason || 'Consulte o painel de edição.' }}</p>
                             </div>
                         </div>
                         <div class="relative shrink-0" :data-product-menu="p.id">
@@ -186,9 +248,10 @@ function pluginActions(productId) {
                                     @click="closeMenu"
                                 >
                                     <Pencil class="h-4 w-4 shrink-0" />
-                                    Editar
+                                    {{ p.is_coproduction ? 'Ver produto' : 'Editar' }}
                                 </Link>
                                 <button
+                                    v-if="!p.is_coproduction"
                                     type="button"
                                     class="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
                                     @click="duplicate(p)"
@@ -197,6 +260,15 @@ function pluginActions(productId) {
                                     Duplicar
                                 </button>
                                 <button
+                                    v-if="p.approval?.can_resubmit && !p.is_coproduction"
+                                    type="button"
+                                    class="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-amber-800 hover:bg-amber-50 dark:text-amber-200 dark:hover:bg-amber-950/30"
+                                    @click="resubmit(p)"
+                                >
+                                    Reenviar para análise
+                                </button>
+                                <button
+                                    v-if="!p.is_coproduction"
                                     type="button"
                                     class="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-900/20"
                                     @click="openDeleteModal(p)"
@@ -226,7 +298,7 @@ function pluginActions(productId) {
                         {{ formatBRL(p.price_brl ?? p.price) }}
                     </p>
                     <a
-                        v-if="p.checkout_slug"
+                        v-if="p.checkout_slug && p.available_for_purchase"
                         :href="`/c/${p.checkout_slug}`"
                         target="_blank"
                         rel="noopener noreferrer"
@@ -234,9 +306,29 @@ function pluginActions(productId) {
                     >
                         Ver checkout →
                     </a>
+                    <span
+                        v-else-if="p.checkout_slug && !p.available_for_purchase"
+                        class="mt-0.5 text-xs text-zinc-400 dark:text-zinc-500"
+                        :title="p.approval?.description || 'Checkout offline'"
+                    >
+                        Checkout offline
+                    </span>
                 </div>
             </div>
         </div>
+
+            <div
+                v-if="!produtosList.length"
+                class="flex flex-col items-center justify-center rounded-xl border border-dashed py-16"
+                :class="isAurora ? 'border-[var(--aurora-border)]' : isKawaii ? 'border-[var(--kawaii-border)]' : 'border-zinc-300 dark:border-zinc-700'"
+            >
+                <Package class="h-14 w-14 text-zinc-400 dark:text-zinc-500" />
+                <p class="mt-3 text-zinc-600 dark:text-zinc-400">Nenhum produto ainda.</p>
+                <Button class="mt-4" @click="openSidebar">
+                    Criar primeiro produto
+                </Button>
+            </div>
+        </AuroraPageSection>
 
         <nav
             v-if="produtos?.links?.length > 3"
@@ -257,21 +349,10 @@ function pluginActions(productId) {
                           ? 'text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-700'
                           : 'cursor-not-allowed text-zinc-400 dark:text-zinc-500',
                 ]"
-                v-html="link.label"
+                v-text="htmlToText(link.label)"
                 @click.prevent="link.url && router.visit(link.url, { preserveState: true })"
             />
         </nav>
-
-        <div
-            v-if="!produtosList.length"
-            class="flex flex-col items-center justify-center rounded-xl border border-dashed border-zinc-300 py-16 dark:border-zinc-700"
-        >
-            <Package class="h-14 w-14 text-zinc-400 dark:text-zinc-500" />
-            <p class="mt-3 text-zinc-600 dark:text-zinc-400">Nenhum produto ainda.</p>
-            <Button class="mt-4" @click="openSidebar">
-                Criar primeiro produto
-            </Button>
-        </div>
     </div>
 
     <!-- Modal de confirmação de exclusão -->
@@ -315,8 +396,11 @@ function pluginActions(productId) {
         :open="sidebarOpen"
         :product-types="productTypes"
         :billing-types="billingTypes"
+        :product-categories="productCategories"
+        :marketplace-categories="marketplaceCategories"
         :exchange-rates="exchange_rates"
         :plugin-form-sections="plugin_form_sections"
+        :checkout-gateway-ui="checkout_gateway_ui"
         @close="closeSidebar"
         @success="closeSidebar"
     />

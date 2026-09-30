@@ -5,9 +5,13 @@ namespace App\Http\Controllers;
 use App\Models\BrandingSetting;
 use App\Models\PanelPushSubscription;
 use App\Services\MemberAreaResolver;
+use App\Support\PanelPwaIconUrls;
+use App\Support\PanelPushSettings;
+use App\Support\VapidEnvKeys;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Validation\Rule;
 
 class PanelPwaController extends Controller
 {
@@ -25,63 +29,21 @@ class PanelPwaController extends Controller
             ]);
         }
 
-        $appName = config('getfy.app_name', 'gatewayLab');
+        $appName = config('getfy.app_name', 'Getfy');
         $themeColor = config('getfy.pwa_theme_color');
-        $themeColor = ($themeColor !== null && $themeColor !== '') ? (string) $themeColor : (string) config('getfy.theme_primary', '#8A2BE2');
+        $themeColor = ($themeColor !== null && $themeColor !== '') ? (string) $themeColor : (string) config('getfy.theme_primary', '#0ea5e9');
 
         $brandingVersion = $this->brandingVersionForRequest($request);
 
         $icons = [];
         $addIconVariants = function (string $src, string $sizes) use (&$icons, $brandingVersion): void {
-            $src = $this->withVersion($src, $brandingVersion);
+            $src = PanelPwaIconUrls::withVersion($src, $brandingVersion);
             $icons[] = ['src' => $src, 'sizes' => $sizes, 'type' => 'image/png', 'purpose' => 'any'];
             $icons[] = ['src' => $src, 'sizes' => $sizes, 'type' => 'image/png', 'purpose' => 'maskable'];
         };
 
-        $pwa192 = is_string($v = config('getfy.pwa_icon_192')) ? trim($v) : '';
-        $pwa512 = is_string($v = config('getfy.pwa_icon_512')) ? trim($v) : '';
-        $has192 = $pwa192 !== '';
-        $has512 = $pwa512 !== '';
-
-        if ($has192 || $has512) {
-            if ($has192 && $has512) {
-                $addIconVariants($pwa192, '192x192');
-                $addIconVariants($pwa512, '512x512');
-            } elseif ($has192) {
-                $addIconVariants($pwa192, '192x192');
-                $addIconVariants($pwa192, '512x512');
-            } else {
-                $addIconVariants($pwa512, '512x512');
-                $addIconVariants($pwa512, '192x192');
-            }
-        } else {
-            $iconsDir = public_path('icons');
-            $file192 = is_file($iconsDir.'/icon-192x192.png');
-            $file512 = is_file($iconsDir.'/icon-512x512.png');
-            $fileIcone = is_file($iconsDir.'/icone.png');
-            $icon192Url = url('/icons/icon-192x192.png');
-            $icon512Url = url('/icons/icon-512x512.png');
-            $iconeUrl = url('/icons/icone.png');
-
-            if ($file192) {
-                $addIconVariants($icon192Url, '192x192');
-            }
-            if ($file512) {
-                $addIconVariants($icon512Url, '512x512');
-            }
-            if (empty($icons) && $fileIcone) {
-                $addIconVariants($iconeUrl, '192x192');
-                $addIconVariants($iconeUrl, '512x512');
-            }
-            if (empty($icons)) {
-                $fallbackIcon = (string) asset('icons/icone.png');
-                $addIconVariants($fallbackIcon, '192x192');
-                $addIconVariants($fallbackIcon, '512x512');
-            } elseif ($file512 && ! $file192) {
-                $addIconVariants($icon512Url, '192x192');
-            } elseif ($file192 && ! $file512) {
-                $addIconVariants($icon192Url, '512x512');
-            }
+        foreach (PanelPwaIconUrls::manifestIconSpecs() as $spec) {
+            $addIconVariants($spec['src'], $spec['sizes']);
         }
 
         $manifest = [
@@ -91,44 +53,16 @@ class PanelPwaController extends Controller
             'start_url' => '/login',
             'scope' => '/',
             'display' => 'standalone',
-            'background_color' => '#0D0D14',
+            'background_color' => '#18181b',
             'theme_color' => $themeColor,
             'prefer_related_applications' => false,
             'icons' => $icons,
         ];
 
-        $payload = json_encode($manifest, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-        $etag = '"'.md5($payload).'"';
-
-        if ($request->headers->get('If-None-Match') === $etag) {
-            return response()->json(null, 304)
-                ->header('ETag', $etag)
-                ->header('Cache-Control', 'private, no-store, no-cache, must-revalidate, max-age=0')
-                ->header('Pragma', 'no-cache')
-                ->header('Expires', '0')
-                ->header('Vary', 'Cookie');
-        }
-
-        return response($payload, 200, [
-            'Content-Type' => 'application/manifest+json',
-            'Cache-Control' => 'private, no-store, no-cache, must-revalidate, max-age=0',
-            'Pragma' => 'no-cache',
-            'Expires' => '0',
-            'Vary' => 'Cookie',
-            'ETag' => $etag,
-        ]);
-    }
-
-    private function withVersion(string $src, ?string $v): string
-    {
-        $src = trim($src);
-        if ($src === '' || $v === null || $v === '') {
-            return $src;
-        }
-        if (str_contains($src, 'v=')) {
-            return $src;
-        }
-        return str_contains($src, '?') ? ($src.'&v='.$v) : ($src.'?v='.$v);
+        return response()
+            ->json($manifest)
+            ->header('Content-Type', 'application/manifest+json')
+            ->header('Cache-Control', 'public, max-age=0, must-revalidate');
     }
 
     private function brandingVersionForRequest(Request $request): ?string
@@ -169,21 +103,66 @@ class PanelPwaController extends Controller
 
     public function pushSubscribe(Request $request): JsonResponse
     {
-        $validated = $request->validate([
-            'endpoint' => ['required', 'string', 'max:500'],
-            'keys' => ['required', 'array'],
-            'keys.auth' => ['required', 'string'],
-            'keys.p256dh' => ['required', 'string'],
-        ]);
-
         $user = $request->user();
         if (! $user->canAccessPanel()) {
             return response()->json(['message' => 'Acesso negado.'], 403);
         }
 
+        if (! PanelPushSettings::isPushEnabled()) {
+            return response()->json(['message' => 'Notificações push não configuradas na plataforma.'], 422);
+        }
+
+        $activeProvider = PanelPushSettings::activeProvider();
+
+        if ($activeProvider === PanelPushSettings::PROVIDER_FCM) {
+            $validated = $request->validate([
+                'provider' => ['required', 'string', Rule::in([PanelPushSubscription::PROVIDER_FCM])],
+                'fcm_token' => ['required', 'string', 'max:512'],
+                'device_label' => ['nullable', 'string', 'max:120'],
+            ]);
+
+            $subscription = PanelPushSubscription::updateOrCreate(
+                [
+                    'user_id' => $user->id,
+                    'provider' => PanelPushSubscription::PROVIDER_FCM,
+                ],
+                [
+                    'tenant_id' => $user->tenant_id,
+                    'fcm_token' => $validated['fcm_token'],
+                    'endpoint' => 'fcm:'.$validated['fcm_token'],
+                    'keys' => null,
+                    'user_agent' => $request->userAgent(),
+                    'device_label' => $validated['device_label'] ?? null,
+                ]
+            );
+
+            PanelPushSubscription::query()
+                ->where('user_id', $user->id)
+                ->where('provider', PanelPushSubscription::PROVIDER_VAPID)
+                ->delete();
+
+            return response()->json([
+                'success' => true,
+                'subscribed' => true,
+                'provider' => PanelPushSubscription::PROVIDER_FCM,
+                'subscription_id' => $subscription->id,
+                'updated_at' => $subscription->updated_at?->toISOString(),
+            ]);
+        }
+
+        $validated = $request->validate([
+            'endpoint' => ['required', 'string', 'max:500'],
+            'keys' => ['required', 'array'],
+            'keys.auth' => ['required', 'string'],
+            'keys.p256dh' => ['required', 'string'],
+            'device_label' => ['nullable', 'string', 'max:120'],
+        ]);
+
         $keys = $validated['keys'];
         $keys['auth'] = $this->normalizeBase64KeyForPush((string) ($keys['auth'] ?? ''));
         $keys['p256dh'] = $this->normalizeBase64KeyForPush((string) ($keys['p256dh'] ?? ''));
+
+        $currentVapidPublic = VapidEnvKeys::normalize(config('getfy.pwa.vapid_public'));
 
         $subscription = PanelPushSubscription::updateOrCreate(
             [
@@ -192,15 +171,32 @@ class PanelPwaController extends Controller
             [
                 'user_id' => $user->id,
                 'tenant_id' => $user->tenant_id,
+                'provider' => PanelPushSubscription::PROVIDER_VAPID,
+                'vapid_public_key' => $currentVapidPublic,
+                'fcm_token' => null,
                 'keys' => $keys,
                 'user_agent' => $request->userAgent(),
+                'device_label' => $validated['device_label'] ?? null,
             ]
         );
+
+        PanelPushSubscription::query()
+            ->where('user_id', $user->id)
+            ->where('provider', PanelPushSubscription::PROVIDER_VAPID)
+            ->where('id', '!=', $subscription->id)
+            ->delete();
+
+        PanelPushSubscription::query()
+            ->where('user_id', $user->id)
+            ->where('provider', PanelPushSubscription::PROVIDER_FCM)
+            ->delete();
 
         return response()->json([
             'success' => true,
             'subscribed' => true,
+            'provider' => PanelPushSubscription::PROVIDER_VAPID,
             'subscription_id' => $subscription->id,
+            'vapid_public_key' => $currentVapidPublic,
             'updated_at' => $subscription->updated_at?->toISOString(),
         ]);
     }

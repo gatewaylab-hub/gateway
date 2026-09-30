@@ -1,8 +1,10 @@
 <script setup>
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 import { router, usePage } from '@inertiajs/vue3';
 import LayoutPlatform from '@/Layouts/LayoutPlatform.vue';
 import Button from '@/components/ui/Button.vue';
+import PlatformStepUpModal from '@/components/platform/PlatformStepUpModal.vue';
+import { htmlToText } from '@/lib/sanitizeHtml';
 
 defineOptions({ layout: LayoutPlatform });
 
@@ -17,21 +19,72 @@ const props = defineProps({
         type: Object,
         default: () => ({ withdrawal_status: 'all' }),
     },
+    /** Gateway de saque ativo (ex.: cajupay) — usado para exibir reprocessamento */
+    payout_gateway_active: {
+        type: String,
+        default: '',
+    },
+    /** PIN obrigatório quando o 2FA do admin está desligado */
+    require_manual_approval_pin: {
+        type: Boolean,
+        default: false,
+    },
+    has_manual_approval_pin: {
+        type: Boolean,
+        default: false,
+    },
+    manual_payout_acquirers: {
+        type: Array,
+        default: () => [],
+    },
 });
 
 const withdrawalFilterChips = [
     { withdrawal_status: 'all', label: 'Todos os saques' },
     { withdrawal_status: 'pending', label: 'Pendente' },
     { withdrawal_status: 'paid', label: 'Aprovado' },
+    { withdrawal_status: 'failed', label: 'Falhou (estornado)' },
     { withdrawal_status: 'rejected', label: 'Rejeitado' },
 ];
+
+const originFilterChips = [
+    { origin: 'all', label: 'Todas origens' },
+    { origin: 'api', label: 'Origem API' },
+];
+
+const stepUpOpen = ref(false);
+const stepUpLoading = ref(false);
+const stepUpAction = ref(null);
+const stepUpWithdrawalId = ref(null);
+const stepUpManual = ref(false);
+const stepUpRequirePin = ref(false);
+const stepUpHasExternalPayout = ref(false);
+const stepUpAskAcquirer = ref(false);
 
 function selectWithdrawalFilter(withdrawalStatus) {
     router.get(
         '/plataforma/saques',
-        { withdrawal_status: withdrawalStatus },
+        {
+            withdrawal_status: withdrawalStatus,
+            origin: props.filters?.origin && props.filters.origin !== 'all' ? props.filters.origin : undefined,
+        },
         { preserveState: true, preserveScroll: true, replace: true }
     );
+}
+
+function selectOriginFilter(origin) {
+    router.get(
+        '/plataforma/saques',
+        {
+            withdrawal_status: props.filters?.withdrawal_status ?? 'all',
+            origin: origin === 'all' ? undefined : origin,
+        },
+        { preserveState: true, preserveScroll: true, replace: true }
+    );
+}
+
+function originChipIsActive(origin) {
+    return (props.filters?.origin ?? 'all') === origin;
 }
 
 function withdrawalChipIsActive(ws) {
@@ -43,21 +96,133 @@ function bucketLabel(b) {
     return map[b] || b || '—';
 }
 
-function approveWithdrawal(id, manual = false) {
-    const msg = manual
-        ? 'Marcar como pago manualmente (sem enviar pela API CajuPay)?'
-        : 'Enviar o saque via CajuPay (PIX cadastrado do infoprodutor) e marcar como pago?';
-    if (!confirm(msg)) return;
+function openApproveStepUp(id, manual = false, askAcquirer = false) {
+    stepUpWithdrawalId.value = id;
+    stepUpManual.value = manual;
+    stepUpAction.value = 'approve';
+    stepUpRequirePin.value = Boolean(props.require_manual_approval_pin) && Boolean(props.has_manual_approval_pin);
+    stepUpAskAcquirer.value = Boolean(manual) && Boolean(askAcquirer);
+    stepUpOpen.value = true;
+}
+
+function openRejectStepUp(id, hasExternalPayout = false) {
+    stepUpWithdrawalId.value = id;
+    stepUpAction.value = 'reject';
+    stepUpManual.value = false;
+    stepUpRequirePin.value = false;
+    stepUpHasExternalPayout.value = hasExternalPayout;
+    stepUpAskAcquirer.value = false;
+    stepUpOpen.value = true;
+}
+
+function closeStepUp() {
+    stepUpOpen.value = false;
+    stepUpLoading.value = false;
+}
+
+const totpEnabled = computed(() => Boolean(page.props.auth?.user?.totp_enabled));
+const payoutBarrierMissing = computed(
+    () => !totpEnabled.value && !Boolean(props.has_manual_approval_pin)
+);
+const acquirerOptions = computed(() => {
+    const fromProps = Array.isArray(props.manual_payout_acquirers) ? props.manual_payout_acquirers : [];
+    if (fromProps.length) {
+        return fromProps;
+    }
+    const fromPage = page.props.manual_payout_acquirers;
+    return Array.isArray(fromPage) ? fromPage : [];
+});
+
+const stepUpDescription = computed(() => {
+    if (stepUpAction.value === 'reject' && stepUpHasExternalPayout.value) {
+        return totpEnabled.value
+            ? 'Informe o código 2FA. Se o PIX já foi liquidado no gateway, o estorno local não reverte o pagamento bancário.'
+            : 'Se o PIX já foi liquidado no gateway, o estorno local não reverte o pagamento bancário.';
+    }
+    if (stepUpAction.value === 'reject') {
+        return totpEnabled.value
+            ? 'Informe o código 2FA para autorizar esta ação.'
+            : 'Confirme o cancelamento. O saldo será devolvido ao infoprodutor.';
+    }
+    if (payoutBarrierMissing.value) {
+        return 'Cadastre o 2FA em Meu perfil ou o PIN de operação em Financeiro > Saques. Pelo menos uma barreira é obrigatória para pagar saques.';
+    }
+    if (stepUpManual.value) {
+        if (stepUpAskAcquirer.value) {
+            return totpEnabled.value
+                ? 'Informe a origem do PIX e confirme com 2FA que o pagamento já foi enviado fora do sistema.'
+                : 'Informe a origem do PIX, o PIN de operação e confirme que o pagamento já foi enviado fora do sistema.';
+        }
+        return totpEnabled.value
+            ? 'Confirme com 2FA que o PIX já foi enviado fora do sistema.'
+            : 'Informe o PIN de operação e confirme que o PIX já foi enviado fora do sistema.';
+    }
+    if (stepUpRequirePin.value) {
+        return 'Informe o PIN de operação cadastrado em Financeiro > Saques.';
+    }
+    return 'Informe o código 2FA para autorizar esta ação.';
+});
+
+function onStepUpConfirm(payload) {
+    const id = stepUpWithdrawalId.value;
+    if (!id) return;
+    stepUpLoading.value = true;
+
+    if (stepUpAction.value === 'approve') {
+        if (payoutBarrierMissing.value) {
+            stepUpLoading.value = false;
+            return;
+        }
+        router.post(
+            `/plataforma/financeiro/saques/${id}/aprovar`,
+            {
+                payout_manual: stepUpManual.value,
+                totp_code: payload.totp_code,
+                manual_approval_pin: payload.manual_approval_pin,
+                manual_confirm_external: payload.manual_confirm_external,
+                payout_acquirer: payload.payout_acquirer || undefined,
+            },
+            {
+                preserveScroll: true,
+                onFinish: () => closeStepUp(),
+            }
+        );
+        return;
+    }
+
+    const note =
+        window.prompt(
+            stepUpHasExternalPayout.value
+                ? 'Motivo do cancelamento (opcional). O saldo será devolvido ao infoprodutor.\n\nAtenção: se o PIX já foi liquidado na CajuPay, o estorno local não reverte o pagamento bancário.'
+                : 'Motivo do cancelamento (opcional). O saldo será devolvido ao infoprodutor.'
+        ) || '';
     router.post(
-        `/plataforma/financeiro/saques/${id}/aprovar`,
-        { payout_manual: manual },
-        { preserveScroll: true }
+        `/plataforma/financeiro/saques/${id}/rejeitar`,
+        {
+            admin_note: note,
+            totp_code: payload.totp_code,
+            manual_approval_pin: payload.manual_approval_pin,
+        },
+        {
+            preserveScroll: true,
+            onFinish: () => closeStepUp(),
+        }
     );
 }
 
-function rejectWithdrawal(id) {
-    const note = window.prompt('Motivo da rejeição (opcional). O saldo será devolvido ao infoprodutor.') || '';
-    router.post(`/plataforma/financeiro/saques/${id}/rejeitar`, { admin_note: note }, { preserveScroll: true });
+function reprocessCajuPayWithdrawal(id) {
+    if (
+        !confirm(
+            'Tentar enviar novamente este saque via CajuPay (mesmo valor e chave PIX cadastrada)? Use quando já houver saldo na conta CajuPay.'
+        )
+    ) {
+        return;
+    }
+    router.post(`/plataforma/financeiro/saques/${id}/reprocessar-cajupay`, {}, { preserveScroll: true });
+}
+
+function reconcileCajuPayWithdrawal(id) {
+    router.post(`/plataforma/financeiro/saques/${id}/reconciliar-cajupay`, {}, { preserveScroll: true });
 }
 
 function formatBRL(value) {
@@ -67,15 +232,22 @@ function formatBRL(value) {
 function withdrawalStatusLabel(status) {
     const map = {
         pending: 'Pendente',
+        processing: 'Processando',
         paid: 'Aprovado',
         rejected: 'Rejeitado',
+        failed: 'Falhou (estornado)',
     };
     return map[status] ?? status ?? '—';
 }
 
+function withdrawalAwaitingGateway(w) {
+    return w.status === 'pending' && Boolean(w.payout_external_id);
+}
+
 function withdrawalStatusBadgeClass(status) {
     if (status === 'paid') return 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200';
-    if (status === 'pending') return 'bg-amber-100 text-amber-900 dark:bg-amber-900/30 dark:text-amber-100';
+    if (status === 'pending' || status === 'processing') return 'bg-amber-100 text-amber-900 dark:bg-amber-900/30 dark:text-amber-100';
+    if (status === 'failed') return 'bg-rose-100 text-rose-800 dark:bg-rose-900/40 dark:text-rose-200';
     if (status === 'rejected') return 'bg-zinc-200 text-zinc-800 dark:bg-zinc-700 dark:text-zinc-200';
     return 'bg-zinc-100 text-zinc-800 dark:bg-zinc-800 dark:text-zinc-200';
 }
@@ -90,8 +262,8 @@ const paginationLinks = computed(() => props.withdrawals?.links ?? []);
         <div>
             <h1 class="text-xl font-semibold text-zinc-900 dark:text-white">Saques</h1>
             <p class="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-                Solicitações de saque por status. Em pendentes você pode aprovar (PIX automático ou manual) ou rejeitar (o
-                saldo volta ao infoprodutor).
+                Solicitações de saque por status. Aprove, reprocesse ou cancele — o saldo volta ao infoprodutor quando o saque
+                é cancelado ou falha no gateway.
             </p>
         </div>
 
@@ -135,6 +307,26 @@ const paginationLinks = computed(() => props.withdrawals?.links ?? []);
                     </button>
                 </div>
             </div>
+            <div class="w-full overflow-x-auto [-webkit-overflow-scrolling:touch]">
+                <div class="inline-flex min-w-full flex-wrap gap-2" role="tablist" aria-label="Filtro de origem">
+                    <button
+                        v-for="chip in originFilterChips"
+                        :key="chip.origin"
+                        type="button"
+                        role="tab"
+                        :aria-selected="originChipIsActive(chip.origin)"
+                        :class="[
+                            'inline-flex items-center gap-2 whitespace-nowrap rounded-lg border px-3 py-2 text-sm font-medium transition',
+                            originChipIsActive(chip.origin)
+                                ? 'border-[var(--color-primary)] bg-[var(--color-primary)]/10 text-[var(--color-primary)] dark:bg-[var(--color-primary)]/20'
+                                : 'border-zinc-200 bg-zinc-50 text-zinc-700 hover:border-zinc-300 dark:border-zinc-600 dark:bg-zinc-900/50 dark:text-zinc-200',
+                        ]"
+                        @click="selectOriginFilter(chip.origin)"
+                    >
+                        {{ chip.label }}
+                    </button>
+                </div>
+            </div>
         </div>
 
         <section
@@ -145,9 +337,10 @@ const paginationLinks = computed(() => props.withdrawals?.links ?? []);
             >
                 <p class="font-medium">Pendentes</p>
                 <p class="mt-1 text-sm opacity-95">
-                    O envio do PIX costuma ser <strong>automático</strong> ao solicitar no Financeiro. Use
-                    <strong>Pago (CajuPay)</strong> se o envio automático falhou (linha de erro abaixo) ou para reenviar. Use
-                    <strong>Pago manual</strong> se o pagamento já foi feito por fora.
+                    O envio do PIX costuma ser <strong>automático</strong> ao solicitar no Financeiro. Em
+                    <strong>Aguardando gateway</strong>, use <strong>Reconciliar</strong> (consulta a CajuPay) ou
+                    <strong>Confirmar pago</strong> se o PIX já liquidou lá. Use <strong>Pago manual</strong> só quando
+                    o pagamento foi feito por fora, sem ID no gateway — informe a adquirente (ou conta externa) para o comprovante.
                 </p>
             </div>
             <div class="overflow-x-auto">
@@ -171,7 +364,15 @@ const paginationLinks = computed(() => props.withdrawals?.links ?? []);
                                 <td class="whitespace-nowrap py-3 text-zinc-600 dark:text-zinc-300">
                                     {{ w.created_at ? new Date(w.created_at).toLocaleString('pt-BR') : '—' }}
                                 </td>
-                                <td class="py-3 font-mono text-xs text-zinc-600 dark:text-zinc-300">#{{ w.id }}</td>
+                                <td class="py-3 font-mono text-xs text-zinc-600 dark:text-zinc-300">
+                                    #{{ w.id }}
+                                    <span
+                                        v-if="w.api_application_id"
+                                        class="ml-1 rounded bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-sky-800 dark:bg-sky-900/40 dark:text-sky-200"
+                                    >
+                                        API
+                                    </span>
+                                </td>
                                 <td class="py-3">
                                     <div class="font-medium text-zinc-900 dark:text-white">{{ w.infoprodutor_name }}</div>
                                     <div class="text-xs text-zinc-500">{{ w.infoprodutor_email }}</div>
@@ -191,24 +392,99 @@ const paginationLinks = computed(() => props.withdrawals?.links ?? []);
                                             {{ withdrawalStatusLabel(w.status) }}
                                         </span>
                                         <span
+                                            v-if="withdrawalAwaitingGateway(w)"
+                                            class="text-[10px] font-medium uppercase tracking-wide text-sky-600 dark:text-sky-400"
+                                        >
+                                            Aguardando {{ w.payout_provider || 'gateway' }}
+                                        </span>
+                                        <span
                                             v-if="w.status === 'paid' && w.payout_manual"
                                             class="text-[10px] font-medium uppercase tracking-wide text-violet-600 dark:text-violet-400"
                                         >
-                                            Pago manual
+                                            Pago manual{{ w.payout_acquirer_label ? ` · ${w.payout_acquirer_label}` : '' }}
                                         </span>
                                     </div>
                                 </td>
                                 <td class="py-3 text-right">
-                                    <div v-if="w.status === 'pending'" class="flex flex-wrap justify-end gap-2">
-                                        <Button type="button" size="sm" @click="approveWithdrawal(w.id, false)">
+                                    <div v-if="w.status === 'processing'" class="flex flex-col items-end gap-2">
+                                        <p class="text-xs text-amber-700 dark:text-amber-300">Processando envio PIX…</p>
+                                        <Button
+                                            type="button"
+                                            size="sm"
+                                            variant="secondary"
+                                            @click="openRejectStepUp(w.id, Boolean(w.payout_external_id))"
+                                        >
+                                            Cancelar e estornar
+                                        </Button>
+                                    </div>
+                                    <div
+                                        v-else-if="w.status === 'pending' && withdrawalAwaitingGateway(w)"
+                                        class="flex flex-col items-end gap-2"
+                                    >
+                                        <div class="flex flex-wrap justify-end gap-2">
+                                            <Button
+                                                v-if="w.payout_provider === 'cajupay'"
+                                                type="button"
+                                                size="sm"
+                                                @click="reconcileCajuPayWithdrawal(w.id)"
+                                            >
+                                                Reconciliar
+                                            </Button>
+                                            <Button
+                                                type="button"
+                                                size="sm"
+                                                variant="secondary"
+                                                @click="openApproveStepUp(w.id, true)"
+                                            >
+                                                Confirmar pago
+                                            </Button>
+                                            <Button
+                                                type="button"
+                                                size="sm"
+                                                variant="secondary"
+                                                @click="openRejectStepUp(w.id, true)"
+                                            >
+                                                Cancelar e estornar
+                                            </Button>
+                                        </div>
+                                    </div>
+                                    <div
+                                        v-else-if="w.status === 'pending' && !withdrawalAwaitingGateway(w)"
+                                        class="flex flex-wrap justify-end gap-2"
+                                    >
+                                        <Button
+                                            v-if="payout_gateway_active === 'cajupay'"
+                                            type="button"
+                                            size="sm"
+                                            variant="secondary"
+                                            @click="reprocessCajuPayWithdrawal(w.id)"
+                                        >
+                                            Reprocessar
+                                        </Button>
+                                        <Button type="button" size="sm" @click="openApproveStepUp(w.id, false)">
                                             Pago (CajuPay)
                                         </Button>
-                                        <Button type="button" size="sm" variant="secondary" @click="approveWithdrawal(w.id, true)">
+                                        <Button type="button" size="sm" variant="secondary" @click="openApproveStepUp(w.id, true, true)">
                                             Pago manual
                                         </Button>
-                                        <Button type="button" size="sm" variant="secondary" @click="rejectWithdrawal(w.id)">
-                                            Rejeitar
+                                        <Button
+                                            type="button"
+                                            size="sm"
+                                            variant="secondary"
+                                            @click="openRejectStepUp(w.id, false)"
+                                        >
+                                            Cancelar e estornar
                                         </Button>
+                                    </div>
+                                    <div v-else-if="w.can_download_receipt" class="flex justify-end">
+                                        <a
+                                            :href="`/plataforma/saques/${w.id}/comprovante`"
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            class="inline-flex items-center gap-1 rounded-lg border border-zinc-300 px-2.5 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-600 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                                        >
+                                            Comprovante
+                                        </a>
                                     </div>
                                     <span v-else class="text-xs text-zinc-400">—</span>
                                 </td>
@@ -222,6 +498,29 @@ const paginationLinks = computed(() => props.withdrawals?.links ?? []);
                                     {{ w.payout_last_error }}
                                     <span v-if="w.payout_last_attempt_at" class="ml-2 text-red-700/80 dark:text-red-300/80">
                                         ({{ new Date(w.payout_last_attempt_at).toLocaleString('pt-BR') }})
+                                    </span>
+                                </td>
+                            </tr>
+                            <tr
+                                v-if="withdrawalAwaitingGateway(w) && (w.webhook_last_at || w.reconcile_last_at || w.reconcile_exhausted)"
+                                class="border-t border-sky-100 bg-sky-50/70 dark:border-sky-900/40 dark:bg-sky-950/20"
+                            >
+                                <td colspan="9" class="px-3 py-2 text-xs text-sky-950 dark:text-sky-100">
+                                    <span v-if="w.payout_external_id" class="mr-3">
+                                        <span class="font-medium">ID gateway:</span> {{ w.payout_external_id }}
+                                    </span>
+                                    <span v-if="w.webhook_last_at" class="mr-3">
+                                        <span class="font-medium">Webhook:</span>
+                                        {{ w.webhook_last_event || '—' }} / {{ w.webhook_last_status || '—' }}
+                                        ({{ new Date(w.webhook_last_at).toLocaleString('pt-BR') }})
+                                    </span>
+                                    <span v-if="w.reconcile_last_at" class="mr-3">
+                                        <span class="font-medium">Reconciliação:</span>
+                                        {{ w.reconcile_last_api_status ?? 'null' }}
+                                        ({{ new Date(w.reconcile_last_at).toLocaleString('pt-BR') }})
+                                    </span>
+                                    <span v-if="w.reconcile_exhausted" class="font-medium text-amber-800 dark:text-amber-200">
+                                        Tentativas de reconciliação esgotadas — use Reconciliar ou Confirmar pago.
                                     </span>
                                 </td>
                             </tr>
@@ -253,9 +552,25 @@ const paginationLinks = computed(() => props.withdrawals?.links ?? []);
                           ? 'text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-700'
                           : 'cursor-not-allowed text-zinc-400 dark:text-zinc-500',
                 ]"
-                v-html="link.label"
+                v-text="htmlToText(link.label)"
                 @click.prevent="link.url && router.visit(link.url, { preserveState: true })"
             />
         </nav>
+
+        <PlatformStepUpModal
+            :open="stepUpOpen"
+            :loading="stepUpLoading"
+            :require-totp="totpEnabled"
+            :require-pin="stepUpRequirePin && stepUpAction === 'approve'"
+            :require-external-confirm="stepUpManual"
+            :require-acquirer="Boolean(stepUpAskAcquirer)"
+            :acquirers="acquirerOptions"
+            :title="stepUpAction === 'reject' ? 'Cancelar saque' : stepUpManual ? 'Aprovar manualmente' : 'Aprovar saque'"
+            :description="stepUpDescription"
+            :confirm-label="stepUpAction === 'reject' ? 'Cancelar e estornar' : 'Aprovar'"
+            :confirm-disabled="stepUpAction === 'approve' && payoutBarrierMissing"
+            @close="closeStepUp"
+            @confirm="onStepUpConfirm"
+        />
     </div>
 </template>

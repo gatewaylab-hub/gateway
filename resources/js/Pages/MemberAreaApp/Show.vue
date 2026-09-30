@@ -4,6 +4,9 @@ import { Link } from '@inertiajs/vue3';
 import { ChevronLeft, ChevronRight } from 'lucide-vue-next';
 import MemberAreaAppLayout from '@/Layouts/MemberAreaAppLayout.vue';
 import Button from '@/components/ui/Button.vue';
+import MemberCertificateHighlight from '@/components/member-area/MemberCertificateHighlight.vue';
+import MemberModuleRenewalPix from '@/components/member-area/MemberModuleRenewalPix.vue';
+import { useMemberAreaHref } from '@/composables/useMemberAreaHref';
 
 defineOptions({ layout: MemberAreaAppLayout });
 
@@ -46,16 +49,26 @@ const props = defineProps({
     continue_watching: { type: Array, default: () => [] },
     internal_products: { type: Array, default: () => [] },
     community_enabled: { type: Boolean, default: false },
-    certificate_enabled: { type: Boolean, default: false },
-    can_issue_certificate: { type: Boolean, default: false },
     base_url: { type: String, default: '' },
     slug: { type: String, required: true },
 });
+
+const { href } = useMemberAreaHref(props.slug, props.base_url);
 
 const hero = props.config?.hero ?? {};
 const heroDesktopBg = hero.image_url_desktop || hero.image_url || null;
 const heroMobileBg = hero.image_url_mobile || hero.image_url_desktop || hero.image_url || null;
 const heroGradient = 'linear-gradient(135deg, var(--ma-primary) 0%, #27272a 100%)';
+
+function checkoutHref(item) {
+    if (item?.checkout_url) {
+        return item.checkout_url;
+    }
+    if (item?.checkout_slug) {
+        return `/c/${item.checkout_slug}`;
+    }
+    return '#';
+}
 
 </script>
 
@@ -95,6 +108,8 @@ const heroGradient = 'linear-gradient(135deg, var(--ma-primary) 0%, #27272a 100%
             </div>
         </section>
 
+        <MemberCertificateHighlight :slug="slug" />
+
         <!-- Continuar assistindo (carrossel: um item por seção) -->
         <section v-if="continue_watching?.length" class="space-y-4">
             <div class="flex items-center justify-between gap-2">
@@ -125,7 +140,7 @@ const heroGradient = 'linear-gradient(135deg, var(--ma-primary) 0%, #27272a 100%
                 <Link
                     v-for="item in continue_watching"
                     :key="item.lesson_id"
-                    :href="item.module_id ? `/m/${slug}/modulo/${item.module_id}?aula=${item.lesson_id}` : `/m/${slug}/aula/${item.lesson_id}`"
+                    :href="item.module_id ? `${href(`/modulo/${item.module_id}`)}?aula=${item.lesson_id}` : href(`/aula/${item.lesson_id}`)"
                     class="flex w-64 shrink-0 items-center gap-4 rounded-xl border border-zinc-700 bg-zinc-800/50 p-4 transition hover:bg-zinc-800"
                 >
                     <div class="relative h-14 w-24 shrink-0 overflow-hidden rounded-lg bg-zinc-700">
@@ -179,7 +194,7 @@ const heroGradient = 'linear-gradient(135deg, var(--ma-primary) 0%, #27272a 100%
                     <template v-for="mod in section.modules" :key="mod.id">
                         <Link
                             v-if="!mod.is_locked"
-                            :href="`/m/${slug}/modulo/${mod.id}`"
+                            :href="href(`/modulo/${mod.id}`)"
                             class="flex w-64 shrink-0 flex-col rounded-xl overflow-hidden bg-zinc-800/50 text-left transition hover:bg-zinc-800"
                         >
                             <div :class="[(section.cover_mode === 'horizontal' ? 'aspect-video' : 'aspect-[2/3]'), 'relative w-full bg-zinc-700 flex items-center justify-center overflow-hidden']">
@@ -192,7 +207,8 @@ const heroGradient = 'linear-gradient(135deg, var(--ma-primary) 0%, #27272a 100%
                         </Link>
                         <div
                             v-else
-                            class="flex w-64 shrink-0 cursor-not-allowed flex-col rounded-xl overflow-hidden bg-zinc-800/30 text-left opacity-70"
+                            class="flex w-64 shrink-0 flex-col overflow-hidden rounded-xl bg-zinc-800/30 text-left opacity-90"
+                            :class="mod.can_renew ? '' : 'cursor-not-allowed opacity-70'"
                         >
                             <div :class="[(section.cover_mode === 'horizontal' ? 'aspect-video' : 'aspect-[2/3]'), 'relative w-full bg-zinc-700 flex items-center justify-center overflow-hidden']">
                                 <img v-if="mod.thumbnail" :src="mod.thumbnail" :alt="mod.title" class="absolute inset-0 h-full w-full object-cover" />
@@ -201,6 +217,12 @@ const heroGradient = 'linear-gradient(135deg, var(--ma-primary) 0%, #27272a 100%
                                 <div class="absolute inset-x-0 bottom-0 px-3 pb-3 pt-8">
                                     <p class="truncate text-base font-medium text-white">{{ mod.title }}</p>
                                     <p v-if="mod.lock_message" class="mt-1 text-xs text-white/80">{{ mod.lock_message }}</p>
+                                    <MemberModuleRenewalPix
+                                        v-if="mod.can_renew"
+                                        :slug="slug"
+                                        :module="mod"
+                                        compact
+                                    />
                                 </div>
                             </div>
                         </div>
@@ -215,10 +237,19 @@ const heroGradient = 'linear-gradient(135deg, var(--ma-primary) 0%, #27272a 100%
                         :href="(!mod.has_access && mod.access_type === 'paid') ? (mod.related_product?.checkout_url || `/c/${mod.related_product?.checkout_slug}`) : `/m/${mod.related_product?.member_area_slug ?? mod.related_product?.checkout_slug}`"
                         :target="(!mod.has_access && mod.access_type === 'paid') ? '_blank' : undefined"
                         :rel="(!mod.has_access && mod.access_type === 'paid') ? 'noopener' : undefined"
-                        class="flex w-64 shrink-0 flex-col rounded-xl overflow-hidden bg-zinc-800/50 text-left transition hover:bg-zinc-800"
+                        :class="[
+                            'flex w-64 shrink-0 flex-col rounded-xl overflow-hidden bg-zinc-800/50 text-left transition hover:bg-zinc-800',
+                            (!mod.has_access && mod.access_type === 'paid') ? 'touch-manipulation' : '',
+                        ]"
                     >
                         <div :class="[(section.cover_mode === 'horizontal' ? 'aspect-video' : 'aspect-[2/3]'), 'relative w-full bg-zinc-700 flex items-center justify-center overflow-hidden']">
-                            <img v-if="mod.related_product?.image_url || mod.thumbnail" :src="mod.related_product?.image_url || mod.thumbnail" :alt="mod.title" class="absolute inset-0 h-full w-full object-cover" />
+                            <img
+                                v-if="mod.thumbnail || mod.related_product?.image_url"
+                                :key="`${mod.id}-${mod.thumbnail || ''}-${mod.related_product?.image_url || ''}`"
+                                :src="mod.thumbnail || mod.related_product?.image_url"
+                                :alt="mod.title"
+                                class="absolute inset-0 h-full w-full object-cover"
+                            />
                             <svg v-else class="h-12 w-12 text-zinc-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14" /></svg>
                             <div class="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/85 to-transparent px-3 pb-3 pt-8">
                                 <p class="truncate text-base font-medium text-white">{{ mod.title }}</p>
@@ -266,35 +297,27 @@ const heroGradient = 'linear-gradient(135deg, var(--ma-primary) 0%, #27272a 100%
                         <p class="font-medium truncate">{{ ip.name }}</p>
                         <Link
                             v-if="ip.has_access"
-                            :href="`/m/${slug}/loja`"
+                            :href="href('/loja')"
                             class="mt-2 inline-block text-sm text-[var(--ma-primary)] hover:underline"
                         >
                             Acessar
                         </Link>
-                        <a
+                        <Button
                             v-else
-                            :href="`/c/${ip.checkout_slug}`"
+                            as="a"
+                            :href="checkoutHref(ip)"
                             target="_blank"
                             rel="noopener"
-                            class="mt-2 inline-block"
+                            size="sm"
+                            class="mt-2 touch-manipulation"
                         >
-                            <Button size="sm">Comprar</Button>
-                        </a>
+                            Comprar
+                        </Button>
                     </div>
                 </div>
             </div>
         </section>
 
-        <!-- Certificado -->
-        <section v-if="certificate_enabled && can_issue_certificate" class="flex flex-wrap gap-4">
-            <Link
-                :href="`/m/${slug}/certificado`"
-                class="inline-flex items-center gap-2 rounded-xl border border-[var(--ma-primary)] bg-[var(--ma-primary)]/20 px-4 py-3 text-[var(--ma-primary)] transition hover:bg-[var(--ma-primary)]/30"
-            >
-                <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4M7.835 4.697a3.42 3.42 0 001.946-.806 3.42 3.42 0 014.438 0 3.42 3.42 0 001.946.806 3.42 3.42 0 013.138 3.138 3.42 3.42 0 00.806 1.946 3.42 3.42 0 010 4.438 3.42 3.42 0 00-.806 1.946 3.42 3.42 0 01-3.138 3.138 3.42 3.42 0 00-1.946.806 3.42 3.42 0 01-4.438 0 3.42 3.42 0 00-1.946-.806 3.42 3.42 0 01-3.138-3.138 3.42 3.42 0 00-.806-1.946 3.42 3.42 0 010-4.438 3.42 3.42 0 00.806-1.946 3.42 3.42 0 013.138-3.138z" /></svg>
-                Emitir certificado
-            </Link>
-        </section>
         </div>
     </div>
 </template>

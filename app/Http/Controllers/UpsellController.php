@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Events\OrderCompleted;
 use App\Events\PixGenerated;
+use App\Models\CheckoutSession;
 use App\Models\Order;
 use App\Models\OrderItem;
 use App\Models\Product;
@@ -13,7 +14,9 @@ use App\Models\Subscription;
 use App\Models\SubscriptionPlan;
 use App\Models\User;
 use App\Services\AccessEmailService;
+use App\Services\MinimumChargeService;
 use App\Services\PaymentService;
+use App\Support\SafeUrl;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
@@ -125,8 +128,11 @@ class UpsellController extends Controller
     {
         $config = $this->getOrderCheckoutConfig($order);
         $url = $config['redirect_after_purchase'] ?? null;
-        if (! empty($url) && is_string($url)) {
-            return $url;
+        if (is_string($url) && trim($url) !== '') {
+            $normalized = SafeUrl::normalizeCheckoutRedirect($url);
+            if ($normalized !== null) {
+                return $normalized;
+            }
         }
         $next = ($order->user_id && User::find($order->user_id)) ? 'member-area' : 'login';
 
@@ -147,30 +153,57 @@ class UpsellController extends Controller
         $orderId = $request->integer('order_id', 0);
         $conversionPixels = Product::defaultConversionPixels();
         $orderAmount = 0;
+        $checkoutSessionToken = '';
+        $orderStatus = null;
+        $purchaseConfirmed = false;
         if ($orderId > 0) {
             $order = Order::with('product')->find($orderId);
+            $checkoutSessionToken = (string) (CheckoutSession::query()
+                ->where('order_id', $orderId)
+                ->orderByDesc('id')
+                ->value('session_token') ?? '');
+            if ($order) {
+                $orderStatus = (string) $order->status;
+                $purchaseConfirmed = $order->status === 'completed';
+            }
             if ($order && $order->product) {
                 $conversionPixels = AffiliateConversionPixels::forOrder($order);
                 $orderAmount = (float) $order->amount;
-                if ($order->product->type === Product::TYPE_AREA_MEMBROS_EXTERNA) {
+                if (! $purchaseConfirmed) {
+                    $showButton = false;
+                    $subtitle = $orderStatus === 'rejected'
+                        ? 'Seu pagamento não foi aprovado. Nenhuma cobrança foi concluída.'
+                        : 'Seu pagamento ainda está em processamento. Você receberá o acesso por e-mail quando for confirmado.';
+                } elseif ($order->product->type === Product::TYPE_AREA_MEMBROS_EXTERNA) {
                     // Entrega externa: não exibir botão de acesso interno.
                     $showButton = false;
                     $subtitle = 'Pagamento confirmado. Em instantes você receberá o acesso à área de membros.';
                 }
-                if ($order->product->type === Product::TYPE_LINK_PAGAMENTO) {
+                if ($purchaseConfirmed && $order->product->type === Product::TYPE_LINK_PAGAMENTO) {
                     $slug = $order->getCheckoutSlug();
                     $redirectUrl = $slug !== '' ? route('checkout.show', ['slug' => $slug]) : url('/');
                     $redirectLabel = 'Voltar';
                     $subtitle = 'Seu pedido foi registrado. Você pode voltar para o site agora.';
                 }
-                if ($order->product->type !== Product::TYPE_AREA_MEMBROS_EXTERNA) {
-                    $accessLink = $accessEmailService->getAccessLinkForOrder($order);
+                if ($purchaseConfirmed && $order->product->type !== Product::TYPE_AREA_MEMBROS_EXTERNA) {
+                    try {
+                        $accessLink = $accessEmailService->getAccessLinkForOrder($order);
+                    } catch (\Throwable $e) {
+                        report($e);
+                        $accessLink = '';
+                    }
                     if ($accessLink !== '') {
                         $redirectUrl = $accessLink;
-                        $redirectLabel = $order->product->type === Product::TYPE_LINK
-                            ? 'Acessar conteúdo'
-                            : 'Acessar área de membros';
-                        $subtitle = 'Seu pedido foi registrado. Acesse o conteúdo pelo link abaixo.';
+                        if ($order->product->type === Product::TYPE_LINK) {
+                            $redirectLabel = 'Acessar conteúdo';
+                            $subtitle = 'Seu pedido foi registrado. Acesse o conteúdo pelo link abaixo.';
+                        } elseif ($order->product->type === Product::TYPE_AREA_MEMBROS) {
+                            $redirectLabel = 'Fazer login';
+                            $subtitle = 'Seu pedido foi registrado. Faça login para ver todos os seus produtos em Minha área.';
+                        } else {
+                            $redirectLabel = 'Acessar';
+                            $subtitle = 'Seu pedido foi registrado. Acesse pelo link abaixo.';
+                        }
                     }
                 }
             }
@@ -181,9 +214,12 @@ class UpsellController extends Controller
             'redirect_label' => $redirectLabel,
             'subtitle' => $subtitle,
             'show_button' => $showButton,
-            'conversion_pixels' => $conversionPixels,
+            'conversion_pixels' => $purchaseConfirmed ? $conversionPixels : Product::defaultConversionPixels(),
             'order_id' => $orderId > 0 ? $orderId : null,
-            'order_amount' => $orderAmount,
+            'order_amount' => $purchaseConfirmed ? $orderAmount : 0,
+            'order_status' => $orderStatus,
+            'purchase_confirmed' => $purchaseConfirmed,
+            'checkout_session_token' => $checkoutSessionToken,
         ]);
     }
 
@@ -204,7 +240,7 @@ class UpsellController extends Controller
             if ($productId === '') {
                 continue;
             }
-            $product = Product::where('id', $productId)->where('is_active', true)->first();
+            $product = Product::where('id', $productId)->availableForPurchase()->first();
             if (! $product) {
                 continue;
             }
@@ -446,13 +482,14 @@ class UpsellController extends Controller
                 continue;
             }
 
-            $product = Product::where('id', $productId)->where('is_active', true)->first();
+            $product = Product::where('id', $productId)->availableForPurchase()->first();
             $offer = $offerId > 0 ? ProductOffer::where('id', $offerId)->where('product_id', $productId)->first() : null;
             if (! $product) {
                 continue;
             }
 
             $amount = $offer ? (float) $offer->price : (float) $product->price;
+            app(MinimumChargeService::class)->assertPlatformCheckout($amount, (int) $order->tenant_id);
             $checkoutSlug = $offer && $offer->checkout_slug ? $offer->checkout_slug : $product->checkout_slug;
 
             $newOrder = Order::create([

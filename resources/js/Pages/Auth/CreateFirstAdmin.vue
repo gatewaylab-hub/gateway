@@ -26,8 +26,8 @@ function submit() {
         <div class="flex w-full flex-col justify-center px-8 py-12 lg:w-[30%] lg:min-w-[360px]">
             <div class="text-center">
                 <img
-                    src="/icons/icone.png"
-                    alt="gatewayLab"
+                    src="/images/logo.png"
+                    alt="Getfy"
                     class="mx-auto mb-10 h-12 w-auto object-contain"
                 />
                 <h1 class="text-2xl font-bold text-zinc-900 dark:text-white">Criar administrador</h1>
@@ -43,7 +43,7 @@ function submit() {
                         type="text"
                         autocomplete="name"
                         required
-                        class="mt-1.5 block w-full rounded-xl border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-900 px-4 py-3 text-zinc-900 dark:text-white placeholder-zinc-500 shadow-sm transition hover:border-[#8A2BE2] focus:border-[#8A2BE2] focus:outline-none focus:ring-2 focus:ring-[#8A2BE2]/30"
+                        class="mt-1.5 block w-full rounded-xl border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-900 px-4 py-3 text-zinc-900 dark:text-white placeholder-zinc-500 shadow-sm transition hover:border-[#0050fc] focus:border-[#0050fc] focus:outline-none focus:ring-2 focus:ring-[#0050fc]/30"
                         placeholder="Seu nome"
                     />
                     <p v-if="form.errors.name" class="mt-1.5 text-sm text-red-600 dark:text-red-400">{{ form.errors.name }}</p>
@@ -56,7 +56,7 @@ function submit() {
                         type="email"
                         autocomplete="email"
                         required
-                        class="mt-1.5 block w-full rounded-xl border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-900 px-4 py-3 text-zinc-900 dark:text-white placeholder-zinc-500 shadow-sm transition hover:border-[#8A2BE2] focus:border-[#8A2BE2] focus:outline-none focus:ring-2 focus:ring-[#8A2BE2]/30"
+                        class="mt-1.5 block w-full rounded-xl border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-900 px-4 py-3 text-zinc-900 dark:text-white placeholder-zinc-500 shadow-sm transition hover:border-[#0050fc] focus:border-[#0050fc] focus:outline-none focus:ring-2 focus:ring-[#0050fc]/30"
                         placeholder="seu@email.com"
                     />
                     <p v-if="form.errors.email" class="mt-1.5 text-sm text-red-600 dark:text-red-400">{{ form.errors.email }}</p>
@@ -70,12 +70,12 @@ function submit() {
                             :type="showPassword ? 'text' : 'password'"
                             autocomplete="new-password"
                             required
-                            class="block w-full rounded-xl border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-900 py-3 pl-4 pr-12 text-zinc-900 dark:text-white placeholder-zinc-500 shadow-sm transition hover:border-[#8A2BE2] focus:border-[#8A2BE2] focus:outline-none focus:ring-2 focus:ring-[#8A2BE2]/30"
+                            class="block w-full rounded-xl border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-900 py-3 pl-4 pr-12 text-zinc-900 dark:text-white placeholder-zinc-500 shadow-sm transition hover:border-[#0050fc] focus:border-[#0050fc] focus:outline-none focus:ring-2 focus:ring-[#0050fc]/30"
                             placeholder="••••••••"
                         />
                         <button
                             type="button"
-                            class="absolute right-3 top-1/2 -translate-y-1/2 rounded p-1.5 text-zinc-500 transition hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200 focus:outline-none focus:ring-2 focus:ring-[#8A2BE2]/30"
+                            class="absolute right-3 top-1/2 -translate-y-1/2 rounded p-1.5 text-zinc-500 transition hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200 focus:outline-none focus:ring-2 focus:ring-[#0050fc]/30"
                             :aria-label="showPassword ? 'Ocultar senha' : 'Mostrar senha'"
                             @click="showPassword = !showPassword"
                         >
@@ -94,12 +94,12 @@ function submit() {
                             :type="showPasswordConfirmation ? 'text' : 'password'"
                             autocomplete="new-password"
                             required
-                            class="block w-full rounded-xl border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-900 py-3 pl-4 pr-12 text-zinc-900 dark:text-white placeholder-zinc-500 shadow-sm transition hover:border-[#8A2BE2] focus:border-[#8A2BE2] focus:outline-none focus:ring-2 focus:ring-[#8A2BE2]/30"
+                            class="block w-full rounded-xl border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-900 py-3 pl-4 pr-12 text-zinc-900 dark:text-white placeholder-zinc-500 shadow-sm transition hover:border-[#0050fc] focus:border-[#0050fc] focus:outline-none focus:ring-2 focus:ring-[#0050fc]/30"
                             placeholder="••••••••"
                         />
                         <button
                             type="button"
-                            class="absolute right-3 top-1/2 -translate-y-1/2 rounded p-1.5 text-zinc-500 transition hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200 focus:outline-none focus:ring-2 focus:ring-[#8A2BE2]/30"
+                            class="absolute right-3 top-1/2 -translate-y-1/2 rounded p-1.5 text-zinc-500 transition hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200 focus:outline-none focus:ring-2 focus:ring-[#0050fc]/30"
                             :aria-label="showPasswordConfirmation ? 'Ocultar senha' : 'Mostrar senha'"
                             @click="showPasswordConfirmation = !showPasswordConfirmation"
                         >
@@ -108,7 +108,7 @@ function submit() {
                         </button>
                     </div>
                 </div>
-                <Button type="submit" class="w-full !bg-[#8A2BE2] !text-white hover:!opacity-90" :disabled="form.processing">
+                <Button type="submit" class="w-full !bg-[#0050fc] !text-zinc-900 hover:!opacity-90" :disabled="form.processing">
                     {{ form.processing ? 'Criando…' : 'Criar e entrar' }}
                 </Button>
             </form>

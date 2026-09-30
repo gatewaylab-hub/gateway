@@ -7,6 +7,8 @@ import SpedySidebar from '@/components/integrations/SpedySidebar.vue';
 import UtmifySidebar from '@/components/integrations/UtmifySidebar.vue';
 import WebhookSidebar from '@/components/integrations/WebhookSidebar.vue';
 import CademiSidebar from '@/components/integrations/CademiSidebar.vue';
+import UazapiSidebar from '@/components/integrations/UazapiSidebar.vue';
+import EvolutionSidebar from '@/components/integrations/EvolutionSidebar.vue';
 import { Zap } from 'lucide-vue-next';
 import { useI18n } from '@/composables/useI18n';
 
@@ -22,8 +24,8 @@ const APPS_BASE = [
     },
     {
         id: 'utmify',
-        name: 'UTMfy',
-        description: t('integrations.utmify.description', 'Rastreie vendas e envie eventos para a UTMfy. Requer apenas a chave de API.'),
+        name: 'UTMIFY',
+        description: t('integrations.utmify.description', 'Rastreie vendas e envie eventos para a UTMIFY. Requer apenas a chave de API.'),
         image: 'images/integrations/utmify.jpg',
     },
     {
@@ -38,6 +40,18 @@ const APPS_BASE = [
         description: t('integrations.cademi.description', 'Área de membros externa. Após a compra, sincronize o aluno e conceda acesso na Cademí.'),
         image: 'images/integrations/cademi.png',
     },
+    {
+        id: 'uazapi',
+        name: 'Uazapi',
+        description: t('integrations.uazapi.description', 'Recupere carrinhos abandonados e PIX pendentes pelo seu WhatsApp via Uazapi.'),
+        image: 'images/integrations/uazapi.avif',
+    },
+    {
+        id: 'evolution',
+        name: 'Evolution API',
+        description: t('integrations.evolution.description', 'Recupere carrinhos abandonados e PIX pendentes pelo WhatsApp via Evolution API.'),
+        image: 'images/integrations/Evolution.svg',
+    },
 ];
 
 const props = defineProps({
@@ -46,11 +60,15 @@ const props = defineProps({
     utmify_integrations: { type: Array, default: () => [] },
     spedy_integrations: { type: Array, default: () => [] },
     cademi_integrations: { type: Array, default: () => [] },
+    uazapi: { type: Object, default: null },
+    evolution: { type: Object, default: null },
     products: { type: Array, default: () => [] },
+    visible_integrations: { type: Array, default: () => ['webhook', 'utmify', 'spedy', 'cademi', 'uazapi', 'evolution'] },
 });
 
-const APPS = computed(() =>
-    APPS_BASE.map((app) => {
+const APPS = computed(() => {
+    const allowed = new Set(props.visible_integrations || []);
+    return APPS_BASE.filter((app) => allowed.has(app.id)).map((app) => {
         if (app.id === 'utmify') {
             const hasActive = (props.utmify_integrations || []).some(
                 (i) => i.configured && i.is_active
@@ -78,14 +96,28 @@ const APPS = computed(() =>
                 status: hasActive ? 'active' : undefined,
             };
         }
+        if (app.id === 'uazapi') {
+            return {
+                ...app,
+                status: props.uazapi?.configured && props.uazapi?.is_active ? 'active' : undefined,
+            };
+        }
+        if (app.id === 'evolution') {
+            return {
+                ...app,
+                status: props.evolution?.configured && props.evolution?.is_active ? 'active' : undefined,
+            };
+        }
         return app;
-    })
-);
+    });
+});
 
 const webhookSidebarOpen = ref(false);
 const utmifySidebarOpen = ref(false);
 const spedySidebarOpen = ref(false);
 const cademiSidebarOpen = ref(false);
+const uazapiSidebarOpen = ref(false);
+const evolutionSidebarOpen = ref(false);
 
 function openWebhookSidebar() {
     webhookSidebarOpen.value = true;
@@ -119,6 +151,24 @@ function closeCademiSidebar() {
     cademiSidebarOpen.value = false;
 }
 
+function openUazapiSidebar() {
+    uazapiSidebarOpen.value = true;
+}
+
+function closeUazapiSidebar() {
+    uazapiSidebarOpen.value = false;
+    router.reload({ only: ['uazapi'] });
+}
+
+function openEvolutionSidebar() {
+    evolutionSidebarOpen.value = true;
+}
+
+function closeEvolutionSidebar() {
+    evolutionSidebarOpen.value = false;
+    router.reload({ only: ['evolution'] });
+}
+
 function onWebhookSaved() {
     router.reload();
 }
@@ -144,6 +194,10 @@ function onAppClick(app) {
         openSpedySidebar();
     } else if (app.id === 'cademi') {
         openCademiSidebar();
+    } else if (app.id === 'uazapi') {
+        openUazapiSidebar();
+    } else if (app.id === 'evolution') {
+        openEvolutionSidebar();
     }
 }
 </script>
@@ -158,9 +212,9 @@ function onAppClick(app) {
                 </h2>
             </div>
             <p class="mb-6 text-sm text-zinc-600 dark:text-zinc-400">
-                {{ t('integrations.subtitle', 'Conecte sua plataforma com sistemas externos via webhooks e outras integrações. Os gateways de pagamento são configurados no painel da plataforma (operador).') }}
+                {{ t('integrations.subtitle', 'Conecte sua plataforma com sistemas externos via webhooks e outras integrações.') }}
             </p>
-            <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+            <div v-if="APPS.length" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                 <AppCard
                     v-for="app in APPS"
                     :key="app.id"
@@ -168,6 +222,9 @@ function onAppClick(app) {
                     @click="onAppClick(app)"
                 />
             </div>
+            <p v-else class="rounded-xl border border-dashed border-zinc-300 bg-zinc-50 px-4 py-8 text-center text-sm text-zinc-500 dark:border-zinc-600 dark:bg-zinc-800/50 dark:text-zinc-400">
+                Nenhuma integração está disponível para esta conta no momento.
+            </p>
         </section>
 
         <WebhookSidebar
@@ -198,6 +255,16 @@ function onAppClick(app) {
             :products="products"
             @close="closeCademiSidebar"
             @saved="onCademiSaved"
+        />
+        <UazapiSidebar
+            :open="uazapiSidebarOpen"
+            :products="products"
+            @close="closeUazapiSidebar"
+        />
+        <EvolutionSidebar
+            :open="evolutionSidebarOpen"
+            :products="products"
+            @close="closeEvolutionSidebar"
         />
     </div>
 </template>

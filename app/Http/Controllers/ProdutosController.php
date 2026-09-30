@@ -8,32 +8,59 @@ use App\Events\ProductDeleted;
 use App\Events\ProductDuplicated;
 use App\Events\ProductIndexLoading;
 use App\Events\ProductUpdated;
+use App\Gateways\GatewayRegistry;
+use App\Http\Controllers\Concerns\LogsSellerActivity;
 use App\Models\CademiIntegration;
+use App\Models\GatewayCredential;
 use App\Models\Product;
 use App\Models\ProductAffiliateEnrollment;
 use App\Models\ProductCoproducer;
 use App\Models\ProductOffer;
 use App\Models\ProductOrderBump;
+use App\Models\ShippingStore;
 use App\Models\SubscriptionPlan;
 use App\Models\User;
+use App\Services\MemberAccessGrantService;
+use App\Services\MinimumChargeService;
 use App\Services\PaymentService;
+use App\Services\PhysicalProductAccess;
+use App\Services\PlatformCardInstallments;
+use App\Services\ProductApprovalService;
+use App\Services\SellerActivityLogService;
+use App\Services\SellerIntegrationVisibility;
 use App\Services\StorageService;
 use App\Services\TeamAccessService;
+use App\Support\CardInstallments;
+use App\Support\HtmlSanitizer;
+use App\Support\MoneyDecimal;
+use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Inertia\Inertia;
 use Inertia\Response;
+use InvalidArgumentException;
 
 class ProdutosController extends Controller
 {
-    private const TYPES = [
-        Product::TYPE_APLICATIVO,
-        Product::TYPE_AREA_MEMBROS,
-        Product::TYPE_AREA_MEMBROS_EXTERNA,
-        Product::TYPE_LINK,
-        Product::TYPE_LINK_PAGAMENTO,
-    ];
+    use LogsSellerActivity;
+
+    /**
+     * @return list<string>
+     */
+    private static function allowedProductTypes(?Product $existing = null): array
+    {
+        $types = [
+            Product::TYPE_ANUNCIO,
+        ];
+
+        // Manter tipos legados apenas ao editar produto já existente
+        if ($existing !== null && $existing->type && $existing->type !== Product::TYPE_ANUNCIO) {
+            $types[] = $existing->type;
+        }
+
+        return array_values(array_unique($types));
+    }
 
     private const BILLING_TYPES = [
         Product::BILLING_ONE_TIME,
@@ -42,16 +69,53 @@ class ProdutosController extends Controller
 
     public function index(Request $request): Response
     {
-        $tenantId = auth()->user()->tenant_id;
+        $user = auth()->user();
+        $tenantId = $user->tenant_id;
         $rates = config('products.rates', ['brl_eur' => 0.16, 'brl_usd' => 0.18]);
         $query = Product::forTenant($tenantId)->orderBy('name');
-        if (auth()->user()->isTeam()) {
-            $allowed = app(TeamAccessService::class)->allowedProductIdsFor(auth()->user());
+        if ($user->isTeam()) {
+            $allowed = app(TeamAccessService::class)->allowedProductIdsFor($user);
             $query->whereIn('id', $allowed ?: ['__none__']);
         }
-        $products = $query->paginate(20)->withQueryString()->through(fn (Product $p) => $this->productToArray($p, $rates));
 
-        $productTypes = collect(Product::typeConfig())->map(fn ($config, $value) => [
+        $coproIds = [];
+        $coproPercents = [];
+        if (! $user->isTeam()) {
+            ProductCoproducer::expireOverdue();
+            $coproRows = ProductCoproducer::query()
+                ->where('co_producer_user_id', $user->id)
+                ->where('status', ProductCoproducer::STATUS_ACTIVE)
+                ->where(function ($q) {
+                    $q->whereNull('starts_at')->orWhere('starts_at', '<=', now());
+                })
+                ->where(function ($q) {
+                    $q->whereNull('ends_at')->orWhere('ends_at', '>', now());
+                })
+                ->get(['product_id', 'commission_percent']);
+            $coproIds = $coproRows->pluck('product_id')->map(fn ($id) => (string) $id)->unique()->values()->all();
+            foreach ($coproRows as $row) {
+                $coproPercents[(string) $row->product_id] = (float) $row->commission_percent;
+            }
+        }
+
+        if ($coproIds !== []) {
+            $ownIds = (clone $query)->pluck('id')->map(fn ($id) => (string) $id)->all();
+            $allIds = array_values(array_unique(array_merge($ownIds, $coproIds)));
+            $query = Product::query()->whereIn('id', $allIds ?: ['__none__'])->orderBy('name');
+        }
+
+        $products = $query->paginate(20)->withQueryString()->through(function (Product $p) use ($rates, $tenantId, $coproPercents) {
+            $arr = $this->productToArray($p, $rates);
+            $isCoproduction = (int) $p->tenant_id !== (int) $tenantId;
+            $arr['is_coproduction'] = $isCoproduction;
+            $arr['coproduction_percent'] = $isCoproduction
+                ? ($coproPercents[(string) $p->id] ?? null)
+                : null;
+
+            return $arr;
+        });
+
+        $productTypes = collect(PhysicalProductAccess::filterTypeConfig(Product::typeConfig()))->map(fn ($config, $value) => [
             'value' => $value,
             'label' => $config['label'],
             'description' => $config['description'],
@@ -64,9 +128,15 @@ class ProdutosController extends Controller
             'produtos' => $products,
             'productTypes' => $productTypes,
             'billingTypes' => $billingTypes,
+            'productCategories' => Product::categoriesForSelect(),
+            'marketplaceCategories' => \App\Models\MarketplaceCategory::query()
+                ->where('is_active', true)
+                ->orderBy('sort_order')
+                ->get(['id', 'name', 'slug']),
             'exchange_rates' => $rates,
             'plugin_card_actions' => [],
             'plugin_form_sections' => [],
+            'checkout_gateway_ui' => $this->checkoutGatewayUiForTenant($tenantId),
         ]);
         event(new ProductIndexLoading($data));
         $payload = $data->getArrayCopy();
@@ -109,23 +179,84 @@ class ProdutosController extends Controller
 
     public function store(Request $request)
     {
+        if ($request->input('marketplace_category_id') === '' || $request->input('marketplace_category_id') === null) {
+            $request->merge(['marketplace_category_id' => null]);
+        }
+
         $validated = $request->validate([
             'name' => ['required', 'string', 'max:255'],
+            'notification_name' => ['nullable', 'string', 'max:80'],
+            'support_email' => ['nullable', 'email', 'max:255'],
             'slug' => ['nullable', 'string', 'max:255'],
             'description' => ['nullable', 'string'],
-            'type' => ['required', 'string', 'in:'.implode(',', self::TYPES)],
+            'category' => ['nullable', 'string', 'in:'.implode(',', Product::categoryKeys())],
+            'marketplace_category_id' => ['nullable', 'integer', 'exists:marketplace_categories,id'],
+            'type' => ['required', 'string', 'in:'.implode(',', self::allowedProductTypes())],
+            'delivery_mode' => ['nullable', 'string', 'in:chat,automatic,both'],
+            'warranty_text' => ['nullable', 'string', 'max:255'],
+            'region_text' => ['nullable', 'string', 'max:255'],
             'billing_type' => ['required', 'string', 'in:'.implode(',', self::BILLING_TYPES)],
-            'price' => ['required', 'numeric', 'min:0'],
+            'price' => $this->platformPriceRules(),
             'currency' => ['nullable', 'string', 'in:BRL,EUR,USD'],
             'is_active' => ['boolean'],
-            'image' => ['nullable', 'image', 'max:2048'],
+            'image' => ['nullable', 'file', 'mimes:jpg,jpeg,png,webp,gif', 'max:2048'],
             'deliverable_link' => ['nullable', 'string', 'url', 'max:500'],
+            'card_installments' => ['nullable', 'array'],
+            'card_installments.enabled' => ['nullable', 'boolean'],
+            'card_installments.max' => ['nullable', 'integer', 'min:1', 'max:12'],
         ]);
-        $validated['tenant_id'] = auth()->user()->tenant_id;
-        $validated['slug'] = $validated['slug'] ?? Str::slug($validated['name']);
+
+        // Texto puro (evita XSS armazenado em nome/descrição)
+        $validated['name'] = HtmlSanitizer::plainText($validated['name'] ?? '', 255);
+        if (array_key_exists('notification_name', $validated)) {
+            $nn = HtmlSanitizer::plainText($validated['notification_name'] ?? '', 80);
+            $validated['notification_name'] = $nn !== '' ? $nn : null;
+        }
+        if (array_key_exists('support_email', $validated)) {
+            $supportEmail = strtolower(trim((string) ($validated['support_email'] ?? '')));
+            $validated['support_email'] = ($supportEmail !== '' && filter_var($supportEmail, FILTER_VALIDATE_EMAIL))
+                ? $supportEmail
+                : null;
+        }
+        if (array_key_exists('description', $validated)) {
+            $validated['description'] = HtmlSanitizer::plainTextMultiline($validated['description'], 20000) ?: null;
+        }
+
+        $tenantId = auth()->user()->tenant_id;
+        if ($tenantId === null) {
+            return back()->with('error', 'Conta sem tenant configurado. Atualize a página ou entre em contato com o suporte.')->withInput();
+        }
+
+        $validated['tenant_id'] = $tenantId;
+        $baseSlug = trim((string) ($validated['slug'] ?? '')) !== ''
+            ? Str::slug($validated['slug'])
+            : Str::slug($validated['name']);
+        $validated['slug'] = Product::uniqueSlugForTenant($tenantId, $baseSlug !== '' ? $baseSlug : 'produto');
         $validated['currency'] = $validated['currency'] ?? config('products.currency_default', 'BRL');
+        $validated['price'] = MoneyDecimal::storageFromBrl(
+            (float) $validated['price'],
+            (string) $validated['currency'],
+            $this->productRates()
+        );
         $validated['is_active'] = $request->boolean('is_active', true);
         $validated['refund_policy_days'] = 7;
+        $validated['delivery_mode'] = $validated['delivery_mode'] ?? Product::DELIVERY_CHAT;
+        if (($validated['type'] ?? '') === Product::TYPE_ANUNCIO) {
+            $validated['billing_type'] = Product::BILLING_ONE_TIME;
+            if (empty($validated['marketplace_category_id'])) {
+                return back()->withErrors(['marketplace_category_id' => 'Selecione a categoria do marketplace.'])->withInput();
+            }
+            if (empty($validated['category'])) {
+                $validated['category'] = 'outros';
+            }
+        }
+        $this->assertPhysicalProductRules($validated['type'] ?? '', $validated['billing_type'] ?? '');
+
+        $approvalService = app(ProductApprovalService::class);
+        $approvalAttrs = $approvalService->attributesForNewProduct((bool) $validated['is_active']);
+        if ($approvalAttrs !== []) {
+            $validated = array_merge($validated, $approvalAttrs);
+        }
 
         $product = new Product($validated);
         $beforeEvent = new ProductBeforeSave($product, $validated, true);
@@ -137,31 +268,88 @@ class ProdutosController extends Controller
         unset($validated['image']);
         $deliverableLink = $validated['deliverable_link'] ?? null;
         unset($validated['deliverable_link']);
-        $product = Product::create($validated);
+        $cardInstallmentsInput = $validated['card_installments'] ?? null;
+        unset($validated['card_installments']);
 
-        if ($request->has('deliverable_link')) {
-            $config = $product->checkout_config ?? [];
-            $config['deliverable_link'] = $deliverableLink ?? '';
-            $product->update(['checkout_config' => $config]);
-        }
+        try {
+            $product = DB::transaction(function () use ($request, $validated, $deliverableLink, $cardInstallmentsInput) {
+                $product = Product::create($validated);
 
-        if ($request->hasFile('image')) {
-            $path = app(StorageService::class)->putFile('products', $request->file('image'));
-            $product->update(['image' => $path]);
+                if ($request->has('deliverable_link')) {
+                    $config = $product->checkout_config ?? [];
+                    $config['deliverable_link'] = $deliverableLink ?? '';
+                    $product->update(['checkout_config' => $config]);
+                }
+
+                $this->applyCardInstallmentsToProduct($product, $cardInstallmentsInput);
+
+                if ($request->hasFile('image')) {
+                    $path = app(StorageService::class)->putFile('products', $request->file('image'));
+                    $product->update(['image' => $path]);
+                }
+
+                return $product;
+            });
+        } catch (\RuntimeException $e) {
+            return back()
+                ->withErrors(['image' => $e->getMessage()])
+                ->with('error', $e->getMessage())
+                ->withInput();
+        } catch (QueryException $e) {
+            if ($this->isDuplicateProductSlugException($e)) {
+                $validated['slug'] = Product::uniqueSlugForTenant($tenantId, $baseSlug !== '' ? $baseSlug : 'produto');
+                try {
+                    $product = DB::transaction(function () use ($request, $validated, $deliverableLink, $cardInstallmentsInput) {
+                        $product = Product::create($validated);
+
+                        if ($request->has('deliverable_link')) {
+                            $config = $product->checkout_config ?? [];
+                            $config['deliverable_link'] = $deliverableLink ?? '';
+                            $product->update(['checkout_config' => $config]);
+                        }
+
+                        $this->applyCardInstallmentsToProduct($product, $cardInstallmentsInput);
+
+                        if ($request->hasFile('image')) {
+                            $path = app(StorageService::class)->putFile('products', $request->file('image'));
+                            $product->update(['image' => $path]);
+                        }
+
+                        return $product;
+                    });
+                } catch (QueryException) {
+                    return back()
+                        ->withErrors(['name' => 'Já existe um produto com este nome. Escolha outro nome.'])
+                        ->withInput();
+                }
+            } else {
+                throw $e;
+            }
         }
 
         event(new ProductCreated($product));
 
-        return redirect()->route('produtos.index')->with('success', 'Produto criado.');
+        app(ProductApprovalService::class)->afterCreated($product, $request);
+
+        $success = 'Produto criado.';
+        if (($product->approval_status ?? null) === Product::APPROVAL_PENDING) {
+            $success = 'Produto em análise. Seu produto foi enviado para análise das regras internas da plataforma. Após a avaliação, você será informado sobre a aprovação ou sobre eventuais ajustes necessários.';
+        }
+
+        $this->logSellerActivity(SellerActivityLogService::PRODUCT_CREATED, $product, [
+            'name' => $product->name,
+        ]);
+
+        return redirect()->route('produtos.index')->with('success', $success);
     }
 
     public function edit(Product $produto): Response
     {
-        $this->authorizeProduct($produto);
+        $this->authorizeProduct($produto, manage: false);
         $produto->load('users:id,name,email', 'offers', 'subscriptionPlans', 'orderBumps');
 
         $rates = config('products.rates', ['brl_eur' => 0.16, 'brl_usd' => 0.18]);
-        $productTypes = collect(Product::typeConfig())->map(fn ($config, $value) => [
+        $productTypes = collect(PhysicalProductAccess::filterTypeConfig(Product::typeConfig()))->map(fn ($config, $value) => [
             'value' => $value,
             'label' => $config['label'],
             'description' => $config['description'],
@@ -179,6 +367,7 @@ class ProdutosController extends Controller
             'currency' => $o->currency ?? $produto->currency ?? 'BRL',
             'checkout_slug' => $o->checkout_slug,
             'position' => $o->position,
+            'affiliate_share_enabled' => (bool) ($o->affiliate_share_enabled ?? false),
         ])->values()->all();
         $produtoArray['subscription_plans'] = $produto->subscriptionPlans->map(fn ($p) => [
             'id' => $p->id,
@@ -199,6 +388,7 @@ class ProdutosController extends Controller
             $imageUrl = $target && $target->image
                 ? app(StorageService::class)->url($target->image)
                 : null;
+
             return [
                 'id' => $b->id,
                 'target_product_id' => $b->target_product_id,
@@ -218,12 +408,13 @@ class ProdutosController extends Controller
         $availableForBump = Product::forTenant($tenantId)
             ->where('id', '!=', $produto->id)
             ->where('billing_type', Product::BILLING_ONE_TIME)
-            ->where('is_active', true)
+            ->availableForPurchase()
             ->orderBy('name')
             ->with('offers')
             ->get();
-        $produtoArray['available_products_for_bump'] = $availableForBump->map(function (Product $p) use ($rates) {
+        $produtoArray['available_products_for_bump'] = $availableForBump->map(function (Product $p) {
             $imageUrl = $p->image ? app(StorageService::class)->url($p->image) : null;
+
             return [
                 'id' => $p->id,
                 'name' => $p->name,
@@ -265,7 +456,7 @@ class ProdutosController extends Controller
         ];
 
         $productsForUpsell = Product::where('tenant_id', $tenantId)
-            ->where('is_active', true)
+            ->availableForPurchase()
             ->where('id', '!=', $produto->id)
             ->with('offers')
             ->orderBy('name')
@@ -282,24 +473,28 @@ class ProdutosController extends Controller
             ->values()->all();
         $produtoArray['products_for_upsell'] = $productsForUpsell;
 
+        $checkoutGatewayUi = $this->checkoutGatewayUiForTenant($tenantId);
         $paymentService = app(PaymentService::class);
-        $cardOrder = $paymentService->getGatewayOrderForMethod($tenantId, 'card', null, null);
-        $primaryCard = $cardOrder[0] ?? null;
-        $checkoutGatewayUi = [
-            'card_show_installments' => in_array($primaryCard, ['efi', 'asaas'], true),
-        ];
 
         $basePlanForGlobalMethods = $produto->billing_type === Product::BILLING_SUBSCRIPTION
             ? $produto->subscriptionPlans()->orderBy('position')->first()
             : null;
         $globalPaymentMethodsAvailable = $paymentService->globallyAvailablePaymentMethodKeys($produto, $basePlanForGlobalMethods);
 
-        $cademiIntegrations = CademiIntegration::forTenant($tenantId)
-            ->orderBy('name')
-            ->get(['id', 'name'])
-            ->map(fn (CademiIntegration $i) => ['id' => $i->id, 'name' => $i->name])
-            ->values()
-            ->all();
+        $cademiAvailable = SellerIntegrationVisibility::effectiveForTenant(
+            SellerIntegrationVisibility::CADEMI,
+            $tenantId !== null ? (int) $tenantId : null
+        );
+        $cademiIntegrations = $cademiAvailable
+            ? CademiIntegration::forTenant($tenantId)
+                ->orderBy('name')
+                ->get(['id', 'name'])
+                ->map(fn (CademiIntegration $i) => ['id' => $i->id, 'name' => $i->name])
+                ->values()
+                ->all()
+            : [];
+
+        ProductCoproducer::expireOverdue();
 
         $produtoArray['coproducers'] = $produto->coproducers()
             ->with('coProducer:id,name,email')
@@ -331,7 +526,12 @@ class ProdutosController extends Controller
         $produtoArray['affiliate_page_url'] = $produto->affiliate_page_url;
         $produtoArray['affiliate_support_email'] = $produto->affiliate_support_email;
         $produtoArray['affiliate_showcase_description'] = $produto->affiliate_showcase_description;
+        $produtoArray['affiliate_hide_customer_data'] = (bool) $produto->affiliate_hide_customer_data;
         $produtoArray['affiliate_checkout_base_url'] = $checkoutBaseUrl;
+        if ($produto->affiliate_enabled) {
+            $produto->ensureAffiliateInviteToken();
+        }
+        $produtoArray['affiliate_join_url'] = $produto->affiliate_enabled ? $produto->affiliateJoinUrl() : null;
 
         $produtoArray['refund_policy_days'] = $produto->refund_policy_days !== null
             ? (int) $produto->refund_policy_days
@@ -363,16 +563,39 @@ class ProdutosController extends Controller
             ->values()
             ->all();
 
+        $shippingStores = ShippingStore::forTenant($tenantId)
+            ->orderBy('name')
+            ->get(['id', 'name', 'is_active'])
+            ->map(fn (ShippingStore $s) => [
+                'id' => $s->id,
+                'name' => $s->name,
+                'is_active' => $s->is_active,
+            ])
+            ->values()
+            ->all();
+
+        $coproductionReadonly = ProductCoproducer::isActiveCoproducerOf((int) auth()->id(), (string) $produto->id)
+            && (int) $produto->tenant_id !== (int) $tenantId;
+
         return Inertia::render('Produtos/Edit', [
             'produto' => $produtoArray,
+            'coproduction_readonly' => $coproductionReadonly,
             'productTypes' => $productTypes,
             'billingTypes' => $billingTypes,
+            'productCategories' => Product::categoriesForSelect(),
+            'marketplaceCategories' => \App\Models\MarketplaceCategory::query()
+                ->where('is_active', true)
+                ->orderBy('sort_order')
+                ->get(['id', 'name', 'slug']),
             'exchange_rates' => $rates,
             'checkout_gateway_ui' => $checkoutGatewayUi,
             'global_payment_methods_available' => $globalPaymentMethodsAvailable,
             'cademi_integrations' => $cademiIntegrations,
+            'cademi_available' => $cademiAvailable,
+            'shipping_stores' => PhysicalProductAccess::globalEnabled() ? $shippingStores : [],
             'layoutContentFlushLeft' => true,
             'pageTitleBadge' => $produto->name,
+            'stockUrl' => '/produtos/'.$produto->id.'/estoque',
         ]);
     }
 
@@ -389,6 +612,13 @@ class ProdutosController extends Controller
         ]);
 
         $tenantId = auth()->user()->tenant_id;
+        $cademiAvailable = SellerIntegrationVisibility::effectiveForTenant(
+            SellerIntegrationVisibility::CADEMI,
+            $tenantId !== null ? (int) $tenantId : null
+        );
+        if (! $cademiAvailable && ! empty($validated['cademi_integration_id'])) {
+            abort(403, 'A integração Cademí não está disponível.');
+        }
         if (! empty($validated['cademi_integration_id'])) {
             $exists = CademiIntegration::forTenant($tenantId)->where('id', (int) $validated['cademi_integration_id'])->exists();
             if (! $exists) {
@@ -425,12 +655,20 @@ class ProdutosController extends Controller
             ]);
         }
 
+        $this->logSellerActivity(SellerActivityLogService::PRODUCT_MEMBER_AREA_UPDATED, $produto, [
+            'name' => $produto->name,
+        ]);
+
         return response()->json(['ok' => true]);
     }
 
     public function update(Request $request, Product $produto)
     {
         $this->authorizeProduct($produto);
+
+        if ($request->input('marketplace_category_id') === '' || $request->input('marketplace_category_id') === null) {
+            $request->merge(['marketplace_category_id' => null]);
+        }
 
         if ($request->has('conversion_pixels') && is_string($request->conversion_pixels)) {
             $decoded = json_decode($request->conversion_pixels, true);
@@ -439,14 +677,20 @@ class ProdutosController extends Controller
 
         $validated = $request->validate([
             'name' => ['required', 'string', 'max:255'],
-            'slug' => ['required', 'string', 'max:255'],
+            'notification_name' => ['nullable', 'string', 'max:80'],
+            'support_email' => ['nullable', 'email', 'max:255'],
             'description' => ['nullable', 'string'],
-            'type' => ['required', 'string', 'in:'.implode(',', self::TYPES)],
+            'category' => ['nullable', 'string', 'in:'.implode(',', Product::categoryKeys())],
+            'marketplace_category_id' => ['nullable', 'integer', 'exists:marketplace_categories,id'],
+            'type' => ['required', 'string', 'in:'.implode(',', self::allowedProductTypes($produto))],
+            'delivery_mode' => ['nullable', 'string', 'in:chat,automatic,both'],
+            'warranty_text' => ['nullable', 'string', 'max:255'],
+            'region_text' => ['nullable', 'string', 'max:255'],
             'billing_type' => ['required', 'string', 'in:'.implode(',', self::BILLING_TYPES)],
-            'price' => ['required', 'numeric', 'min:0'],
+            'price' => $this->platformPriceRules(),
             'currency' => ['nullable', 'string', 'in:BRL,EUR,USD'],
             'is_active' => ['boolean'],
-            'image' => ['nullable', 'image', 'max:2048'],
+            'image' => ['nullable', 'file', 'mimes:jpg,jpeg,png,webp,gif', 'max:2048'],
             'conversion_pixels' => ['nullable', 'array'],
             'conversion_pixels.meta' => ['nullable', 'array'],
             'conversion_pixels.meta.enabled' => ['nullable', 'boolean'],
@@ -495,6 +739,10 @@ class ProdutosController extends Controller
             'payment_methods_enabled.card' => ['nullable', 'boolean'],
             'payment_methods_enabled.boleto' => ['nullable', 'boolean'],
             'payment_methods_enabled.pix_auto' => ['nullable', 'boolean'],
+            'payment_methods_enabled.apple_pay' => ['nullable', 'boolean'],
+            'payment_methods_enabled.google_pay' => ['nullable', 'boolean'],
+            'payment_methods_enabled.open_finance' => ['nullable', 'boolean'],
+            'payment_methods_enabled.paypal' => ['nullable', 'boolean'],
             'email_template' => ['nullable', 'array'],
             'email_template.logo_url' => ['nullable', 'string', 'max:500'],
             'email_template.from_name' => ['nullable', 'string', 'max:255'],
@@ -503,12 +751,67 @@ class ProdutosController extends Controller
             'deliverable_link' => ['nullable', 'string', 'url', 'max:500'],
             'base_interval' => ['nullable', 'string', 'in:weekly,monthly,quarterly,semi_annual,annual,lifetime'],
             'refund_policy_days' => ['nullable', 'integer', 'in:7,14,30'],
+            'shipping_store_id' => ['nullable', 'integer', 'exists:shipping_stores,id'],
+            'physical_free_shipping' => ['nullable', 'boolean'],
         ]);
+
+        $this->assertPhysicalProductRules($validated['type'] ?? '', $validated['billing_type'] ?? '');
+
+        // Texto puro (evita XSS armazenado em nome/descrição/template)
+        $validated['name'] = HtmlSanitizer::plainText($validated['name'] ?? '', 255);
+        if (array_key_exists('notification_name', $validated)) {
+            $nn = HtmlSanitizer::plainText($validated['notification_name'] ?? '', 80);
+            $validated['notification_name'] = $nn !== '' ? $nn : null;
+        }
+        if (array_key_exists('support_email', $validated)) {
+            $supportEmail = strtolower(trim((string) ($validated['support_email'] ?? '')));
+            $validated['support_email'] = ($supportEmail !== '' && filter_var($supportEmail, FILTER_VALIDATE_EMAIL))
+                ? $supportEmail
+                : null;
+        }
+        if (array_key_exists('description', $validated)) {
+            $validated['description'] = HtmlSanitizer::plainTextMultiline($validated['description'], 20000) ?: null;
+        }
+        if (isset($validated['email_template']) && is_array($validated['email_template'])) {
+            if (array_key_exists('from_name', $validated['email_template'])) {
+                $validated['email_template']['from_name'] = HtmlSanitizer::plainText($validated['email_template']['from_name'], 255) ?: null;
+            }
+            if (array_key_exists('subject', $validated['email_template'])) {
+                $validated['email_template']['subject'] = HtmlSanitizer::plainText($validated['email_template']['subject'], 255) ?: null;
+            }
+            if (array_key_exists('body_html', $validated['email_template'])) {
+                // Corpo do e-mail permite HTML, mas sanitizamos para remover scripts/eventos.
+                $validated['email_template']['body_html'] = \App\Support\HtmlSanitizer::sanitize((string) ($validated['email_template']['body_html'] ?? ''));
+            }
+        }
+
         $validated['is_active'] = $request->boolean('is_active', true);
         $validated['currency'] = $validated['currency'] ?? config('products.currency_default', 'BRL');
-        $validated['refund_policy_days'] = ($validated['refund_policy_days'] ?? null) !== null
-            ? (int) $validated['refund_policy_days']
-            : null;
+        $validated['price'] = MoneyDecimal::storageFromBrl(
+            (float) $validated['price'],
+            (string) $validated['currency'],
+            $this->productRates()
+        );
+        // Política de reembolso: definida pela plataforma — seller não altera.
+        unset($validated['refund_policy_days']);
+
+        if (($validated['type'] ?? $produto->type) === Product::TYPE_ANUNCIO) {
+            if (array_key_exists('marketplace_category_id', $validated) && empty($validated['marketplace_category_id'])) {
+                return back()->withErrors(['marketplace_category_id' => 'Selecione a categoria do marketplace.'])->withInput();
+            }
+            if (empty($validated['category'] ?? $produto->category)) {
+                $validated['category'] = 'outros';
+            }
+            // Tipo de produto marketplace fica como anúncio.
+            $validated['type'] = Product::TYPE_ANUNCIO;
+            $validated['billing_type'] = Product::BILLING_ONE_TIME;
+        }
+
+        try {
+            app(ProductApprovalService::class)->guardSellerActivation($produto, (bool) $validated['is_active']);
+        } catch (InvalidArgumentException $e) {
+            return back()->with('error', $e->getMessage())->withInput();
+        }
 
         $beforeEvent = new ProductBeforeSave($produto, $validated, false);
         event($beforeEvent);
@@ -530,127 +833,151 @@ class ProdutosController extends Controller
         unset($validated['conversion_pixels']);
         $baseInterval = $validated['base_interval'] ?? null;
         unset($validated['base_interval']);
-        $produto->update($validated);
+        $physicalFreeShipping = $request->boolean('physical_free_shipping');
+        $shippingStoreId = $validated['shipping_store_id'] ?? null;
+        unset($validated['physical_free_shipping'], $validated['shipping_store_id']);
 
-        if ($produto->billing_type === Product::BILLING_SUBSCRIPTION && $baseInterval !== null) {
-            $basePlan = $produto->subscriptionPlans()->orderBy('position')->first();
-            $labels = SubscriptionPlan::intervalLabels();
-            $planName = $labels[$baseInterval] ?? ucfirst($baseInterval);
-            if ($basePlan) {
-                $basePlan->update([
-                    'name' => $planName,
-                    'price' => $produto->price,
-                    'currency' => $produto->currency ?? 'BRL',
-                    'interval' => $baseInterval,
-                ]);
-            } else {
-                SubscriptionPlan::create([
-                    'product_id' => $produto->id,
-                    'name' => $planName,
-                    'price' => $produto->price,
-                    'currency' => $produto->currency ?? 'BRL',
-                    'interval' => $baseInterval,
-                    'checkout_slug' => SubscriptionPlan::generateUniqueCheckoutSlug(),
-                    'position' => 0,
-                ]);
-            }
-        }
+        // Slug é gerado na criação e permanece estável (identificador interno).
+        unset($validated['slug']);
 
-        if ($request->has('conversion_pixels')) {
-            $merged = [];
-            foreach (['meta', 'tiktok', 'google_ads', 'google_analytics'] as $key) {
-                $raw = is_array($conversionPixels[$key] ?? null) ? $conversionPixels[$key] : [];
-                $merged[$key] = Product::normalizeConversionPixelBlock($raw, $key);
-            }
-            $merged['custom_script'] = [];
-            foreach ($conversionPixels['custom_script'] ?? [] as $item) {
-                if (! empty($item['script'] ?? '')) {
-                    $merged['custom_script'][] = [
-                        'id' => $item['id'] ?? Str::uuid()->toString(),
-                        'name' => $item['name'] ?? '',
-                        'script' => $item['script'],
-                    ];
+        if (($validated['type'] ?? $produto->type) === Product::TYPE_PRODUTO_FISICO) {
+            if ($shippingStoreId !== null) {
+                $storeOk = ShippingStore::forTenant(auth()->user()->tenant_id)
+                    ->where('id', $shippingStoreId)
+                    ->where('is_active', true)
+                    ->exists();
+                if (! $storeOk) {
+                    return back()->with('error', 'Loja de frete inválida ou inativa.')->withInput();
                 }
             }
-            $produto->update(['conversion_pixels' => $merged]);
+            $validated['shipping_store_id'] = $shippingStoreId;
+            $validated['physical_config'] = ['free_shipping' => $physicalFreeShipping];
+        } else {
+            $validated['shipping_store_id'] = null;
+            $validated['physical_config'] = null;
         }
 
-        $config = $produto->checkout_config ?? [];
-        $configUpdated = false;
-        if (array_key_exists('payment_gateways', $config)) {
-            unset($config['payment_gateways']);
-            $configUpdated = true;
-        }
-        if ($request->has('deliverable_link')) {
-            $config['deliverable_link'] = $deliverableLink ?? '';
-            $configUpdated = true;
-        }
-        if (is_array($cardInstallments)) {
-            $config['card_installments'] = [
-                'enabled' => ! empty($cardInstallments['enabled']),
-                'max' => min(12, max(1, (int) ($cardInstallments['max'] ?? 1))),
-            ];
-            $configUpdated = true;
-        }
-        if (is_array($paymentMethodsEnabledInput)) {
-            $paymentService = app(PaymentService::class);
-            $produto->refresh();
-            $basePlan = $produto->billing_type === Product::BILLING_SUBSCRIPTION
-                ? $produto->subscriptionPlans()->orderBy('position')->first()
-                : null;
-            $global = $paymentService->globallyAvailablePaymentMethodKeys($produto, $basePlan);
-            $pm = [
-                'pix' => $request->boolean('payment_methods_enabled.pix', true),
-                'card' => $request->boolean('payment_methods_enabled.card', true),
-                'boleto' => $request->boolean('payment_methods_enabled.boleto', true),
-                'pix_auto' => $produto->billing_type === Product::BILLING_SUBSCRIPTION
-                    ? $request->boolean('payment_methods_enabled.pix_auto', true)
-                    : false,
-            ];
-            $keysToCheck = ['pix', 'card', 'boleto'];
-            if ($produto->billing_type === Product::BILLING_SUBSCRIPTION && $basePlan) {
-                $keysToCheck[] = 'pix_auto';
-            }
-            $anyGlobal = false;
-            foreach ($keysToCheck as $k) {
-                if (! empty($global[$k])) {
-                    $anyGlobal = true;
-                    break;
-                }
-            }
-            if ($anyGlobal) {
-                $atLeastOne = false;
-                foreach ($keysToCheck as $k) {
-                    if (! empty($global[$k]) && ($pm[$k] ?? false)) {
-                        $atLeastOne = true;
-                        break;
+        $paymentMethodsPm = [
+            'pm' => [
+                'pix' => true,
+                'card' => true,
+                'boleto' => true,
+                'pix_auto' => true,
+                'apple_pay' => true,
+                'google_pay' => true,
+                'open_finance' => true,
+                'paypal' => true,
+            ],
+            'error' => null,
+        ];
+        // Formas de pagamento são globais (Plataforma → Financeiro). Produto não restringe.
+
+        try {
+            DB::transaction(function () use (
+                $request,
+                $produto,
+                $validated,
+                $baseInterval,
+                $conversionPixels,
+                $cardInstallments,
+                $deliverableLink,
+                $emailTemplate,
+                $paymentMethodsPm,
+                $oldImage
+            ) {
+                $produto->update($validated);
+
+                if ($produto->billing_type === Product::BILLING_SUBSCRIPTION && $baseInterval !== null) {
+                    $basePlan = $produto->subscriptionPlans()->orderBy('position')->first();
+                    $labels = SubscriptionPlan::intervalLabels();
+                    $planName = $labels[$baseInterval] ?? ucfirst($baseInterval);
+                    if ($basePlan) {
+                        $basePlan->update([
+                            'name' => $planName,
+                            'price' => $produto->price,
+                            'currency' => $produto->currency ?? 'BRL',
+                            'interval' => $baseInterval,
+                        ]);
+                    } else {
+                        SubscriptionPlan::create([
+                            'product_id' => $produto->id,
+                            'name' => $planName,
+                            'price' => $produto->price,
+                            'currency' => $produto->currency ?? 'BRL',
+                            'interval' => $baseInterval,
+                            'checkout_slug' => SubscriptionPlan::generateUniqueCheckoutSlug(),
+                            'position' => 0,
+                        ]);
                     }
                 }
-                if (! $atLeastOne) {
-                    return back()->withErrors(['payment_methods_enabled' => 'Ative pelo menos um método de pagamento disponível na plataforma.'])->withInput();
-                }
-            }
-            $config['payment_methods_enabled'] = $pm;
-            $configUpdated = true;
-        }
-        if (is_array($emailTemplate)) {
-            $config['email_template'] = array_merge(
-                Product::defaultEmailTemplate(),
-                $emailTemplate
-            );
-            $configUpdated = true;
-        }
-        if ($configUpdated) {
-            $produto->update(['checkout_config' => $config]);
-        }
 
-        if ($request->hasFile('image')) {
-            $storage = app(StorageService::class);
-            if ($oldImage && $storage->exists($oldImage)) {
-                $storage->delete($oldImage);
-            }
-            $path = $storage->putFile('products', $request->file('image'));
-            $produto->update(['image' => $path]);
+                if ($request->has('conversion_pixels')) {
+                    $merged = [];
+                    foreach (['meta', 'tiktok', 'google_ads', 'google_analytics'] as $key) {
+                        $raw = is_array($conversionPixels[$key] ?? null) ? $conversionPixels[$key] : [];
+                        $merged[$key] = Product::normalizeConversionPixelBlock($raw, $key);
+                    }
+                    $merged['custom_script'] = [];
+                    foreach ($conversionPixels['custom_script'] ?? [] as $item) {
+                        if (! empty($item['script'] ?? '')) {
+                            $merged['custom_script'][] = [
+                                'id' => $item['id'] ?? Str::uuid()->toString(),
+                                'name' => $item['name'] ?? '',
+                                'script' => $item['script'],
+                            ];
+                        }
+                    }
+                    $produto->update(['conversion_pixels' => $merged]);
+                }
+
+                $config = $produto->checkout_config ?? [];
+                $configUpdated = false;
+                if (array_key_exists('payment_gateways', $config)) {
+                    unset($config['payment_gateways']);
+                    $configUpdated = true;
+                }
+                if ($request->has('deliverable_link')) {
+                    $config['deliverable_link'] = $deliverableLink ?? '';
+                    $configUpdated = true;
+                }
+                $billingType = $validated['billing_type'] ?? $produto->billing_type;
+                $normalizedInstallments = PlatformCardInstallments::normalizeSellerInput(
+                    is_array($cardInstallments) ? $cardInstallments : null,
+                    (string) $billingType
+                );
+                if ($normalizedInstallments !== null) {
+                    $config['card_installments'] = $normalizedInstallments;
+                    $configUpdated = true;
+                }
+                if (is_array($paymentMethodsPm) && $paymentMethodsPm['pm'] !== null) {
+                    $config['payment_methods_enabled'] = $paymentMethodsPm['pm'];
+                    $configUpdated = true;
+                }
+                if (is_array($emailTemplate)) {
+                    $config['email_template'] = array_merge(
+                        Product::defaultEmailTemplate(),
+                        $emailTemplate
+                    );
+                    $configUpdated = true;
+                }
+                if ($configUpdated) {
+                    $produto->update(['checkout_config' => $config]);
+                }
+
+                if ($request->hasFile('image')) {
+                    $storage = app(StorageService::class);
+                    if ($oldImage && $storage->exists($oldImage)) {
+                        $storage->delete($oldImage);
+                    }
+                    $path = $storage->putFile('products', $request->file('image'));
+                    $produto->update(['image' => $path]);
+                }
+            });
+        } catch (\RuntimeException $e) {
+            return back()
+                ->withErrors(['image' => $e->getMessage()])
+                ->with('error', $e->getMessage())
+                ->withInput();
         }
 
         event(new ProductUpdated($produto));
@@ -658,8 +985,12 @@ class ProdutosController extends Controller
         $url = route('produtos.edit', $produto);
         $tab = $request->query('tab');
         if ($tab) {
-            $url .= '?tab=' . urlencode($tab);
+            $url .= '?tab='.urlencode($tab);
         }
+
+        $this->logSellerActivity(SellerActivityLogService::PRODUCT_UPDATED, $produto, [
+            'name' => $produto->name,
+        ]);
 
         return redirect($url)->with('success', 'Produto atualizado.');
     }
@@ -674,6 +1005,10 @@ class ProdutosController extends Controller
         }
         $produto->delete();
 
+        $this->logSellerActivity(SellerActivityLogService::PRODUCT_DELETED, $produto, [
+            'name' => $produto->name,
+        ]);
+
         return redirect()->route('produtos.index')->with('success', 'Produto removido.');
     }
 
@@ -682,13 +1017,7 @@ class ProdutosController extends Controller
         $this->authorizeProduct($produto);
         $tenantId = auth()->user()->tenant_id;
         $baseName = $produto->name.' (cópia)';
-        $slug = Str::slug($baseName);
-        $uniqueSlug = $slug;
-        $n = 0;
-        while (Product::forTenant($tenantId)->where('slug', $uniqueSlug)->exists()) {
-            $n++;
-            $uniqueSlug = $slug.'-'.$n;
-        }
+        $uniqueSlug = Product::uniqueSlugForTenant($tenantId, $baseName);
 
         $dupConfig = $produto->checkout_config ?? [];
         if (is_array($dupConfig) && array_key_exists('payment_gateways', $dupConfig)) {
@@ -700,6 +1029,7 @@ class ProdutosController extends Controller
             'name' => $baseName,
             'slug' => $uniqueSlug,
             'description' => $produto->description,
+            'category' => $produto->category,
             'type' => $produto->type,
             'billing_type' => $produto->billing_type ?? Product::BILLING_ONE_TIME,
             'image' => null,
@@ -712,17 +1042,56 @@ class ProdutosController extends Controller
                 : 7,
         ]);
 
+        $approvalService = app(ProductApprovalService::class);
+        $approvalAttrs = $approvalService->attributesForNewProduct((bool) $newProduct->is_active);
+        if ($approvalAttrs !== []) {
+            $newProduct->forceFill($approvalAttrs)->save();
+        }
+        $approvalService->afterCreated($newProduct->fresh(), request());
+
         event(new ProductDuplicated($produto, $newProduct));
 
-        return redirect()->route('produtos.index')->with('success', 'Produto duplicado.');
+        $success = 'Produto duplicado.';
+        if (($newProduct->fresh()->approval_status ?? null) === Product::APPROVAL_PENDING) {
+            $success = 'Produto duplicado e enviado para análise.';
+        }
+
+        $this->logSellerActivity(SellerActivityLogService::PRODUCT_DUPLICATED, $newProduct, [
+            'name' => $newProduct->name,
+            'source_product_id' => $produto->id,
+        ]);
+
+        return redirect()->route('produtos.index')->with('success', $success);
     }
 
-    public function addAluno(Request $request, Product $produto)
+    public function resubmitForReview(Request $request, Product $produto)
+    {
+        $this->authorizeProduct($produto);
+
+        try {
+            app(ProductApprovalService::class)->resubmit($produto, $request);
+        } catch (InvalidArgumentException $e) {
+            return back()->with('error', $e->getMessage());
+        }
+
+        $this->logSellerActivity(SellerActivityLogService::PRODUCT_RESUBMITTED, $produto, [
+            'name' => $produto->name,
+        ]);
+
+        return back()->with('success', 'Produto reenviado para análise. Ele permanecerá indisponível para venda até nova aprovação.');
+    }
+
+    public function addAluno(Request $request, Product $produto, MemberAccessGrantService $memberAccessGrant)
     {
         $this->authorizeProduct($produto);
         $validated = $request->validate(['email' => ['required', 'email', 'exists:users,email']]);
         $user = User::where('email', $validated['email'])->whereIn('role', User::buyerRoleValues())->firstOrFail();
-        $produto->users()->syncWithoutDetaching([$user->id]);
+        $memberAccessGrant->grant($user, $produto);
+
+        $this->logSellerActivity(SellerActivityLogService::STUDENT_PRODUCT_ADDED, $produto, [
+            'email' => $user->email,
+            'name' => $produto->name,
+        ]);
 
         return back()->with('success', 'Acesso concedido.');
     }
@@ -735,11 +1104,22 @@ class ProdutosController extends Controller
         ]);
 
         $file = $request->file('logo');
-        $ext = $file->getClientOriginalExtension() ?: 'png';
-        $path = 'email-templates/'.$produto->id.'/logo.'.strtolower($ext);
+        $ext = strtolower((string) ($file->guessExtension() ?: $file->getClientOriginalExtension() ?: 'png'));
+        if (! in_array($ext, ['jpg', 'jpeg', 'png', 'gif', 'webp'], true)) {
+            $ext = 'png';
+        }
 
         $storage = app(StorageService::class);
-        $storage->putFileAs(dirname($path), $file, basename($path));
+        $dir = 'email-templates/'.$produto->id;
+        $disk = $storage->disk();
+        if ($disk->exists($dir)) {
+            foreach ($disk->files($dir) as $existing) {
+                $storage->delete($existing);
+            }
+        }
+        $filename = 'logo-'.strtolower((string) Str::ulid()).'.'.$ext;
+        $path = $dir.'/'.$filename;
+        $storage->putFileAs($dir, $file, $filename);
         $logoUrl = $storage->url($path);
 
         $config = $produto->checkout_config ?? [];
@@ -761,15 +1141,22 @@ class ProdutosController extends Controller
         }
         $validated = $request->validate([
             'name' => ['required', 'string', 'max:255'],
-            'price' => ['required', 'numeric', 'min:0'],
+            'price' => $this->platformPriceRules(),
             'currency' => ['nullable', 'string', 'in:BRL,EUR,USD'],
         ]);
         $validated['product_id'] = $produto->id;
         $validated['currency'] = $validated['currency'] ?? $produto->currency ?? 'BRL';
+        $validated['price'] = MoneyDecimal::toFloat($validated['price']);
         $maxPosition = $produto->offers()->max('position') ?? 0;
         $validated['position'] = $maxPosition + 1;
         $validated['checkout_slug'] = ProductOffer::generateUniqueCheckoutSlug();
+        $validated['affiliate_share_enabled'] = true;
         ProductOffer::create($validated);
+
+        $this->logSellerActivity(SellerActivityLogService::PRODUCT_OFFER_CREATED, $produto, [
+            'name' => $validated['name'],
+        ]);
+
         return back()->with('success', 'Oferta adicionada.');
     }
 
@@ -781,11 +1168,17 @@ class ProdutosController extends Controller
         }
         $validated = $request->validate([
             'name' => ['required', 'string', 'max:255'],
-            'price' => ['required', 'numeric', 'min:0'],
+            'price' => $this->platformPriceRules(),
             'currency' => ['nullable', 'string', 'in:BRL,EUR,USD'],
         ]);
         $validated['currency'] = $validated['currency'] ?? $produto->currency ?? 'BRL';
+        $validated['price'] = MoneyDecimal::toFloat($validated['price']);
         $offer->update($validated);
+
+        $this->logSellerActivity(SellerActivityLogService::PRODUCT_OFFER_UPDATED, $offer, [
+            'name' => $offer->name,
+        ]);
+
         return back()->with('success', 'Oferta atualizada.');
     }
 
@@ -796,6 +1189,11 @@ class ProdutosController extends Controller
             abort(404);
         }
         $offer->delete();
+
+        $this->logSellerActivity(SellerActivityLogService::PRODUCT_OFFER_DELETED, $offer, [
+            'name' => $offer->name,
+        ]);
+
         return back()->with('success', 'Oferta removida.');
     }
 
@@ -823,10 +1221,17 @@ class ProdutosController extends Controller
         }
         $validated['product_id'] = $produto->id;
         $validated['target_product_offer_id'] = $validated['target_product_offer_id'] ?? null;
-        $validated['price_override'] = isset($validated['price_override']) ? (float) $validated['price_override'] : null;
+        $validated['price_override'] = isset($validated['price_override'])
+            ? MoneyDecimal::toFloat($validated['price_override'])
+            : null;
         $maxPosition = $produto->orderBumps()->max('position') ?? 0;
         $validated['position'] = $maxPosition + 1;
         ProductOrderBump::create($validated);
+
+        $this->logSellerActivity(SellerActivityLogService::PRODUCT_ORDER_BUMP_CREATED, $produto, [
+            'name' => $validated['title'] ?? $produto->name,
+        ]);
+
         return back()->with('success', 'Order bump adicionado.');
     }
 
@@ -856,8 +1261,15 @@ class ProdutosController extends Controller
             }
         }
         $validated['target_product_offer_id'] = $validated['target_product_offer_id'] ?? null;
-        $validated['price_override'] = isset($validated['price_override']) ? (float) $validated['price_override'] : null;
+        $validated['price_override'] = isset($validated['price_override'])
+            ? MoneyDecimal::toFloat($validated['price_override'])
+            : null;
         $bump->update($validated);
+
+        $this->logSellerActivity(SellerActivityLogService::PRODUCT_ORDER_BUMP_UPDATED, $bump, [
+            'name' => $bump->title ?? $produto->name,
+        ]);
+
         return back()->with('success', 'Order bump atualizado.');
     }
 
@@ -868,6 +1280,11 @@ class ProdutosController extends Controller
             abort(404);
         }
         $bump->delete();
+
+        $this->logSellerActivity(SellerActivityLogService::PRODUCT_ORDER_BUMP_DELETED, $bump, [
+            'name' => $bump->title ?? $produto->name,
+        ]);
+
         return back()->with('success', 'Order bump removido.');
     }
 
@@ -879,16 +1296,22 @@ class ProdutosController extends Controller
         }
         $validated = $request->validate([
             'name' => ['required', 'string', 'max:255'],
-            'price' => ['required', 'numeric', 'min:0'],
+            'price' => $this->platformPriceRules(),
             'currency' => ['nullable', 'string', 'in:BRL,EUR,USD'],
             'interval' => ['required', 'string', 'in:weekly,monthly,quarterly,semi_annual,annual,lifetime'],
         ]);
         $validated['product_id'] = $produto->id;
         $validated['currency'] = $validated['currency'] ?? $produto->currency ?? 'BRL';
+        $validated['price'] = MoneyDecimal::toFloat($validated['price']);
         $maxPosition = $produto->subscriptionPlans()->max('position') ?? 0;
         $validated['position'] = $maxPosition + 1;
         $validated['checkout_slug'] = SubscriptionPlan::generateUniqueCheckoutSlug();
         SubscriptionPlan::create($validated);
+
+        $this->logSellerActivity(SellerActivityLogService::PRODUCT_PLAN_CREATED, $produto, [
+            'name' => $validated['name'],
+        ]);
+
         return back()->with('success', 'Plano adicionado.');
     }
 
@@ -900,12 +1323,18 @@ class ProdutosController extends Controller
         }
         $validated = $request->validate([
             'name' => ['required', 'string', 'max:255'],
-            'price' => ['required', 'numeric', 'min:0'],
+            'price' => $this->platformPriceRules(),
             'currency' => ['nullable', 'string', 'in:BRL,EUR,USD'],
             'interval' => ['required', 'string', 'in:weekly,monthly,quarterly,semi_annual,annual,lifetime'],
         ]);
         $validated['currency'] = $validated['currency'] ?? $produto->currency ?? 'BRL';
+        $validated['price'] = MoneyDecimal::toFloat($validated['price']);
         $plan->update($validated);
+
+        $this->logSellerActivity(SellerActivityLogService::PRODUCT_PLAN_UPDATED, $plan, [
+            'name' => $plan->name,
+        ]);
+
         return back()->with('success', 'Plano atualizado.');
     }
 
@@ -916,6 +1345,11 @@ class ProdutosController extends Controller
             abort(404);
         }
         $plan->delete();
+
+        $this->logSellerActivity(SellerActivityLogService::PRODUCT_PLAN_DELETED, $plan, [
+            'name' => $plan->name,
+        ]);
+
         return back()->with('success', 'Plano removido.');
     }
 
@@ -954,30 +1388,59 @@ class ProdutosController extends Controller
         ];
     }
 
-    private function authorizeProduct(Product $produto): void
+    private function authorizeProduct(Product $produto, bool $manage = true): void
     {
-        $tenantId = auth()->user()->tenant_id;
-        if ($produto->tenant_id !== $tenantId) {
-            abort(403);
+        $user = auth()->user();
+        $tenantId = $user->tenant_id;
+        if ((int) $produto->tenant_id === (int) $tenantId) {
+            if ($user->isTeam()) {
+                $allowed = app(TeamAccessService::class)->allowedProductIdsFor($user);
+                if (! in_array($produto->id, $allowed, true)) {
+                    abort(403);
+                }
+            }
+
+            return;
         }
 
-        if (auth()->user()->isTeam()) {
-            $allowed = app(TeamAccessService::class)->allowedProductIdsFor(auth()->user());
-            if (! in_array($produto->id, $allowed, true)) {
-                abort(403);
-            }
+        if (! $manage && ProductCoproducer::isActiveCoproducerOf((int) $user->id, (string) $produto->id)) {
+            return;
         }
+
+        abort(403);
+    }
+
+    /**
+     * @return array{brl_eur: float|string, brl_usd: float|string}
+     */
+    private function productRates(): array
+    {
+        return config('products.rates', ['brl_eur' => 0.16, 'brl_usd' => 0.18]);
+    }
+
+    private function makeUniqueProductSlug(int $tenantId, string $baseSlug): string
+    {
+        return Product::uniqueSlugForTenant($tenantId, $baseSlug !== '' ? $baseSlug : 'produto');
+    }
+
+    private function isDuplicateProductSlugException(QueryException $e): bool
+    {
+        $message = strtolower($e->getMessage());
+
+        if (str_contains($message, '23505') || str_contains($message, 'unique violation')) {
+            return str_contains($message, 'slug') || str_contains($message, 'products_tenant_id');
+        }
+
+        return str_contains($message, 'duplicate')
+            && (str_contains($message, 'slug') || str_contains($message, 'products.tenant_id') || str_contains($message, 'products_tenant_id'));
     }
 
     private function productToArray(Product $p, array $rates): array
     {
-        $priceBrl = (float) $p->price;
         $currency = $p->currency ?? 'BRL';
-        if ($currency !== 'BRL') {
-            $priceBrl = $currency === 'EUR' ? $priceBrl / ($rates['brl_eur'] ?? 0.16) : $priceBrl / ($rates['brl_usd'] ?? 0.18);
-        }
-        $priceEur = round($priceBrl * ($rates['brl_eur'] ?? 0.16), 2);
-        $priceUsd = round($priceBrl * ($rates['brl_usd'] ?? 0.18), 2);
+        $priceBrl = MoneyDecimal::brlFromStorage((float) $p->price, (string) $currency, $rates);
+        $priceEur = MoneyDecimal::toFloat(bcmul((string) $priceBrl, (string) ($rates['brl_eur'] ?? 0.16), 4));
+        $priceUsd = MoneyDecimal::toFloat(bcmul((string) $priceBrl, (string) ($rates['brl_usd'] ?? 0.18), 4));
 
         $imageUrl = $p->image
             ? app(StorageService::class)->url($p->image)
@@ -992,23 +1455,126 @@ class ProdutosController extends Controller
         return [
             'id' => $p->id,
             'name' => $p->name,
+            'notification_name' => $p->notification_name,
+            'support_email' => $p->support_email,
             'slug' => $p->slug,
             'checkout_slug' => $p->checkout_slug,
             'description' => $p->description,
+            'category' => $p->category,
+            'category_label' => Product::categoryLabels()[$p->category] ?? null,
+            'marketplace_category_id' => $p->marketplace_category_id,
+            'delivery_mode' => $p->delivery_mode ?? Product::DELIVERY_CHAT,
+            'warranty_text' => $p->warranty_text,
+            'region_text' => $p->region_text,
             'type' => $p->type,
             'type_label' => $typeLabel,
             'billing_type' => $billingType,
             'billing_type_label' => $billingLabels[$billingType] ?? $billingType,
             'image' => $p->image,
             'image_url' => $imageUrl,
-            'price' => (float) $p->price,
-            'currency' => $p->currency ?? 'BRL',
-            'price_brl' => round($priceBrl, 2),
+            'price' => MoneyDecimal::toFloat($p->price),
+            'currency' => $currency,
+            'price_brl' => $priceBrl,
             'price_eur' => $priceEur,
             'price_usd' => $priceUsd,
             'is_active' => $p->is_active,
+            'available_for_purchase' => $p->isAvailableForPurchase(),
+            'approval' => app(ProductApprovalService::class)->sellerFacingStatus($p),
             'conversion_pixels' => $p->conversion_pixels,
+            'shipping_store_id' => $p->shipping_store_id,
+            'physical_config' => $p->physical_config ?? ['free_shipping' => false],
         ];
+    }
+
+    private function platformPriceRules(): array
+    {
+        $tenantId = (int) (auth()->user()?->tenant_id ?? 0);
+        $min = app(MinimumChargeService::class)->platformMinimumBrlForTenant($tenantId > 0 ? $tenantId : null);
+
+        return ['required', 'numeric', 'min:'.$min];
+    }
+
+    /**
+     * @param  array<string, mixed>  $validated
+     * @return array{pm: ?array<string, bool>, error: ?string}
+     */
+    private function resolveProductPaymentMethods(
+        Request $request,
+        Product $produto,
+        array $validated
+    ): array {
+        $paymentService = app(PaymentService::class);
+        $billingType = (string) ($validated['billing_type'] ?? $produto->billing_type ?? Product::BILLING_ONE_TIME);
+        $basePlan = $billingType === Product::BILLING_SUBSCRIPTION
+            ? $produto->subscriptionPlans()->orderBy('position')->first()
+            : null;
+        $global = $paymentService->globallyAvailablePaymentMethodKeys($produto, $basePlan);
+        $pm = [
+            'pix' => $request->boolean('payment_methods_enabled.pix', true),
+            'card' => $request->boolean('payment_methods_enabled.card', true),
+            'boleto' => $request->boolean('payment_methods_enabled.boleto', true),
+            'pix_auto' => $billingType === Product::BILLING_SUBSCRIPTION
+                ? $request->boolean('payment_methods_enabled.pix_auto', true)
+                : false,
+            'apple_pay' => $request->boolean('payment_methods_enabled.apple_pay', true),
+            'google_pay' => $request->boolean('payment_methods_enabled.google_pay', true),
+            'open_finance' => $request->boolean('payment_methods_enabled.open_finance', true),
+            'paypal' => $request->boolean('payment_methods_enabled.paypal', true),
+        ];
+        $keysToCheck = ['pix', 'card', 'boleto', 'open_finance'];
+        if ($billingType === Product::BILLING_SUBSCRIPTION && $basePlan) {
+            $keysToCheck[] = 'pix_auto';
+        }
+        if (! empty($global['apple_pay'])) {
+            $keysToCheck[] = 'apple_pay';
+        }
+        if (! empty($global['google_pay'])) {
+            $keysToCheck[] = 'google_pay';
+        }
+        if (! empty($global['paypal'])) {
+            $keysToCheck[] = 'paypal';
+        }
+        foreach (array_keys($pm) as $k) {
+            if (empty($global[$k])) {
+                $pm[$k] = false;
+            }
+        }
+        $anyGlobal = false;
+        foreach ($keysToCheck as $k) {
+            if (! empty($global[$k])) {
+                $anyGlobal = true;
+                break;
+            }
+        }
+        if ($anyGlobal) {
+            $atLeastOne = false;
+            foreach ($keysToCheck as $k) {
+                if (! empty($global[$k]) && ($pm[$k] ?? false)) {
+                    $atLeastOne = true;
+                    break;
+                }
+            }
+            if (! $atLeastOne) {
+                return [
+                    'pm' => null,
+                    'error' => 'Ative pelo menos um método de pagamento disponível na plataforma.',
+                ];
+            }
+        }
+
+        return ['pm' => $pm, 'error' => null];
+    }
+
+    private function assertPhysicalProductRules(string $type, string $billingType): void
+    {
+        if ($type === Product::TYPE_PRODUTO_FISICO) {
+            if (! PhysicalProductAccess::globalEnabled()) {
+                abort(422, 'Produto físico não está habilitado na plataforma.');
+            }
+            if ($billingType === Product::BILLING_SUBSCRIPTION) {
+                abort(422, 'Produto físico não pode ser vendido como assinatura.');
+            }
+        }
     }
 
     /**
@@ -1032,7 +1598,13 @@ class ProdutosController extends Controller
                 $produto->checkout_slug = Product::generateUniqueCheckoutSlug();
                 $produto->save();
             }
-            return redirect()->to(route('produtos.edit', $produto) . '?tab=checkout')->with('success', 'Link do checkout (produto base) gerado.');
+
+            $this->logSellerActivity(SellerActivityLogService::PRODUCT_CHECKOUT_SLUG_GENERATED, $produto, [
+                'name' => $produto->name,
+                'type' => 'main',
+            ]);
+
+            return redirect()->to(route('produtos.edit', $produto).'?tab=checkout')->with('success', 'Link do checkout (produto base) gerado.');
         }
 
         if ($type === 'offer') {
@@ -1041,7 +1613,13 @@ class ProdutosController extends Controller
                 $offer->checkout_slug = ProductOffer::generateUniqueCheckoutSlug();
                 $offer->save();
             }
-            return redirect()->to(route('produtos.edit', $produto) . '?tab=checkout')->with('success', 'Link do checkout da oferta gerado.');
+
+            $this->logSellerActivity(SellerActivityLogService::PRODUCT_CHECKOUT_SLUG_GENERATED, $produto, [
+                'name' => $produto->name,
+                'type' => 'offer',
+            ]);
+
+            return redirect()->to(route('produtos.edit', $produto).'?tab=checkout')->with('success', 'Link do checkout da oferta gerado.');
         }
 
         $plan = SubscriptionPlan::where('id', $validated['plan_id'])->where('product_id', $produto->id)->firstOrFail();
@@ -1049,7 +1627,13 @@ class ProdutosController extends Controller
             $plan->checkout_slug = SubscriptionPlan::generateUniqueCheckoutSlug();
             $plan->save();
         }
-        return redirect()->to(route('produtos.edit', $produto) . '?tab=checkout')->with('success', 'Link do checkout do plano gerado.');
+
+        $this->logSellerActivity(SellerActivityLogService::PRODUCT_CHECKOUT_SLUG_GENERATED, $produto, [
+            'name' => $produto->name,
+            'type' => 'plan',
+        ]);
+
+        return redirect()->to(route('produtos.edit', $produto).'?tab=checkout')->with('success', 'Link do checkout do plano gerado.');
     }
 
     /**
@@ -1069,11 +1653,93 @@ class ProdutosController extends Controller
         if ($validated['type'] === 'offer') {
             $offer = ProductOffer::where('id', $validated['offer_id'])->where('product_id', $produto->id)->firstOrFail();
             $offer->update(['checkout_slug' => null]);
-            return redirect()->to(route('produtos.edit', $produto) . '?tab=checkout')->with('success', 'Checkout exclusivo da oferta removido; ela passará a usar o checkout principal.');
+
+            $this->logSellerActivity(SellerActivityLogService::PRODUCT_CHECKOUT_SLUG_REMOVED, $produto, [
+                'name' => $produto->name,
+                'type' => 'offer',
+            ]);
+
+            return redirect()->to(route('produtos.edit', $produto).'?tab=checkout')->with('success', 'Checkout exclusivo da oferta removido; ela passará a usar o checkout principal.');
         }
 
         $plan = SubscriptionPlan::where('id', $validated['plan_id'])->where('product_id', $produto->id)->firstOrFail();
         $plan->update(['checkout_slug' => null]);
-        return redirect()->to(route('produtos.edit', $produto) . '?tab=checkout')->with('success', 'Checkout exclusivo do plano removido; ele passará a usar o checkout principal.');
+
+        $this->logSellerActivity(SellerActivityLogService::PRODUCT_CHECKOUT_SLUG_REMOVED, $produto, [
+            'name' => $produto->name,
+            'type' => 'plan',
+        ]);
+
+        return redirect()->to(route('produtos.edit', $produto).'?tab=checkout')->with('success', 'Checkout exclusivo do plano removido; ele passará a usar o checkout principal.');
+    }
+
+    /**
+     * @return array{
+     *     card_show_installments: bool,
+     *     card_installments_gateway_name: string,
+     *     digital_wallets_at_checkout: bool,
+     *     platform_card_installments_enabled: bool,
+     *     platform_card_installments_max: int
+     * }
+     */
+    private function checkoutGatewayUiForTenant(mixed $tenantId): array
+    {
+        $platformEnabled = PlatformCardInstallments::globalEnabled();
+        $platformMax = PlatformCardInstallments::maxAllowed();
+        $tenantId = $tenantId !== null && $tenantId !== '' ? (int) $tenantId : null;
+        if ($tenantId !== null && $tenantId < 1) {
+            $tenantId = null;
+        }
+        if ($tenantId === null) {
+            return [
+                'card_show_installments' => false,
+                'card_installments_gateway_name' => '',
+                'digital_wallets_at_checkout' => false,
+                'platform_card_installments_enabled' => $platformEnabled,
+                'platform_card_installments_max' => $platformMax,
+            ];
+        }
+
+        $paymentService = app(PaymentService::class);
+        $cardOrder = $paymentService->getGatewayOrderForMethod($tenantId, 'card', null, null);
+        $credentialBySlug = GatewayCredential::connectedMapForPayment($tenantId);
+        $primaryConnectedCardSlug = null;
+        foreach ($cardOrder as $slug) {
+            if (! is_string($slug) || $slug === '' || ! $credentialBySlug->get($slug)) {
+                continue;
+            }
+            $gw = GatewayRegistry::get($slug);
+            if ($gw && in_array('card', $gw['methods'] ?? [], true)) {
+                $primaryConnectedCardSlug = $slug;
+                break;
+            }
+        }
+        $connectedCardDef = is_string($primaryConnectedCardSlug)
+            ? GatewayRegistry::get($primaryConnectedCardSlug)
+            : null;
+
+        return [
+            'card_show_installments' => $platformEnabled && CardInstallments::gatewaySupports($primaryConnectedCardSlug),
+            'card_installments_gateway_name' => is_array($connectedCardDef)
+                ? (string) ($connectedCardDef['name'] ?? $primaryConnectedCardSlug)
+                : '',
+            'digital_wallets_at_checkout' => $primaryConnectedCardSlug === 'cajupay',
+            'platform_card_installments_enabled' => $platformEnabled,
+            'platform_card_installments_max' => $platformMax,
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>|null  $input
+     */
+    private function applyCardInstallmentsToProduct(Product $product, ?array $input): void
+    {
+        $normalized = PlatformCardInstallments::normalizeSellerInput($input, (string) $product->billing_type);
+        if ($normalized === null) {
+            return;
+        }
+        $config = $product->checkout_config ?? [];
+        $config['card_installments'] = $normalized;
+        $product->update(['checkout_config' => $config]);
     }
 }

@@ -2,13 +2,21 @@
 
 namespace App\Http\Controllers;
 
-use App\Gateways\GatewayRegistry;
 use App\Models\ApiApplication;
-use App\Services\StorageService;
+use App\Models\ApiKey;
+use App\Models\ApiWebhookDelivery;
+use App\Services\Api\ApiWebhookConfigService;
+use App\Services\Api\ApiWebhookDeliveryService;
+use App\Services\SellerActivityLogService;
+use App\Support\ApiScopes;
+use App\Support\ApiWebhookEvents;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
+use Illuminate\Validation\Rule;
 use Inertia\Inertia;
 use Inertia\Response;
 use Symfony\Component\HttpFoundation\Response as HttpResponse;
@@ -17,298 +25,551 @@ class ApiApplicationsController extends Controller
 {
     private const WEBHOOK_SECRET_MASK = '__getfy_masked_webhook_secret__';
 
-    /**
-     * @return array<int, array<string, mixed>>
-     */
-    private function buildGatewaysList(?int $tenantId): array
-    {
-        $all = GatewayRegistry::allowedAcquirers();
-        return array_map(function ($g) {
-            $image = $g['image'] ?? null;
-            return [
-                'slug' => $g['slug'],
-                'name' => $g['name'],
-                'image' => GatewayRegistry::resolveImageUrl(is_string($image) ? $image : null),
-                'methods' => $g['methods'] ?? [],
-            ];
-        }, $all);
-    }
-
-    /**
-     * Gateways grouped by method (pix, card, boleto, etc.) for dropdowns.
-     *
-     * @return array<string, array<int, array{slug: string, name: string, image: string|null}>>
-     */
-    private function gatewaysByMethod(?int $tenantId): array
-    {
-        $list = $this->buildGatewaysList($tenantId);
-        $byMethod = ['pix' => [], 'card' => [], 'boleto' => [], 'pix_auto' => [], 'crypto' => []];
-        foreach ($list as $g) {
-            foreach ($g['methods'] ?? [] as $method) {
-                if (isset($byMethod[$method])) {
-                    $byMethod[$method][] = ['slug' => $g['slug'], 'name' => $g['name'], 'image' => $g['image'] ?? null];
-                }
-            }
-        }
-        return $byMethod;
-    }
+    public function __construct(
+        protected ApiWebhookConfigService $webhookConfigService,
+        protected ApiWebhookDeliveryService $webhookDeliveryService,
+    ) {}
 
     public function index(): Response
     {
         $tenantId = auth()->user()->tenant_id;
-        $applications = ApiApplication::forTenant($tenantId)
-            ->orderBy('name')
-            ->get()
-            ->map(fn (ApiApplication $app) => [
-                'id' => $app->id,
-                'name' => $app->name,
-                'slug' => $app->slug,
-                'is_active' => $app->is_active,
-                'webhook_url' => $app->webhook_url,
-                'created_at' => $app->created_at?->toIso8601String(),
-            ]);
+        $keyReveal = null;
+        $app = ApiApplication::ensureDefaultPixApplication($tenantId, $keyReveal);
+        if ($keyReveal !== null) {
+            session()->flash('api_key_reveal', $keyReveal);
+            session()->flash('success', 'Suas chaves de API foram geradas. Guarde a secret em local seguro.');
+        }
 
-        return Inertia::render('ApiApplications/Index', [
-            'applications' => $applications,
-        ]);
+        return Inertia::render('ApiApplications/Index', $this->hubPayload($app));
     }
 
-    public function create(): Response
+    public function create(): RedirectResponse
     {
         $tenantId = auth()->user()->tenant_id;
-        $gatewaysByMethod = $this->gatewaysByMethod($tenantId);
-        $defaultPaymentGateways = ApiApplication::defaultPaymentGateways();
+        $keyReveal = null;
+        ApiApplication::ensureDefaultPixApplication($tenantId, $keyReveal);
+        if ($keyReveal !== null) {
+            session()->flash('api_key_reveal', $keyReveal);
+            session()->flash('success', 'Suas chaves de API foram geradas. Guarde a secret em local seguro.');
+        }
 
-        return Inertia::render('ApiApplications/Create', [
-            'gateways_by_method' => $gatewaysByMethod,
-            'default_payment_gateways' => $defaultPaymentGateways,
-        ]);
+        return redirect()->route('api-applications.index');
     }
 
     public function store(Request $request): RedirectResponse
     {
-        $tenantId = auth()->user()->tenant_id;
-        $validated = $request->validate([
-            'name' => ['required', 'string', 'max:255'],
-            'payment_gateways' => ['nullable', 'array'],
-            'payment_gateways.pix' => ['nullable', 'string', 'max:64'],
-            'payment_gateways.pix_redundancy' => ['nullable', 'array'],
-            'payment_gateways.pix_redundancy.*' => ['string', 'max:64'],
-            'payment_gateways.card' => ['nullable', 'string', 'max:64'],
-            'payment_gateways.card_redundancy' => ['nullable', 'array'],
-            'payment_gateways.card_redundancy.*' => ['string', 'max:64'],
-            'payment_gateways.boleto' => ['nullable', 'string', 'max:64'],
-            'payment_gateways.boleto_redundancy' => ['nullable', 'array'],
-            'payment_gateways.boleto_redundancy.*' => ['string', 'max:64'],
-            'payment_gateways.pix_auto' => ['nullable', 'string', 'max:64'],
-            'payment_gateways.pix_auto_redundancy' => ['nullable', 'array'],
-            'payment_gateways.pix_auto_redundancy.*' => ['string', 'max:64'],
-            'payment_gateways.crypto' => ['nullable', 'string', 'max:64'],
-            'payment_gateways.crypto_redundancy' => ['nullable', 'array'],
-            'payment_gateways.crypto_redundancy.*' => ['string', 'max:64'],
-            'webhook_url' => ['nullable', 'string', 'url', 'max:512'],
-            'default_return_url' => ['nullable', 'string', 'url', 'max:512'],
-            'webhook_secret' => ['nullable', 'string', 'max:64'],
-            'allowed_ips' => ['nullable', 'string', 'max:2000'],
-            'is_active' => ['nullable', 'boolean'],
-            'checkout_sidebar_bg' => ['nullable', 'string', 'max:32', 'regex:/^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$/'],
-        ]);
-
-        $slug = ApiApplication::generateUniqueSlug($tenantId, $validated['name']);
-        $plainKey = 'getfy_' . Str::random(12) . '_' . Str::random(32);
-        $apiKeyHash = ApiApplication::hashApiKey($plainKey);
-
-        $pg = $validated['payment_gateways'] ?? [];
-        $paymentGateways = [
-            'pix' => ! empty($pg['pix']) ? $pg['pix'] : null,
-            'pix_redundancy' => array_values(array_filter(array_map(fn ($s) => is_string($s) ? trim($s) : '', $pg['pix_redundancy'] ?? []))),
-            'card' => ! empty($pg['card']) ? $pg['card'] : null,
-            'card_redundancy' => array_values(array_filter(array_map(fn ($s) => is_string($s) ? trim($s) : '', $pg['card_redundancy'] ?? []))),
-            'boleto' => ! empty($pg['boleto']) ? $pg['boleto'] : null,
-            'boleto_redundancy' => array_values(array_filter(array_map(fn ($s) => is_string($s) ? trim($s) : '', $pg['boleto_redundancy'] ?? []))),
-            'pix_auto' => ! empty($pg['pix_auto']) ? $pg['pix_auto'] : null,
-            'pix_auto_redundancy' => array_values(array_filter(array_map(fn ($s) => is_string($s) ? trim($s) : '', $pg['pix_auto_redundancy'] ?? []))),
-            'crypto' => ! empty($pg['crypto']) ? $pg['crypto'] : null,
-            'crypto_redundancy' => array_values(array_filter(array_map(fn ($s) => is_string($s) ? trim($s) : '', $pg['crypto_redundancy'] ?? []))),
-        ];
-
-        $allowedIps = [];
-        if (! empty($validated['allowed_ips'])) {
-            $lines = preg_split('/\s*[\r\n,]+\s*/', trim($validated['allowed_ips']), -1, PREG_SPLIT_NO_EMPTY);
-            $allowedIps = array_values(array_unique(array_filter(array_map('trim', $lines))));
-        }
-
-        $app = ApiApplication::create([
-            'tenant_id' => $tenantId,
-            'name' => $validated['name'],
-            'slug' => $slug,
-            'api_key_hash' => $apiKeyHash,
-            'payment_gateways' => $paymentGateways,
-            'allowed_ips' => $allowedIps,
-            'webhook_url' => $validated['webhook_url'] ?? null,
-            'default_return_url' => $validated['default_return_url'] ?? null,
-            'webhook_secret' => $validated['webhook_secret'] ?? null,
-            'is_active' => (bool) ($validated['is_active'] ?? true),
-            'checkout_sidebar_bg' => $this->normalizeCheckoutSidebarBg($validated['checkout_sidebar_bg'] ?? null),
-        ]);
-
-        return redirect()
-            ->route('api-applications.edit', $app)
-            ->with('api_key_reveal', $plainKey)
-            ->with('success', 'Aplicação criada. Copie a API key abaixo; ela não será exibida novamente.');
+        return redirect()->route('api-applications.index');
     }
 
-    public function edit(ApiApplication $apiApplication): Response|RedirectResponse
+    public function edit(ApiApplication $apiApplication): RedirectResponse
     {
         $this->authorizeTenant($apiApplication);
-        $tenantId = auth()->user()->tenant_id;
-        $gatewaysByMethod = $this->gatewaysByMethod($tenantId);
-        $pg = $apiApplication->payment_gateways ?? ApiApplication::defaultPaymentGateways();
 
-        $storage = new StorageService($apiApplication->tenant_id);
-        $logoUrl = $apiApplication->logo ? $storage->url($apiApplication->logo) : null;
-
-        return Inertia::render('ApiApplications/Edit', [
-            'application' => [
-                'id' => $apiApplication->id,
-                'name' => $apiApplication->name,
-                'slug' => $apiApplication->slug,
-                'logo_url' => $logoUrl,
-                'checkout_sidebar_bg' => $apiApplication->checkout_sidebar_bg,
-                'payment_gateways' => $pg,
-                'webhook_url' => $apiApplication->webhook_url,
-                'default_return_url' => $apiApplication->default_return_url,
-                'webhook_secret' => ($apiApplication->webhook_secret ?? '') !== '' ? self::WEBHOOK_SECRET_MASK : '',
-                'allowed_ips' => is_array($apiApplication->allowed_ips) ? implode("\n", $apiApplication->allowed_ips) : '',
-                'is_active' => $apiApplication->is_active,
-            ],
-            'gateways_by_method' => $gatewaysByMethod,
-            'api_key_reveal' => session('api_key_reveal'),
-            'webhook_secret_mask' => self::WEBHOOK_SECRET_MASK,
-        ]);
+        return redirect()->route('api-applications.index');
     }
 
     public function update(Request $request, ApiApplication $apiApplication): RedirectResponse
     {
         $this->authorizeTenant($apiApplication);
         $validated = $request->validate([
-            'name' => ['required', 'string', 'max:255'],
-            'payment_gateways' => ['nullable', 'array'],
-            'payment_gateways.pix' => ['nullable', 'string', 'max:64'],
-            'payment_gateways.pix_redundancy' => ['nullable', 'array'],
-            'payment_gateways.pix_redundancy.*' => ['string', 'max:64'],
-            'payment_gateways.card' => ['nullable', 'string', 'max:64'],
-            'payment_gateways.card_redundancy' => ['nullable', 'array'],
-            'payment_gateways.card_redundancy.*' => ['string', 'max:64'],
-            'payment_gateways.boleto' => ['nullable', 'string', 'max:64'],
-            'payment_gateways.boleto_redundancy' => ['nullable', 'array'],
-            'payment_gateways.boleto_redundancy.*' => ['string', 'max:64'],
-            'payment_gateways.pix_auto' => ['nullable', 'string', 'max:64'],
-            'payment_gateways.pix_auto_redundancy' => ['nullable', 'array'],
-            'payment_gateways.pix_auto_redundancy.*' => ['string', 'max:64'],
-            'payment_gateways.crypto' => ['nullable', 'string', 'max:64'],
-            'payment_gateways.crypto_redundancy' => ['nullable', 'array'],
-            'payment_gateways.crypto_redundancy.*' => ['string', 'max:64'],
-            'webhook_url' => ['nullable', 'string', 'url', 'max:512'],
-            'default_return_url' => ['nullable', 'string', 'url', 'max:512'],
-            'webhook_secret' => ['nullable', 'string', 'max:64'],
-            'allowed_ips' => ['nullable', 'string', 'max:2000'],
-            'is_active' => ['nullable', 'boolean'],
-            'checkout_sidebar_bg' => ['nullable', 'string', 'max:32', 'regex:/^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$/'],
+            'name' => ['sometimes', 'string', 'max:255'],
+            'is_active' => ['sometimes', 'boolean'],
+        ]);
+        $apiApplication->update(array_filter([
+            'name' => $validated['name'] ?? null,
+            'is_active' => array_key_exists('is_active', $validated) ? (bool) $validated['is_active'] : null,
+        ], fn ($v) => $v !== null));
+
+        return redirect()->route('api-applications.index')->with('success', 'Integração atualizada.');
+    }
+
+    public function destroy(ApiApplication $apiApplication): RedirectResponse
+    {
+        $this->authorizeTenant($apiApplication);
+        if ($apiApplication->isGlobalPixApplication()) {
+            return redirect()->route('api-applications.index')->with('error', 'A integração API PIX padrão não pode ser excluída.');
+        }
+        $apiApplication->delete();
+
+        return redirect()->route('api-applications.index')->with('success', 'Aplicação removida.');
+    }
+
+    public function regenerateKey(Request $request, ApiApplication $apiApplication): RedirectResponse
+    {
+        $this->authorizeTenant($apiApplication);
+
+        $plainKey = 'getfy_'.Str::random(12).'_'.Str::random(32);
+        $publicKey = ApiApplication::generatePublicKey();
+        $secretKey = ApiApplication::generateSecretKey();
+        $payload = [
+            'api_key_hash' => ApiApplication::hashApiKey($plainKey),
+            'public_key' => $publicKey,
+            'secret_key_hash' => ApiApplication::hashSecretKey($secretKey),
+        ];
+        if (Schema::hasColumn($apiApplication->getTable(), 'secret_encrypted')) {
+            $payload['secret_encrypted'] = ApiApplication::encryptSecretForStorage($secretKey);
+        }
+        $apiApplication->update($payload);
+
+        $this->logActivity(SellerActivityLogService::API_CREDENTIALS_ROTATED, $apiApplication, [
+            'public_key_masked' => self::maskPublicKey($publicKey),
         ]);
 
-        $pg = $validated['payment_gateways'] ?? [];
-        $paymentGateways = [
-            'pix' => ! empty($pg['pix']) ? $pg['pix'] : null,
-            'pix_redundancy' => array_values(array_filter(array_map(fn ($s) => is_string($s) ? trim($s) : '', $pg['pix_redundancy'] ?? []))),
-            'card' => ! empty($pg['card']) ? $pg['card'] : null,
-            'card_redundancy' => array_values(array_filter(array_map(fn ($s) => is_string($s) ? trim($s) : '', $pg['card_redundancy'] ?? []))),
-            'boleto' => ! empty($pg['boleto']) ? $pg['boleto'] : null,
-            'boleto_redundancy' => array_values(array_filter(array_map(fn ($s) => is_string($s) ? trim($s) : '', $pg['boleto_redundancy'] ?? []))),
-            'pix_auto' => ! empty($pg['pix_auto']) ? $pg['pix_auto'] : null,
-            'pix_auto_redundancy' => array_values(array_filter(array_map(fn ($s) => is_string($s) ? trim($s) : '', $pg['pix_auto_redundancy'] ?? []))),
-            'crypto' => ! empty($pg['crypto']) ? $pg['crypto'] : null,
-            'crypto_redundancy' => array_values(array_filter(array_map(fn ($s) => is_string($s) ? trim($s) : '', $pg['crypto_redundancy'] ?? []))),
+        if (Schema::hasColumn($apiApplication->getTable(), 'legacy_api_key_sha256')) {
+            $apiApplication->forceFill(['legacy_api_key_sha256' => hash('sha256', $plainKey)])->saveQuietly();
+        }
+
+        return redirect()
+            ->route('api-applications.index')
+            ->with('api_key_reveal', [
+                'public_key' => $publicKey,
+                'secret_key' => $secretKey,
+            ])
+            ->with('success', 'Novas credenciais geradas. Copie agora; as credenciais anteriores deixam de funcionar.');
+    }
+
+    public function revealSecret(ApiApplication $apiApplication): JsonResponse
+    {
+        $this->authorizeTenant($apiApplication);
+
+        if (! Schema::hasColumn($apiApplication->getTable(), 'secret_encrypted')) {
+            return response()->json([
+                'message' => 'Execute php artisan migrate para habilitar a revelação da secret.',
+            ], 503);
+        }
+
+        $enc = $apiApplication->secret_encrypted;
+        if (! is_string($enc) || $enc === '') {
+            return response()->json([
+                'message' => 'Regenere as chaves uma vez para habilitar a revelação da secret.',
+            ], 422);
+        }
+
+        try {
+            $plain = Crypt::decryptString($enc);
+        } catch (\Throwable) {
+            return response()->json([
+                'message' => 'Não foi possível revelar a secret. Regenere as chaves.',
+            ], 422);
+        }
+
+        $this->logActivity(SellerActivityLogService::API_SECRET_REVEALED, $apiApplication, [
+            'public_key_masked' => self::maskPublicKey($apiApplication->public_key),
+        ]);
+
+        return response()->json(['secret_key' => $plain]);
+    }
+
+    public function storeApiKey(Request $request, ApiApplication $apiApplication): RedirectResponse
+    {
+        $this->authorizeTenant($apiApplication);
+
+        $validated = $request->validate([
+            'name' => ['required', 'string', 'max:120'],
+            'scopes' => ['required', 'array', 'min:1'],
+            'scopes.*' => ['string', 'in:'.implode(',', ApiScopes::all())],
+        ]);
+
+        $secret = ApiKey::generateSecretKey();
+        $keyReveal = [
+            'public_key' => ApiKey::generatePublicKey(),
+            'secret_key' => $secret,
         ];
 
-        $allowedIps = [];
-        if (! empty($validated['allowed_ips'])) {
-            $lines = preg_split('/\s*[\r\n,]+\s*/', trim($validated['allowed_ips']), -1, PREG_SPLIT_NO_EMPTY);
-            $allowedIps = array_values(array_unique(array_filter(array_map('trim', $lines))));
+        $row = [
+            'tenant_id' => $apiApplication->tenant_id,
+            'api_application_id' => $apiApplication->id,
+            'name' => $validated['name'],
+            'public_key' => $keyReveal['public_key'],
+            'secret_key_hash' => ApiKey::hashSecretKey($secret),
+            'scopes' => array_values(array_unique($validated['scopes'])),
+            'allowed_ips' => [],
+            'strict_idempotency' => true,
+            'async_payments' => false,
+            'rate_limit_tier' => 'standard',
+            'is_active' => true,
+        ];
+        if (Schema::hasColumn((new ApiKey)->getTable(), 'secret_encrypted')) {
+            $row['secret_encrypted'] = ApiKey::encryptSecretForStorage($secret);
+        }
+
+        ApiKey::query()->create($row);
+
+        $this->logActivity(SellerActivityLogService::API_KEY_CREATED, $apiApplication, [
+            'name' => $validated['name'],
+            'public_key_masked' => self::maskPublicKey($keyReveal['public_key']),
+            'scopes' => array_values(array_unique($validated['scopes'])),
+        ]);
+
+        return redirect()
+            ->route('api-applications.index')
+            ->with('api_key_reveal', $keyReveal)
+            ->with('success', 'Nova chave API criada. Copie a secret agora; ela não será exibida novamente.');
+    }
+
+    public function updateApiKey(Request $request, ApiApplication $apiApplication, ApiKey $apiKey): RedirectResponse
+    {
+        $this->authorizeTenant($apiApplication);
+        $this->assertApiKeyBelongsToApplication($apiApplication, $apiKey);
+
+        $validated = $request->validate([
+            'name' => ['required', 'string', 'max:120'],
+            'scopes' => ['required', 'array', 'min:1'],
+            'scopes.*' => ['string', 'in:'.implode(',', ApiScopes::all())],
+            'is_active' => ['sometimes', 'boolean'],
+        ]);
+
+        $apiKey->update([
+            'name' => $validated['name'],
+            'scopes' => array_values(array_unique($validated['scopes'])),
+            'is_active' => (bool) ($validated['is_active'] ?? $apiKey->is_active),
+        ]);
+
+        $this->logActivity(SellerActivityLogService::API_KEY_UPDATED, $apiKey, [
+            'name' => $apiKey->name,
+            'public_key_masked' => self::maskPublicKey($apiKey->public_key),
+            'scopes' => $apiKey->scopes ?? [],
+            'is_active' => (bool) $apiKey->is_active,
+        ]);
+
+        return redirect()->route('api-applications.index')->with('success', 'Chave API atualizada.');
+    }
+
+    public function regenerateApiKey(ApiApplication $apiApplication, ApiKey $apiKey): RedirectResponse
+    {
+        $this->authorizeTenant($apiApplication);
+        $this->assertApiKeyBelongsToApplication($apiApplication, $apiKey);
+
+        $secret = ApiKey::generateSecretKey();
+        $publicKey = ApiKey::generatePublicKey();
+        $payload = [
+            'public_key' => $publicKey,
+            'secret_key_hash' => ApiKey::hashSecretKey($secret),
+        ];
+        if (Schema::hasColumn($apiKey->getTable(), 'secret_encrypted')) {
+            $payload['secret_encrypted'] = ApiKey::encryptSecretForStorage($secret);
+        }
+        $apiKey->update($payload);
+
+        $this->logActivity(SellerActivityLogService::API_KEY_ROTATED, $apiKey, [
+            'name' => $apiKey->name,
+            'public_key_masked' => self::maskPublicKey($publicKey),
+        ]);
+
+        return redirect()
+            ->route('api-applications.index')
+            ->with('api_key_reveal', [
+                'public_key' => $publicKey,
+                'secret_key' => $secret,
+            ])
+            ->with('success', 'Chave rotacionada. Copie a nova secret agora.');
+    }
+
+    public function revealApiKeySecret(ApiApplication $apiApplication, ApiKey $apiKey): JsonResponse
+    {
+        $this->authorizeTenant($apiApplication);
+        $this->assertApiKeyBelongsToApplication($apiApplication, $apiKey);
+
+        if (! $apiKey->canRevealSecret()) {
+            return response()->json([
+                'message' => 'Regenere a chave uma vez para habilitar a revelação da secret.',
+            ], 422);
+        }
+
+        try {
+            $plain = Crypt::decryptString((string) $apiKey->secret_encrypted);
+        } catch (\Throwable) {
+            return response()->json([
+                'message' => 'Não foi possível revelar a secret. Regenere a chave.',
+            ], 422);
+        }
+
+        $this->logActivity(SellerActivityLogService::API_KEY_SECRET_REVEALED, $apiKey, [
+            'name' => $apiKey->name,
+            'public_key_masked' => self::maskPublicKey($apiKey->public_key),
+        ]);
+
+        return response()->json(['secret_key' => $plain]);
+    }
+
+    public function destroyApiKey(ApiApplication $apiApplication, ApiKey $apiKey): RedirectResponse
+    {
+        $this->authorizeTenant($apiApplication);
+        $this->assertApiKeyBelongsToApplication($apiApplication, $apiKey);
+
+        $this->logActivity(SellerActivityLogService::API_KEY_DELETED, $apiKey, [
+            'name' => $apiKey->name,
+            'public_key_masked' => self::maskPublicKey($apiKey->public_key),
+        ]);
+
+        $apiKey->delete();
+
+        return redirect()->route('api-applications.index')->with('success', 'Chave API removida.');
+    }
+
+    public function updateWebhook(Request $request, ApiApplication $apiApplication): RedirectResponse
+    {
+        $this->authorizeTenant($apiApplication);
+
+        $allEvents = ApiWebhookEvents::all();
+        $validated = $request->validate([
+            'webhook_url' => ['nullable', 'string', 'url', 'max:512'],
+            'webhook_secret' => ['nullable', 'string', 'max:64'],
+            'webhook_events' => ['nullable', 'array'],
+            'webhook_events.*' => ['string', Rule::in($allEvents)],
+            'webhook_enabled' => ['sometimes', 'boolean'],
+            'is_active' => ['sometimes', 'boolean'],
+            'clear_webhook' => ['sometimes', 'boolean'],
+        ]);
+
+        if (! empty($validated['clear_webhook'])) {
+            $this->webhookConfigService->clearWebhook($apiApplication);
+            $this->logActivity(SellerActivityLogService::API_WEBHOOK_CLEARED, $apiApplication);
+
+            return redirect()->route('api-applications.index', ['tab' => 'webhooks'])
+                ->with('success', 'Webhook removido.');
         }
 
         $webhookSecret = $validated['webhook_secret'] ?? '';
         if ($webhookSecret === self::WEBHOOK_SECRET_MASK) {
             $webhookSecret = '';
         }
-        $apiApplication->update([
-            'name' => $validated['name'],
-            'payment_gateways' => $paymentGateways,
-            'allowed_ips' => $allowedIps,
-            'webhook_url' => $validated['webhook_url'] ?? null,
-            'default_return_url' => $validated['default_return_url'] ?? null,
-            'webhook_secret' => strlen($webhookSecret) > 0 ? $webhookSecret : $apiApplication->webhook_secret,
-            'is_active' => (bool) ($validated['is_active'] ?? true),
-            'checkout_sidebar_bg' => $this->normalizeCheckoutSidebarBg($validated['checkout_sidebar_bg'] ?? null),
+
+        $events = array_key_exists('webhook_events', $validated)
+            ? $this->webhookConfigService->normalizePanelEvents($validated['webhook_events'] ?? null)
+            : ApiWebhookConfigService::EVENTS_UNCHANGED;
+        $url = $validated['webhook_url'] ?? $apiApplication->webhook_url;
+        $hadSecret = ($apiApplication->webhook_secret ?? '') !== '';
+
+        $result = $this->webhookConfigService->updateFromPanel(
+            $apiApplication,
+            is_string($url) ? $url : null,
+            $events,
+            strlen($webhookSecret) > 0 ? $webhookSecret : null,
+            $hadSecret,
+            array_key_exists('webhook_enabled', $validated) ? (bool) $validated['webhook_enabled'] : null,
+            array_key_exists('is_active', $validated) ? (bool) $validated['is_active'] : null,
+        );
+
+        $redirect = redirect()->route('api-applications.index', ['tab' => 'webhooks'])
+            ->with('success', 'Webhook atualizado.');
+
+        $this->logActivity(SellerActivityLogService::API_WEBHOOK_UPDATED, $apiApplication, [
+            'webhook_url' => is_string($url) ? $url : null,
+            'secret_changed' => strlen($webhookSecret) > 0,
         ]);
 
-        return redirect()->route('api-applications.edit', $apiApplication)->with('success', 'Aplicação atualizada.');
+        if ($result->revealedSecret !== null) {
+            $redirect->with('webhook_secret_reveal', $result->revealedSecret);
+        }
+
+        return $redirect;
     }
 
-    public function destroy(ApiApplication $apiApplication): RedirectResponse
-    {
-        $this->authorizeTenant($apiApplication);
-        $apiApplication->delete();
-        return redirect()->route('api-applications.index')->with('success', 'Aplicação removida.');
-    }
-
-    public function regenerateKey(ApiApplication $apiApplication): RedirectResponse
-    {
-        $this->authorizeTenant($apiApplication);
-        $plainKey = 'getfy_' . Str::random(12) . '_' . Str::random(32);
-        $apiApplication->update(['api_key_hash' => ApiApplication::hashApiKey($plainKey)]);
-
-        return redirect()
-            ->route('api-applications.edit', $apiApplication)
-            ->with('api_key_reveal', $plainKey)
-            ->with('success', 'Nova API key gerada. Copie-a abaixo; a key anterior deixa de funcionar.');
-    }
-
-    public function uploadLogo(Request $request, ApiApplication $apiApplication): JsonResponse
+    public function rotateWebhookSecret(ApiApplication $apiApplication): JsonResponse
     {
         $this->authorizeTenant($apiApplication);
 
-        $request->validate([
-            'image' => ['required', 'image', 'max:5120'],
+        try {
+            $secret = $this->webhookConfigService->rotateSecret($apiApplication);
+        } catch (\InvalidArgumentException $e) {
+            return response()->json(['message' => $e->getMessage()], 422);
+        }
+
+        $this->logActivity(SellerActivityLogService::API_WEBHOOK_SECRET_ROTATED, $apiApplication);
+
+        return response()->json(['webhook_secret' => $secret]);
+    }
+
+    public function webhookDeliveries(Request $request, ApiApplication $apiApplication): JsonResponse
+    {
+        $this->authorizeTenant($apiApplication);
+
+        $perPage = min(50, max(5, (int) $request->query('per_page', 15)));
+        $page = max(1, (int) $request->query('page', 1));
+
+        $query = ApiWebhookDelivery::query()
+            ->where('api_application_id', $apiApplication->id)
+            ->orderByDesc('created_at');
+
+        $total = (clone $query)->count();
+        $items = $query
+            ->skip(($page - 1) * $perPage)
+            ->take($perPage)
+            ->get(['id', 'event', 'status', 'last_status_code', 'attempt', 'created_at', 'delivered_at'])
+            ->map(fn (ApiWebhookDelivery $d) => [
+                'id' => $d->id,
+                'event' => $d->event,
+                'status' => $d->status,
+                'last_status_code' => $d->last_status_code,
+                'attempt' => $d->attempt,
+                'created_at' => $d->created_at?->toIso8601String(),
+                'delivered_at' => $d->delivered_at?->toIso8601String(),
+            ]);
+
+        return response()->json([
+            'deliveries' => $items,
+            'meta' => [
+                'total' => $total,
+                'page' => $page,
+                'per_page' => $perPage,
+                'last_page' => (int) ceil($total / $perPage) ?: 1,
+            ],
+        ]);
+    }
+
+    public function retryWebhookDelivery(ApiApplication $apiApplication, ApiWebhookDelivery $delivery): JsonResponse
+    {
+        $this->authorizeTenant($apiApplication);
+
+        if ((int) $delivery->api_application_id !== (int) $apiApplication->id) {
+            abort(404);
+        }
+
+        if (! is_string($apiApplication->webhook_url) || $apiApplication->webhook_url === '') {
+            return response()->json(['message' => 'Configure uma URL de webhook antes de reenviar.'], 422);
+        }
+
+        $fresh = $this->webhookDeliveryService->retryNow($delivery);
+
+        $this->logActivity(SellerActivityLogService::API_WEBHOOK_DELIVERY_RETRIED, $apiApplication, [
+            'delivery_id' => $delivery->id,
+            'event' => $delivery->event,
         ]);
 
-        $storage = new StorageService($apiApplication->tenant_id);
-        $oldPath = $apiApplication->logo;
-        if ($oldPath && $storage->exists($oldPath)) {
-            $storage->delete($oldPath);
-        }
-
-        $file = $request->file('image');
-        $name = Str::uuid() . '.' . $file->getClientOriginalExtension();
-        $path = $storage->putFileAs('api-applications/' . $apiApplication->id, $file, $name);
-        $apiApplication->update(['logo' => $path]);
-        $url = $storage->url($path);
-
-        return response()->json(['url' => $url], HttpResponse::HTTP_CREATED);
+        return response()->json([
+            'message' => 'Reenvio agendado.',
+            'delivery' => [
+                'id' => $fresh->id,
+                'event' => $fresh->event,
+                'status' => $fresh->status,
+                'last_status_code' => $fresh->last_status_code,
+                'attempt' => $fresh->attempt,
+                'created_at' => $fresh->created_at?->toIso8601String(),
+                'delivered_at' => $fresh->delivered_at?->toIso8601String(),
+            ],
+        ]);
     }
 
-    public function removeLogo(ApiApplication $apiApplication): JsonResponse
+    public function updateApiPixToggle(Request $request): RedirectResponse
     {
-        $this->authorizeTenant($apiApplication);
+        $tenantId = auth()->user()->tenant_id;
+        $validated = $request->validate([
+            'mode' => ['required', 'string', 'in:inherit,enabled,disabled'],
+        ]);
 
-        $storage = new StorageService($apiApplication->tenant_id);
-        $oldPath = $apiApplication->logo;
-        if ($oldPath && $storage->exists($oldPath)) {
-            $storage->delete($oldPath);
+        ApiPixAccess::setTenantMode((int) $tenantId, $validated['mode']);
+
+        return redirect()->route('api-applications.index')->with('success', 'Configuração da API PIX atualizada.');
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function hubPayload(ApiApplication $app): array
+    {
+        $additionalKeys = ApiKey::query()
+            ->where('api_application_id', $app->id)
+            ->orderByDesc('id')
+            ->get();
+
+        $keys = collect([
+            [
+                'id' => 'legacy',
+                'type' => 'legacy',
+                'name' => $app->name ?: 'Integração principal',
+                'public_key' => $app->public_key,
+                'public_key_masked' => self::maskPublicKey($app->public_key),
+                'scopes' => [ApiScopes::WILDCARD],
+                'is_active' => (bool) $app->is_active,
+                'can_reveal_secret' => self::apiApplicationCanRevealSecret($app),
+                'can_delete' => false,
+                'can_edit' => true,
+                'created_at' => $app->created_at?->toIso8601String(),
+            ],
+        ])->merge($additionalKeys->map(fn (ApiKey $k) => [
+            'id' => $k->id,
+            'type' => 'scoped',
+            'name' => $k->name,
+            'public_key' => $k->public_key,
+            'public_key_masked' => self::maskPublicKey($k->public_key),
+            'scopes' => $k->scopes ?? [],
+            'is_active' => (bool) $k->is_active,
+            'can_reveal_secret' => $k->canRevealSecret(),
+            'can_delete' => true,
+            'can_edit' => true,
+            'created_at' => $k->created_at?->toIso8601String(),
+        ]))->values()->all();
+
+        $recentDeliveries = ApiWebhookDelivery::query()
+            ->where('api_application_id', $app->id)
+            ->orderByDesc('created_at')
+            ->limit(15)
+            ->get(['id', 'event', 'status', 'last_status_code', 'attempt', 'created_at', 'delivered_at'])
+            ->map(fn (ApiWebhookDelivery $d) => [
+                'id' => $d->id,
+                'event' => $d->event,
+                'status' => $d->status,
+                'last_status_code' => $d->last_status_code,
+                'attempt' => $d->attempt,
+                'created_at' => $d->created_at?->toIso8601String(),
+                'delivered_at' => $d->delivered_at?->toIso8601String(),
+            ])
+            ->all();
+
+        $hasWebhook = is_string($app->webhook_url) && $app->webhook_url !== '';
+        $webhookEvents = $app->webhook_events;
+        $allWebhookEvents = ApiWebhookEvents::isAllSubscription(is_array($webhookEvents) ? $webhookEvents : null);
+
+        return [
+            'application' => [
+                'id' => $app->id,
+                'name' => $app->name,
+                'public_key' => $app->public_key,
+                'is_active' => (bool) $app->is_active,
+                'is_legacy' => $app->isLegacyApplication(),
+                'can_reveal_secret' => self::apiApplicationCanRevealSecret($app),
+            ],
+            'keys' => $keys,
+            'webhook' => [
+                'configured' => $hasWebhook,
+                'url' => $app->webhook_url,
+                'has_secret' => ($app->webhook_secret ?? '') !== '',
+                'webhook_secret_mask' => self::WEBHOOK_SECRET_MASK,
+                'events' => $allWebhookEvents ? null : $webhookEvents,
+                'events_mode' => $allWebhookEvents ? 'all' : 'selected',
+                'is_active' => Schema::hasColumn($app->getTable(), 'webhook_enabled')
+                    ? (bool) ($app->webhook_enabled ?? true)
+                    : (bool) $app->is_active,
+            ],
+            'webhook_event_catalog' => ApiWebhookEvents::catalog(),
+            'available_scopes' => ApiScopes::all(),
+            'scope_catalog' => ApiScopes::catalogList(),
+            'recent_deliveries' => $recentDeliveries,
+            'api_key_reveal' => session('api_key_reveal'),
+            'webhook_secret_reveal' => session('webhook_secret_reveal'),
+            'webhook_secret_mask' => self::WEBHOOK_SECRET_MASK,
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $metadata
+     */
+    private function logActivity(string $action, object $target, array $metadata = []): void
+    {
+        $actor = auth()->user();
+        if (! $actor instanceof \App\Models\User) {
+            return;
         }
-        $apiApplication->update(['logo' => null]);
 
-        return response()->json(['success' => true]);
+        SellerActivityLogService::record(
+            actor: $actor,
+            action: $action,
+            targetType: $target::class,
+            targetId: $target->id ?? null,
+            metadata: $metadata,
+            source: 'panel',
+        );
     }
 
     private function authorizeTenant(ApiApplication $apiApplication): void
@@ -319,13 +580,28 @@ class ApiApplicationsController extends Controller
         }
     }
 
-    /** Default black (#18181b = zinc-900); store null when default. */
-    private function normalizeCheckoutSidebarBg(?string $value): ?string
+    private function assertApiKeyBelongsToApplication(ApiApplication $apiApplication, ApiKey $apiKey): void
     {
-        $v = trim((string) $value);
-        if ($v === '' || $v === '#18181b') {
-            return null;
+        if ((int) $apiKey->api_application_id !== (int) $apiApplication->id) {
+            abort(404);
         }
-        return $v;
+    }
+
+    private static function apiApplicationCanRevealSecret(ApiApplication $apiApplication): bool
+    {
+        if (! Schema::hasColumn($apiApplication->getTable(), 'secret_encrypted')) {
+            return false;
+        }
+
+        return is_string($apiApplication->secret_encrypted) && $apiApplication->secret_encrypted !== '';
+    }
+
+    private static function maskPublicKey(?string $key): string
+    {
+        if (! is_string($key) || strlen($key) < 16) {
+            return $key ?? '—';
+        }
+
+        return substr($key, 0, 10).'...'.substr($key, -6);
     }
 }

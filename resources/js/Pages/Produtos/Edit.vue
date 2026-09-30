@@ -6,6 +6,7 @@ import LayoutInfoprodutor from '@/Layouts/LayoutInfoprodutor.vue';
 import Button from '@/components/ui/Button.vue';
 import Toggle from '@/components/ui/Toggle.vue';
 import Checkbox from '@/components/ui/Checkbox.vue';
+import { formatPriceForInput, normalizeMoneyInput } from '@/lib/moneyDecimal';
 import {
     LayoutDashboard,
     Settings,
@@ -29,12 +30,11 @@ import {
     Pencil,
     Trash2,
     Repeat2,
-    Cog,
+    Truck,
 } from 'lucide-vue-next';
 import axios from 'axios';
 import EmailTemplatePreview from '@/components/produtos/EmailTemplatePreview.vue';
 import { useI18n } from '@/composables/useI18n';
-import { usePlugins } from '@/composables/usePlugins';
 import {
     mergeConversionPixels,
     newMetaEntry,
@@ -56,15 +56,12 @@ function getCsrfToken() {
 
 defineOptions({ layout: LayoutInfoprodutor });
 const { t } = useI18n();
-const { isPluginEnabled } = usePlugins();
-const affiliatesPluginEnabled = computed(() => isPluginEnabled('afiliados'));
-const coproductionPluginEnabled = computed(() => isPluginEnabled('coproducao'));
 
 const DEFAULT_EMAIL_TEMPLATE = {
     logo_url: '',
     from_name: '',
     subject: 'Seu acesso a {nome_produto}',
-    body_html: '<p>Olá, {nome_cliente}!</p><p>Obrigado por adquirir <strong>{nome_produto}</strong>.</p><p>Use o link abaixo para acessar seu conteúdo:</p><p><a href="{link_acesso}" style="display:inline-block;padding:12px 24px;background:#8A2BE2;color:#fff;text-decoration:none;border-radius:8px;">Acessar agora</a></p><p>Ou copie e cole no navegador: {link_acesso}</p><p>Qualquer dúvida, responda este e-mail.</p>',
+    body_html: '<p>Olá, {nome_cliente}!</p><p>Obrigado por adquirir <strong>{nome_produto}</strong>.</p><p>Clique no botão abaixo para fazer login e ver todos os seus produtos em Minha área:</p><p><a href="{link_acesso}" style="display:inline-block;padding:12px 24px;background:#0ea5e9;color:#fff;text-decoration:none;border-radius:8px;font-weight:600;">Fazer login</a></p><p style="font-size:14px;color:#64748b;">Ou copie e cole no navegador: {link_acesso}</p><p style="margin-top:16px;font-size:14px;color:#334155;"><strong>E-mail:</strong> {email_cliente}<br/><strong>Senha:</strong> {senha}</p><p style="font-size:13px;color:#64748b;">Se você não tiver senha, use <a href="{link_esqueci_senha}">Esqueci minha senha</a> para criar uma nova.</p><p>Qualquer dúvida, responda este e-mail.</p>',
 };
 
 const PIXEL_TABS = computed(() => [
@@ -75,49 +72,60 @@ const PIXEL_TABS = computed(() => [
     { id: 'custom_script', label: t('products.edit.custom_script', 'Script personalizado'), image: '/images/pixels/script.png' },
 ]);
 
-const TABS = computed(() => {
-    const all = [
-        { id: 'geral', label: t('products.edit.tab_general', 'Geral'), icon: LayoutDashboard },
-        { id: 'configuracoes', label: t('products.edit.tab_settings', 'Configurações'), icon: Settings },
-        // Aba de e-mail (template de acesso): mantida no código por compatibilidade, mas ocultada do menu.
-        { id: 'order_bump', label: t('products.edit.tab_order_bump', 'Order Bump'), icon: Package },
-        { id: 'upsell_downsell', label: t('products.edit.tab_upsell_downsell', 'Upsell / Downsell'), icon: ArrowUpDown },
-        { id: 'checkout', label: t('products.edit.tab_checkout', 'Checkout'), icon: ShoppingCart },
-        { id: 'links', label: t('products.edit.tab_links', 'Links'), icon: Link2 },
-        { id: 'coproducao', label: t('products.edit.tab_coproduction', 'Co-produção'), icon: Handshake, requiresPlugin: 'coproducao' },
-        { id: 'afiliados', label: t('products.edit.tab_affiliates', 'Afiliados'), icon: Users, requiresPlugin: 'afiliados' },
-        { id: 'member_builder', label: t('products.edit.tab_member_builder', 'Member Builder'), icon: LayoutGrid, linkOnly: true },
-    ];
-    return all.filter((tab) => !tab.requiresPlugin || isPluginEnabled(tab.requiresPlugin));
-});
+const TABS = [
+    { id: 'geral', label: t('products.edit.tab_general', 'Geral'), icon: LayoutDashboard },
+    { id: 'configuracoes', label: t('products.edit.tab_settings', 'Configurações'), icon: Settings },
+    { id: 'links', label: t('products.edit.tab_links', 'Links'), icon: Link2 },
+];
+
+const HIDDEN_MARKETPLACE_TABS = [
+    'email',
+    'order_bump',
+    'upsell_downsell',
+    'checkout',
+    'coproducao',
+    'afiliados',
+    'member_builder',
+];
 
 const props = defineProps({
     produto: { type: Object, required: true },
     productTypes: { type: Array, default: () => [] },
     billingTypes: { type: Array, default: () => [] },
+    productCategories: { type: Array, default: () => [] },
+    marketplaceCategories: { type: Array, default: () => [] },
+    stockUrl: { type: String, default: null },
     exchange_rates: { type: Object, default: () => ({ brl_eur: 0.16, brl_usd: 0.18 }) },
     cademi_integrations: { type: Array, default: () => [] },
+    cademi_available: { type: Boolean, default: true },
     checkout_gateway_ui: {
         type: Object,
-        default: () => ({ card_show_installments: false }),
+        default: () => ({
+            card_show_installments: false,
+            card_installments_gateway_name: '',
+            digital_wallets_at_checkout: false,
+            platform_card_installments_enabled: false,
+            platform_card_installments_max: 12,
+        }),
     },
     global_payment_methods_available: {
         type: Object,
-        default: () => ({ pix: false, card: false, boleto: false, pix_auto: false }),
+        default: () => ({ pix: false, card: false, boleto: false, pix_auto: false, apple_pay: false, google_pay: false, paypal: false }),
     },
+    shipping_stores: { type: Array, default: () => [] },
+    coproduction_readonly: { type: Boolean, default: false },
 });
 
 const page = usePage();
+const coproductionReadonly = computed(() => !!props.coproduction_readonly);
+const visibleTabs = computed(() => TABS.filter((tab) => !HIDDEN_MARKETPLACE_TABS.includes(tab.id)));
 const currentTab = computed(() => {
     const url = page.url;
     const idx = url.indexOf('?');
     const search = idx !== -1 ? url.slice(idx) : '';
     const q = new URLSearchParams(search);
     const t = q.get('tab');
-    if (!t || !TABS.value.some((tab) => tab.id === t)) {
-        return 'geral';
-    }
-    return t;
+    return visibleTabs.value.some((tab) => tab.id === t) ? t : 'geral';
 });
 
 function setTab(tabId) {
@@ -145,11 +153,17 @@ const ci = props.produto.checkout_config?.card_installments ?? { enabled: false,
 const pme = props.produto.checkout_config?.payment_methods_enabled ?? {};
 const form = useForm({
     name: props.produto.name,
-    slug: props.produto.slug,
+    notification_name: props.produto.notification_name ?? '',
+    support_email: props.produto.support_email ?? '',
     description: props.produto.description ?? '',
+    category: props.produto.category ?? '',
+    marketplace_category_id: props.produto.marketplace_category_id ?? '',
+    delivery_mode: props.produto.delivery_mode ?? 'chat',
+    warranty_text: props.produto.warranty_text ?? '',
+    region_text: props.produto.region_text ?? '',
     type: props.produto.type,
     billing_type: props.produto.billing_type ?? 'one_time',
-    price: props.produto.price_brl ?? props.produto.price,
+    price: formatPriceForInput(props.produto.price_brl ?? props.produto.price),
     base_interval: props.produto.base_interval ?? (props.produto.subscription_plans?.sort((a, b) => (a.position ?? 0) - (b.position ?? 0))[0]?.interval) ?? 'monthly',
     currency: props.produto.currency ?? 'BRL',
     is_active: props.produto.is_active,
@@ -165,6 +179,10 @@ const form = useForm({
         card: pme.card !== false && pme.card !== '0',
         boleto: pme.boleto !== false && pme.boleto !== '0',
         pix_auto: pme.pix_auto !== false && pme.pix_auto !== '0',
+        apple_pay: pme.apple_pay !== false && pme.apple_pay !== '0',
+        google_pay: pme.google_pay !== false && pme.google_pay !== '0',
+        open_finance: pme.open_finance !== false && pme.open_finance !== '0',
+        paypal: pme.paypal !== false && pme.paypal !== '0',
     },
     email_template: {
         logo_url: et.logo_url ?? DEFAULT_EMAIL_TEMPLATE.logo_url,
@@ -172,11 +190,37 @@ const form = useForm({
         subject: et.subject ?? DEFAULT_EMAIL_TEMPLATE.subject,
         body_html: et.body_html ?? DEFAULT_EMAIL_TEMPLATE.body_html,
     },
-    refund_enabled: props.produto.refund_policy_days !== null && props.produto.refund_policy_days !== undefined,
-    refund_policy_days: [7, 14, 30].includes(Number(props.produto.refund_policy_days))
-        ? Number(props.produto.refund_policy_days)
-        : 7,
+    shipping_store_id: props.produto.shipping_store_id ?? null,
+    physical_free_shipping: Boolean(props.produto.physical_config?.free_shipping),
 });
+
+watch(
+    () => form.type,
+    (t) => {
+        if (t === 'produto_fisico') {
+            form.billing_type = 'one_time';
+            form.currency = 'BRL';
+        }
+    }
+);
+
+const isSubscriptionBilling = computed(() => form.billing_type === 'subscription');
+const showCardInstallments = computed(
+    () => !isSubscriptionBilling.value && Boolean(props.checkout_gateway_ui?.card_show_installments)
+);
+const cardInstallmentsGatewayName = computed(
+    () => String(props.checkout_gateway_ui?.card_installments_gateway_name || '').trim()
+);
+
+watch(
+    () => form.billing_type,
+    (type) => {
+        if (type === 'subscription') {
+            form.card_installments.enabled = false;
+            form.card_installments.max = 1;
+        }
+    }
+);
 
 const coproducerForm = useForm({
     email: '',
@@ -214,7 +258,36 @@ const affiliateForm = useForm({
     affiliate_page_url: props.produto.affiliate_page_url ?? '',
     affiliate_support_email: props.produto.affiliate_support_email ?? '',
     affiliate_showcase_description: props.produto.affiliate_showcase_description ?? '',
+    affiliate_hide_customer_data: Boolean(props.produto.affiliate_hide_customer_data),
+    affiliate_shared_offer_ids: (() => {
+        const offers = props.produto.offers || [];
+        const shared = offers.filter((o) => o.affiliate_share_enabled).map((o) => Number(o.id));
+        if (shared.length) {
+            return shared;
+        }
+        return offers.map((o) => Number(o.id)).filter((id) => id > 0);
+    })(),
 });
+
+const affiliateShareableOffers = computed(() => props.produto.offers || []);
+const affiliateShareablePlans = computed(() => props.produto.subscription_plans || []);
+
+function isAffiliateOfferShared(offerId) {
+    const id = Number(offerId);
+    return (affiliateForm.affiliate_shared_offer_ids || []).map(Number).includes(id);
+}
+
+function toggleAffiliateOfferShare(offerId, enabled) {
+    const id = Number(offerId);
+    const ids = (affiliateForm.affiliate_shared_offer_ids || []).map(Number).filter((n) => n > 0);
+    const idx = ids.indexOf(id);
+    if (enabled && idx === -1) {
+        ids.push(id);
+    } else if (!enabled && idx !== -1) {
+        ids.splice(idx, 1);
+    }
+    affiliateForm.affiliate_shared_offer_ids = ids;
+}
 
 watch(
     () => affiliateForm.affiliate_enabled,
@@ -263,7 +336,34 @@ function submitAffiliateSettings() {
 
 function copyAffiliateLink(url) {
     if (!url) return;
-    navigator.clipboard.writeText(url);
+    copyToClipboard(url).then((ok) => {
+        if (ok) {
+            copiedSlug.value = url;
+            setTimeout(() => {
+                if (copiedSlug.value === url) copiedSlug.value = null;
+            }, 2000);
+        }
+    });
+}
+
+function copyAffiliateJoinLink() {
+    const url = props.produto.affiliate_join_url;
+    if (!url) return;
+    copyToClipboard(url).then((ok) => {
+        if (ok) {
+            copiedSlug.value = 'affiliate-join';
+            setTimeout(() => {
+                if (copiedSlug.value === 'affiliate-join') copiedSlug.value = null;
+            }, 2000);
+        }
+    });
+}
+
+function regenerateAffiliateJoinLink() {
+    if (!confirm(t('products.edit.affiliate_join_regenerate_confirm', 'Gerar um novo link invalida o atual. Quem tiver o link antigo não conseguirá mais se afiliar por ele. Continuar?'))) {
+        return;
+    }
+    router.post(`/produtos/${props.produto.id}/affiliate-invite-token/regenerate?tab=afiliados`, {}, { preserveScroll: true });
 }
 
 function approveAffiliateEnrollment(id) {
@@ -278,6 +378,11 @@ function rejectAffiliateEnrollment(id) {
 function revokeAffiliateEnrollment(id) {
     if (!confirm('Revogar esta afiliação? O afiliado deixará de receber comissões.')) return;
     router.post(`/produtos/${props.produto.id}/affiliate-enrollments/${id}/revoke?tab=afiliados`, {}, { preserveScroll: true });
+}
+
+function resubmitForReview() {
+    if (!confirm('Reenviar este produto para análise?')) return;
+    router.post(`/produtos/${props.produto.id}/reenviar-analise`, {}, { preserveScroll: true });
 }
 
 function coproducerStatusLabel(s) {
@@ -303,14 +408,35 @@ function durationPresetLabel(p) {
 const priceNum = computed(() => parseFloat(form.price) || 0);
 const priceEur = computed(() => (priceNum.value * (props.exchange_rates.brl_eur ?? 0.16)).toFixed(2));
 const priceUsd = computed(() => (priceNum.value * (props.exchange_rates.brl_usd ?? 0.18)).toFixed(2));
+const platformMinCharge = computed(() => Number(page.props.platform_minimum_charge_brl ?? 0));
+const platformMinChargeLabel = computed(() =>
+    platformMinCharge.value > 0
+        ? new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(platformMinCharge.value)
+        : null
+);
 
 /** Valor mínimo por parcela (R$) exigido pelos processadores — abaixo disso as parcelas costumam ser recusadas. */
 const MIN_PARCELA_BRL = 5;
-/** Máximo de parcelas permitido pelo preço atual (1–12). */
+const platformInstallmentMax = computed(() => {
+    const fromUi = Number(props.checkout_gateway_ui?.platform_card_installments_max);
+    const fromShared = Number(page.props.platform_card_installments?.max);
+    const raw = Number.isFinite(fromUi) && fromUi > 0 ? fromUi : fromShared;
+    return Math.min(12, Math.max(2, raw || 12));
+});
+/** Máximo de parcelas permitido pelo preço atual e pelo teto da plataforma. */
 const maxAllowedInstallments = computed(() => {
+    if (form.billing_type === 'subscription') return 1;
     const p = priceNum.value;
     if (!p || p < MIN_PARCELA_BRL) return 1;
-    return Math.min(12, Math.max(1, Math.floor(p / MIN_PARCELA_BRL)));
+    const byAmount = Math.min(12, Math.max(1, Math.floor(p / MIN_PARCELA_BRL)));
+    return Math.min(byAmount, platformInstallmentMax.value);
+});
+const installmentMaxOptions = computed(() => {
+    const max = maxAllowedInstallments.value;
+    if (max < 2) return [];
+    const out = [];
+    for (let n = 2; n <= max; n++) out.push(n);
+    return out;
 });
 
 watch(maxAllowedInstallments, (maxAllowed) => {
@@ -319,22 +445,43 @@ watch(maxAllowedInstallments, (maxAllowed) => {
     }
 }, { immediate: true });
 
-/** Cartões de método no checkout (mesmas imagens que DefaultMethodCard / checkout). */
-const paymentMethodCardsList = computed(() => {
-    const list = [
-        { key: 'pix', label: 'PIX', hint: 'Pagamento instantâneo', visual: 'pix' },
-        { key: 'card', label: 'Cartão', hint: 'Crédito ou débito', visual: 'card' },
-        { key: 'boleto', label: 'Boleto', hint: 'Compensação bancária', visual: 'boleto' },
-    ];
-    if (form.billing_type === 'subscription') {
-        list.push({
-            key: 'pix_auto',
-            label: 'PIX automático',
-            hint: 'Débito recorrente na assinatura',
-            visual: 'pix_auto',
-        });
+watch(
+    () => form.card_installments.enabled,
+    (enabled) => {
+        if (!enabled || form.billing_type === 'subscription') return;
+        const max = maxAllowedInstallments.value;
+        if (max < 2) {
+            form.card_installments.enabled = false;
+            form.card_installments.max = 1;
+            return;
+        }
+        if (form.card_installments.max < 2) {
+            form.card_installments.max = max;
+        }
     }
-    return list;
+);
+
+const paymentMethodMeta = {
+    pix: { label: 'PIX', hint: 'Pagamento instantâneo', visual: 'pix' },
+    card: { label: 'Cartão', hint: 'Crédito ou débito', visual: 'card' },
+    apple_pay: { label: 'Apple Pay', hint: 'Wallet CajuPay em qualquer dispositivo', visual: 'apple_pay' },
+    google_pay: { label: 'Google Pay', hint: 'Wallet CajuPay em qualquer dispositivo', visual: 'google_pay' },
+    boleto: { label: 'Boleto', hint: 'Compensação bancária', visual: 'boleto' },
+    pix_auto: { label: 'PIX automático', hint: 'Débito recorrente na assinatura', visual: 'pix_auto' },
+    open_finance: { label: 'Open Finance', hint: 'Pagamento autorizado no app do banco', visual: 'open_finance' },
+    paypal: { label: 'PayPal', hint: 'Carteira PayPal (não substitui PIX/cartão)', visual: 'paypal' },
+};
+
+/** Somente métodos com gateway ativo na plataforma (configuração admin + credencial conectada). */
+const paymentMethodCardsList = computed(() => {
+    const avail = props.global_payment_methods_available ?? {};
+    const order = ['pix', 'open_finance', 'card', 'apple_pay', 'google_pay', 'paypal', 'boleto'];
+    if (form.billing_type === 'subscription') {
+        order.push('pix_auto');
+    }
+    return order
+        .filter((key) => avail[key] === true && paymentMethodMeta[key])
+        .map((key) => ({ key, ...paymentMethodMeta[key] }));
 });
 
 /** Grid compacto: mais colunas, cartões menores. */
@@ -342,8 +489,8 @@ const paymentMethodGridClass = computed(() => {
     const n = paymentMethodCardsList.value.length;
     if (n <= 1) return 'grid-cols-1 max-w-[11rem] mx-auto';
     if (n === 2) return 'grid-cols-2';
-    if (n === 3) return 'grid-cols-2 sm:grid-cols-3';
-    return 'grid-cols-2 sm:grid-cols-2 lg:grid-cols-4';
+    if (n <= 4) return 'grid-cols-2 sm:grid-cols-3';
+    return 'grid-cols-2 sm:grid-cols-3 lg:grid-cols-5';
 });
 
 function paymentMethodAvailable(key) {
@@ -360,10 +507,6 @@ function onPaymentCardContainerClick(m) {
     togglePaymentMethod(m.key);
 }
 
-function openCardInstallmentsSidebar() {
-    cardInstallmentsSidebarOpen.value = true;
-}
-
 const currentImageUrl = computed(() => {
     if (form.image && typeof form.image === 'object' && form.image instanceof File) {
         return URL.createObjectURL(form.image);
@@ -376,7 +519,6 @@ const logoUploading = ref(false);
 const logoError = ref('');
 const logoInputRef = ref(null);
 const deliverableLinkSidebarOpen = ref(false);
-const cardInstallmentsSidebarOpen = ref(false);
 const cademiSaving = ref(false);
 const cademiError = ref('');
 const cademiTagsLoading = ref(false);
@@ -491,6 +633,23 @@ function checkoutUrl(slug) {
 }
 const mainCheckoutUrl = computed(() => checkoutUrl(props.produto.checkout_slug));
 const hasCheckoutLink = computed(() => !!props.produto.checkout_slug);
+const checkoutOffline = computed(() => {
+    const status = props.produto.approval?.status;
+    if (status && status !== 'approved') return true;
+    return props.produto.available_for_purchase === false;
+});
+const checkoutOfflineHint = computed(() => {
+    if (props.produto.approval?.status === 'pending') {
+        return 'Checkout offline: este produto está em análise. O link só vende após a aprovação da plataforma.';
+    }
+    if (props.produto.approval?.status === 'rejected') {
+        return 'Checkout offline: produto não aprovado. Ajuste e reenvie para análise.';
+    }
+    if (!props.produto.is_active) {
+        return 'Checkout offline: ative o produto para disponibilizar o link de venda.';
+    }
+    return 'Checkout offline no momento.';
+});
 
 const INTERVAL_LABELS = {
     weekly: 'Semanal',
@@ -522,7 +681,7 @@ function openNewOffer() {
 function openEditOffer(offer) {
     editingOffer.value = offer;
     offerForm.name = offer.name;
-    offerForm.price = offer.price;
+    offerForm.price = formatPriceForInput(offer.price);
     offerForm.currency = offer.currency || 'BRL';
     offerFormVisible.value = true;
 }
@@ -532,17 +691,19 @@ function closeOfferForm() {
     offerForm.reset();
 }
 function submitOffer() {
-    if (editingOffer.value) {
-        offerForm.put(`/produtos/${props.produto.id}/offers/${editingOffer.value.id}`, {
+    const url = editingOffer.value
+        ? `/produtos/${props.produto.id}/offers/${editingOffer.value.id}`
+        : `/produtos/${props.produto.id}/offers`;
+    const method = editingOffer.value ? 'put' : 'post';
+    offerForm
+        .transform((data) => ({ ...data, price: normalizeMoneyInput(data.price) }))
+        [method](url, {
             preserveScroll: true,
-            onSuccess: () => { closeOfferForm(); router.reload(); },
+            onSuccess: () => {
+                closeOfferForm();
+                router.reload();
+            },
         });
-    } else {
-        offerForm.post(`/produtos/${props.produto.id}/offers`, {
-            preserveScroll: true,
-            onSuccess: () => { closeOfferForm(); router.reload(); },
-        });
-    }
 }
 function confirmDestroyOffer(offer) {
     if (!window.confirm(`Remover a oferta "${offer.name}"?`)) return;
@@ -569,7 +730,7 @@ function openNewPlan() {
 function openEditPlan(plan) {
     editingPlan.value = plan;
     planForm.name = plan.name;
-    planForm.price = plan.price;
+    planForm.price = formatPriceForInput(plan.price);
     planForm.currency = plan.currency || 'BRL';
     planForm.interval = plan.interval;
     planFormVisible.value = true;
@@ -580,17 +741,19 @@ function closePlanForm() {
     planForm.reset();
 }
 function submitPlan() {
-    if (editingPlan.value) {
-        planForm.put(`/produtos/${props.produto.id}/subscription-plans/${editingPlan.value.id}`, {
+    const url = editingPlan.value
+        ? `/produtos/${props.produto.id}/subscription-plans/${editingPlan.value.id}`
+        : `/produtos/${props.produto.id}/subscription-plans`;
+    const method = editingPlan.value ? 'put' : 'post';
+    planForm
+        .transform((data) => ({ ...data, price: normalizeMoneyInput(data.price) }))
+        [method](url, {
             preserveScroll: true,
-            onSuccess: () => { closePlanForm(); router.reload(); },
+            onSuccess: () => {
+                closePlanForm();
+                router.reload();
+            },
         });
-    } else {
-        planForm.post(`/produtos/${props.produto.id}/subscription-plans`, {
-            preserveScroll: true,
-            onSuccess: () => { closePlanForm(); router.reload(); },
-        });
-    }
 }
 function confirmDestroyPlan(plan) {
     if (!window.confirm(`Remover o plano "${plan.name}"?`)) return;
@@ -630,7 +793,7 @@ function openEditOrderBump(bump) {
     bumpForm.target_product_offer_id = bump.target_product_offer_id != null ? String(bump.target_product_offer_id) : '';
     bumpForm.title = bump.title;
     bumpForm.description = bump.description ?? '';
-    bumpForm.price_override = bump.price_override != null ? String(bump.price_override) : '';
+    bumpForm.price_override = bump.price_override != null ? formatPriceForInput(bump.price_override) : '';
     bumpForm.cta_title = bump.cta_title;
     showOrderBumpModal.value = true;
 }
@@ -645,7 +808,7 @@ function submitOrderBump() {
         target_product_offer_id: bumpForm.target_product_offer_id || null,
         title: bumpForm.title,
         description: bumpForm.description || null,
-        price_override: bumpForm.price_override ? parseFloat(bumpForm.price_override) : null,
+        price_override: bumpForm.price_override ? normalizeMoneyInput(bumpForm.price_override) : null,
         cta_title: bumpForm.cta_title,
     };
     if (editingBump.value) {
@@ -708,7 +871,7 @@ function getInitialUpsellDownsell() {
             appearance: {
                 title: u.appearance?.title ?? 'Quer levar isso também?',
                 subtitle: u.appearance?.subtitle ?? 'Oferta especial só para você',
-                primary_color: u.appearance?.primary_color ?? '#8A2BE2',
+                primary_color: u.appearance?.primary_color ?? '#0ea5e9',
                 button_accept: u.appearance?.button_accept ?? 'Sim, quero aproveitar',
                 button_decline: u.appearance?.button_decline ?? 'Não, obrigado',
             },
@@ -725,7 +888,7 @@ function getInitialUpsellDownsell() {
             appearance: {
                 title: d.appearance?.title ?? 'Última chance com desconto',
                 subtitle: d.appearance?.subtitle ?? 'Uma oferta que não pode ficar de fora',
-                primary_color: d.appearance?.primary_color ?? '#8A2BE2',
+                primary_color: d.appearance?.primary_color ?? '#0ea5e9',
                 button_accept: d.appearance?.button_accept ?? 'Aceitar oferta',
                 button_decline: d.appearance?.button_decline ?? 'Não, obrigado',
             },
@@ -1003,64 +1166,170 @@ const typeIcons = {
     aplicativo: Smartphone,
     area_membros: Users,
     area_membros_externa: Users,
+    anuncio: Package,
     link: Link2,
     link_pagamento: CreditCard,
+    produto_fisico: Truck,
 };
 
+function sendsCheckoutConfigFields() {
+    return currentTab.value === 'configuracoes';
+}
+
+function sendsEmailTemplateFields() {
+    return currentTab.value === 'email';
+}
+
+function syncFormFromProduto() {
+    form.price = formatPriceForInput(props.produto.price_brl ?? props.produto.price);
+    form.image = null;
+}
+
+const submitOptions = {
+    preserveScroll: true,
+    onSuccess: () => syncFormFromProduto(),
+};
+
+function appendCoreProductFields(fd) {
+    fd.append('name', form.name);
+    fd.append('notification_name', form.notification_name ?? '');
+    fd.append('support_email', form.support_email ?? '');
+    fd.append('description', form.description ?? '');
+    fd.append('category', form.category || 'outros');
+    fd.append('marketplace_category_id', form.marketplace_category_id ?? '');
+    fd.append('delivery_mode', form.delivery_mode ?? 'chat');
+    fd.append('warranty_text', form.warranty_text ?? '');
+    fd.append('region_text', form.region_text ?? '');
+    fd.append('type', form.type);
+    fd.append('billing_type', form.billing_type);
+    fd.append('price', String(normalizeMoneyInput(form.price)));
+    if (form.billing_type === 'subscription') {
+        fd.append('base_interval', form.base_interval || 'monthly');
+    }
+    fd.append('currency', form.currency);
+    fd.append('is_active', form.is_active ? '1' : '0');
+    if (form.type === 'produto_fisico') {
+        if (form.shipping_store_id) fd.append('shipping_store_id', String(form.shipping_store_id));
+        fd.append('physical_free_shipping', form.physical_free_shipping ? '1' : '0');
+    }
+}
+
+function appendCardInstallmentsFields(fd) {
+    if (!form.card_installments) return;
+    const enabled = form.billing_type !== 'subscription' && form.card_installments.enabled;
+    fd.append('card_installments[enabled]', enabled ? '1' : '0');
+    fd.append(
+        'card_installments[max]',
+        String(enabled ? Math.min(platformInstallmentMax.value, Math.max(2, form.card_installments.max || 2)) : 1)
+    );
+}
+
+function appendCheckoutConfigFields(fd) {
+    appendCardInstallmentsFields(fd);
+    if (!sendsCheckoutConfigFields()) return;
+    fd.append('conversion_pixels', JSON.stringify(form.conversion_pixels));
+    fd.append('payment_methods_enabled[pix]', form.payment_methods_enabled.pix ? '1' : '0');
+    fd.append('payment_methods_enabled[card]', form.payment_methods_enabled.card ? '1' : '0');
+    fd.append('payment_methods_enabled[boleto]', form.payment_methods_enabled.boleto ? '1' : '0');
+    fd.append('payment_methods_enabled[pix_auto]', form.payment_methods_enabled.pix_auto ? '1' : '0');
+    fd.append('payment_methods_enabled[apple_pay]', form.payment_methods_enabled.apple_pay ? '1' : '0');
+    fd.append('payment_methods_enabled[google_pay]', form.payment_methods_enabled.google_pay ? '1' : '0');
+    fd.append('payment_methods_enabled[open_finance]', form.payment_methods_enabled.open_finance ? '1' : '0');
+    fd.append('payment_methods_enabled[paypal]', form.payment_methods_enabled.paypal ? '1' : '0');
+    fd.append('deliverable_link', form.deliverable_link || '');
+}
+
+function appendEmailTemplateFields(fd) {
+    if (!sendsEmailTemplateFields() || !form.email_template) return;
+    fd.append('email_template[logo_url]', form.email_template.logo_url || '');
+    fd.append('email_template[from_name]', form.email_template.from_name || '');
+    fd.append('email_template[subject]', form.email_template.subject || '');
+    fd.append('email_template[body_html]', form.email_template.body_html || '');
+}
+
+function prunePayloadForTab(data) {
+    const payload = { ...data };
+    if (payload.billing_type === 'subscription') {
+        payload.base_interval = payload.base_interval || 'monthly';
+    }
+    payload.price = normalizeMoneyInput(payload.price);
+    delete payload.refund_policy_days;
+    delete payload.refund_enabled;
+    if (!payload.category) {
+        payload.category = 'outros';
+    }
+    const installmentsEnabled = payload.billing_type !== 'subscription' && Boolean(payload.card_installments?.enabled);
+    payload.card_installments = {
+        enabled: installmentsEnabled,
+        max: installmentsEnabled
+            ? Math.min(platformInstallmentMax.value, Math.max(2, payload.card_installments?.max || 2))
+            : 1,
+    };
+    if (payload.type === 'produto_fisico') {
+        payload.physical_free_shipping = !!payload.physical_free_shipping;
+    } else {
+        payload.shipping_store_id = null;
+        payload.physical_free_shipping = false;
+    }
+    if (!sendsCheckoutConfigFields()) {
+        delete payload.conversion_pixels;
+        delete payload.payment_methods_enabled;
+        delete payload.deliverable_link;
+    }
+    if (!sendsEmailTemplateFields()) {
+        delete payload.email_template;
+    }
+    delete payload.image;
+    return payload;
+}
+
+const submitErrorMessage = computed(() => {
+    if (!form.hasErrors) return '';
+    return (
+        form.errors.image
+        || form.errors.price
+        || form.errors.payment_methods_enabled
+        || form.errors.name
+        || Object.values(form.errors)[0]
+        || ''
+    );
+});
+
 function submit() {
+    if (coproductionReadonly.value) {
+        return;
+    }
     const baseUrl = `/produtos/${props.produto.id}`;
     const tab = currentTab.value && currentTab.value !== 'geral' ? `?tab=${currentTab.value}` : '';
     const url = baseUrl + tab;
     if (form.image) {
         const fd = new FormData();
-        fd.append('name', form.name);
-        fd.append('slug', form.slug);
-        fd.append('description', form.description);
-        fd.append('type', form.type);
-        fd.append('billing_type', form.billing_type);
-        fd.append('price', form.price);
-        if (form.billing_type === 'subscription') {
-            fd.append('base_interval', form.base_interval || 'monthly');
-        }
-        fd.append('currency', form.currency);
-        fd.append('is_active', form.is_active ? '1' : '0');
-        fd.append('conversion_pixels', JSON.stringify(form.conversion_pixels));
-        if (form.card_installments) {
-            fd.append('card_installments[enabled]', form.card_installments.enabled ? '1' : '0');
-            fd.append('card_installments[max]', String(Math.min(12, Math.max(1, form.card_installments.max || 1))));
-        }
-        fd.append('payment_methods_enabled[pix]', form.payment_methods_enabled.pix ? '1' : '0');
-        fd.append('payment_methods_enabled[card]', form.payment_methods_enabled.card ? '1' : '0');
-        fd.append('payment_methods_enabled[boleto]', form.payment_methods_enabled.boleto ? '1' : '0');
-        fd.append('payment_methods_enabled[pix_auto]', form.payment_methods_enabled.pix_auto ? '1' : '0');
-        if (form.email_template) {
-            fd.append('email_template[logo_url]', form.email_template.logo_url || '');
-            fd.append('email_template[from_name]', form.email_template.from_name || '');
-            fd.append('email_template[subject]', form.email_template.subject || '');
-            fd.append('email_template[body_html]', form.email_template.body_html || '');
-        }
-        fd.append('deliverable_link', form.deliverable_link || '');
-        if (form.refund_enabled) {
-            fd.append('refund_policy_days', String(form.refund_policy_days ?? 7));
-        } else {
-            fd.append('refund_policy_days', '');
-        }
+        appendCoreProductFields(fd);
+        appendCheckoutConfigFields(fd);
+        appendEmailTemplateFields(fd);
         fd.append('_method', 'PUT');
         fd.append('image', form.image);
-        form.transform(() => fd).post(url, { forceFormData: true });
+        form.transform(() => fd).post(url, { forceFormData: true, ...submitOptions });
     } else {
-        form.transform((data) => {
-            if (data.billing_type === 'subscription') {
-                data.base_interval = data.base_interval || 'monthly';
-            }
-            data.refund_policy_days = data.refund_enabled ? Number(data.refund_policy_days || 7) : null;
-            return data;
-        }).put(url);
+        form.transform((data) => prunePayloadForTab(data)).put(url, submitOptions);
     }
 }
 </script>
 
 <template>
+    <div class="space-y-4">
+        <div
+            v-if="stockUrl"
+            class="rounded-xl border border-orange-200 bg-orange-50 px-4 py-3 text-sm text-orange-900 dark:border-orange-900/40 dark:bg-orange-950/30 dark:text-orange-100"
+        >
+            <Link :href="stockUrl" class="font-semibold underline">Gerenciar estoque de códigos / entrega automática</Link>
+        </div>
+        <div
+            v-if="coproductionReadonly"
+            class="rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-900 dark:border-sky-900/50 dark:bg-sky-950/30 dark:text-sky-100"
+        >
+            Você é co-produtor deste produto. A edição fica com o produtor; aqui você consulta checkout, links e as informações da oferta.
+        </div>
     <div class="flex flex-col lg:flex-row lg:gap-6 space-y-6 lg:space-y-0 lg:pl-2">
         <!-- Desktop: sidebar vertical de abas (alinhado à esquerda junto ao sidebar principal) -->
         <aside
@@ -1068,7 +1337,7 @@ function submit() {
             aria-label="Menu de edição do produto"
         >
             <nav class="flex flex-col gap-0.5">
-                <template v-for="tab in TABS" :key="tab.id">
+                <template v-for="tab in visibleTabs" :key="tab.id">
                     <a
                         v-if="tab.linkOnly && tab.id === 'member_builder' && produto.type === 'area_membros'"
                         :href="`/produtos/${produto.id}/member-builder`"
@@ -1105,7 +1374,7 @@ function submit() {
             class="flex gap-2 overflow-x-auto pb-2 snap-x snap-mandatory no-scrollbar lg:hidden rounded-xl bg-zinc-100/80 p-1 dark:bg-zinc-800/80"
             aria-label="Abas de edição do produto"
         >
-            <template v-for="tab in TABS" :key="tab.id">
+                <template v-for="tab in visibleTabs" :key="tab.id">
                 <a
                     v-if="tab.linkOnly && tab.id === 'member_builder' && produto.type === 'area_membros'"
                     :href="`/produtos/${produto.id}/member-builder`"
@@ -1142,12 +1411,18 @@ function submit() {
         <!-- Aba Geral -->
         <template v-if="currentTab === 'geral'">
             <form class="mx-auto w-full max-w-3xl space-y-8 xl:max-w-6xl" @submit.prevent="submit">
+                <p
+                    v-if="submitErrorMessage"
+                    class="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-300"
+                >
+                    {{ submitErrorMessage }}
+                </p>
                 <div class="grid grid-cols-1 gap-8 xl:grid-cols-2">
                 <!-- Informações básicas (nome, slug, descrição, imagem, status) -->
                 <section class="overflow-hidden rounded-2xl border border-zinc-200/80 bg-white shadow-sm dark:border-zinc-700/80 dark:bg-zinc-800/95">
                     <div class="border-b border-zinc-200/80 bg-zinc-50/80 px-6 py-4 dark:border-zinc-700/80 dark:bg-zinc-800/50">
                         <h2 class="text-base font-semibold text-zinc-900 dark:text-white">{{ t('products.edit.basic_info', 'Informações básicas') }}</h2>
-                        <p class="mt-0.5 text-sm text-zinc-500 dark:text-zinc-400">{{ t('products.edit.basic_info_hint', 'Nome, identificador e imagem do produto.') }}</p>
+                        <p class="mt-0.5 text-sm text-zinc-500 dark:text-zinc-400">{{ t('products.edit.basic_info_hint', 'Nome, descrição e imagem do produto.') }}</p>
                     </div>
                     <div class="p-6">
                         <div class="grid gap-6 lg:grid-cols-[1fr,auto]">
@@ -1164,16 +1439,41 @@ function submit() {
                                     <p v-if="form.errors.name" class="mt-1.5 text-sm text-red-600 dark:text-red-400">{{ form.errors.name }}</p>
                                 </div>
                                 <div>
-                                    <label class="mb-1.5 block text-sm font-medium text-zinc-700 dark:text-zinc-300">{{ t('products.edit.slug_url', 'Slug (URL)') }} *</label>
+                                    <label class="mb-1.5 block text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                                        Nome do produto nas notificações
+                                    </label>
                                     <input
-                                        v-model="form.slug"
+                                        v-model="form.notification_name"
                                         type="text"
-                                        required
-                                        placeholder="curso-completo-x"
+                                        maxlength="80"
+                                        placeholder="Opcional — exibido no push de venda"
                                         :class="inputClass"
                                     />
-                                    <p v-if="form.errors.slug" class="mt-1.5 text-sm text-red-600 dark:text-red-400">{{ form.errors.slug }}</p>
-                                    <p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{{ t('products.edit.slug_hint', 'Usado em URLs e área de membros. Apenas letras minúsculas, números e hífens.') }}</p>
+                                    <p class="mt-1 text-xs text-zinc-500">
+                                        Se vazio, usa o nome principal do produto. Máximo 80 caracteres.
+                                    </p>
+                                    <p v-if="form.errors.notification_name" class="mt-1.5 text-sm text-red-600 dark:text-red-400">
+                                        {{ form.errors.notification_name }}
+                                    </p>
+                                </div>
+                                <div>
+                                    <label class="mb-1.5 block text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                                        E-mail para Suporte
+                                    </label>
+                                    <input
+                                        v-model="form.support_email"
+                                        type="email"
+                                        maxlength="255"
+                                        placeholder="suporte@suaempresa.com"
+                                        :class="inputClass"
+                                    />
+                                    <p class="mt-1 text-xs text-zinc-500">
+                                        Este e-mail será informado ao comprador para entrar em contato
+                                        (se deixado em branco será usado o padrão do infoprodutor).
+                                    </p>
+                                    <p v-if="form.errors.support_email" class="mt-1.5 text-sm text-red-600 dark:text-red-400">
+                                        {{ form.errors.support_email }}
+                                    </p>
                                 </div>
                                 <div>
                                     <label class="mb-1.5 block text-sm font-medium text-zinc-700 dark:text-zinc-300">{{ t('common.description', 'Descrição') }}</label>
@@ -1184,8 +1484,85 @@ function submit() {
                                         :class="inputClass"
                                     />
                                 </div>
+                                <div>
+                                    <label class="mb-1.5 block text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                                        Categoria do marketplace *
+                                    </label>
+                                    <select
+                                        v-model="form.marketplace_category_id"
+                                        required
+                                        :class="inputClass"
+                                    >
+                                        <option value="" disabled>
+                                            Selecione a categoria
+                                        </option>
+                                        <option
+                                            v-for="cat in marketplaceCategories"
+                                            :key="cat.id"
+                                            :value="cat.id"
+                                        >
+                                            {{ cat.name }}
+                                        </option>
+                                    </select>
+                                    <p class="mt-1 text-xs text-zinc-500">Categorias criadas pelo administrador da plataforma.</p>
+                                    <p v-if="form.errors.marketplace_category_id" class="mt-1.5 text-sm text-red-600 dark:text-red-400">
+                                        {{ form.errors.marketplace_category_id }}
+                                    </p>
+                                </div>
+                                <div v-if="form.type === 'anuncio'">
+                                    <label class="mb-1.5 block text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                                        Modo de entrega
+                                    </label>
+                                    <select v-model="form.delivery_mode" :class="inputClass">
+                                        <option value="chat">Somente chat</option>
+                                        <option value="automatic">Somente automático (códigos)</option>
+                                        <option value="both">Chat + automático</option>
+                                    </select>
+                                </div>
                                 <div class="flex flex-wrap items-center gap-4 pt-1">
-                                    <Toggle v-model="form.is_active" :label="t('products.create.active_product', 'Produto ativo')" />
+                                    <Toggle
+                                        v-model="form.is_active"
+                                        :label="t('products.create.active_product', 'Produto ativo')"
+                                        :disabled="produto.approval?.status && produto.approval.status !== 'approved'"
+                                    />
+                                </div>
+                                <div
+                                    v-if="produto.approval && produto.approval.status !== 'approved'"
+                                    class="mt-3 rounded-xl border px-4 py-3 text-sm shadow-sm"
+                                    :class="
+                                        produto.approval.status === 'rejected'
+                                            ? 'border-red-200 bg-gradient-to-br from-red-50 to-white text-red-900 dark:border-red-900/50 dark:from-red-950/40 dark:to-zinc-900 dark:text-red-100'
+                                            : 'border-amber-200 bg-gradient-to-br from-amber-50 to-white text-amber-950 dark:border-amber-900/50 dark:from-amber-950/40 dark:to-zinc-900 dark:text-amber-100'
+                                    "
+                                >
+                                    <div class="flex items-start gap-3">
+                                        <span
+                                            class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-sm font-bold"
+                                            :class="
+                                                produto.approval.status === 'rejected'
+                                                    ? 'bg-red-100 text-red-700 dark:bg-red-900/50 dark:text-red-200'
+                                                    : 'bg-amber-100 text-amber-800 dark:bg-amber-900/50 dark:text-amber-200'
+                                            "
+                                        >
+                                            !
+                                        </span>
+                                        <div class="min-w-0 flex-1">
+                                            <p class="font-semibold">{{ produto.approval.label }} — checkout offline</p>
+                                            <p class="mt-1 text-xs opacity-90">{{ produto.approval.description }}</p>
+                                            <p v-if="produto.approval.reason" class="mt-2 rounded-lg bg-black/5 px-2.5 py-1.5 text-xs dark:bg-white/5">
+                                                <span class="font-medium">Motivo:</span>
+                                                {{ produto.approval.reason }}
+                                            </p>
+                                            <button
+                                                v-if="produto.approval.can_resubmit"
+                                                type="button"
+                                                class="mt-3 inline-flex rounded-lg bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 dark:bg-white dark:text-zinc-900"
+                                                @click="resubmitForReview"
+                                            >
+                                                Reenviar para análise
+                                            </button>
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
                             <div class="flex flex-col items-start lg:pt-0">
@@ -1206,6 +1583,7 @@ function submit() {
                                     </template>
                                     <input type="file" accept="image/*" class="hidden" @change="onFileChange" />
                                 </label>
+                                <p v-if="form.errors.image" class="mt-1.5 max-w-[7rem] text-xs text-red-600 dark:text-red-400">{{ form.errors.image }}</p>
                             </div>
                         </div>
                     </div>
@@ -1243,12 +1621,16 @@ function submit() {
                                 <input
                                     v-model="form.price"
                                     type="number"
-                                    step="0.01"
-                                    min="0"
+                                    step="any"
+                                    :min="platformMinCharge"
+                                    inputmode="decimal"
                                     required
                                     placeholder="0,00"
                                     :class="inputClass"
                                 />
+                                <p v-if="platformMinChargeLabel" class="mt-1.5 text-xs text-amber-700 dark:text-amber-300">
+                                    Ticket mínimo da plataforma: {{ platformMinChargeLabel }}
+                                </p>
                                 <p class="mt-1.5 text-xs text-zinc-500 dark:text-zinc-400">Aproximado: € {{ priceEur }} · US$ {{ priceUsd }}</p>
                                 <p v-if="form.errors.price" class="mt-1.5 text-sm text-red-600 dark:text-red-400">{{ form.errors.price }}</p>
                             </div>
@@ -1263,6 +1645,48 @@ function submit() {
                                     <option value="lifetime">{{ t('products.interval.lifetime', 'Vitalício') }}</option>
                                 </select>
                                 <p class="mt-1.5 text-xs text-zinc-500 dark:text-zinc-400">Intervalo da cobrança recorrente do preço base.</p>
+                            </div>
+                        </div>
+
+                        <div
+                            v-if="showCardInstallments"
+                            class="space-y-3 rounded-xl border border-zinc-200 p-4 dark:border-zinc-700"
+                        >
+                            <div class="flex items-center justify-between gap-3">
+                                <div class="min-w-0">
+                                    <p class="text-sm font-medium text-zinc-700 dark:text-zinc-300">Permitir pagamento parcelado neste produto</p>
+                                    <p class="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
+                                        Produto vendido à vista se estiver desmarcado<span v-if="cardInstallmentsGatewayName"> · {{ cardInstallmentsGatewayName }}</span>
+                                    </p>
+                                </div>
+                                <Toggle
+                                    v-model="form.card_installments.enabled"
+                                    :disabled="installmentMaxOptions.length === 0"
+                                    class="shrink-0"
+                                />
+                            </div>
+                            <div v-if="form.card_installments.enabled" class="space-y-3">
+                                <div class="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-100">
+                                    <p>As vendas parceladas seguem o cronograma de cobrança das parcelas do comprador.</p>
+                                    <p class="mt-1.5">O recebimento e a liberação dos valores ocorrerão conforme o processamento das parcelas pagas.</p>
+                                    <p class="mt-1.5">Quanto maior a quantidade de parcelas escolhida pelo cliente, maior será o período total de recebimento da venda.</p>
+                                </div>
+                                <div>
+                                    <label for="card-installments-max" class="mb-1.5 block text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                                        Máximo de parcelas para este produto
+                                    </label>
+                                    <select
+                                        id="card-installments-max"
+                                        v-model.number="form.card_installments.max"
+                                        :class="inputClass"
+                                        class="max-w-xs"
+                                    >
+                                        <option v-for="n in installmentMaxOptions" :key="'edit-inst-' + n" :value="n">{{ n }}x</option>
+                                    </select>
+                                    <p class="mt-1.5 text-xs text-zinc-500 dark:text-zinc-400">
+                                        Até {{ platformInstallmentMax }}x definido pela plataforma. Com o preço de R$ {{ priceNum.toFixed(2) }}, até {{ maxAllowedInstallments }}x (mín. R$ {{ MIN_PARCELA_BRL }},00 por parcela).
+                                    </p>
+                                </div>
                             </div>
                         </div>
 
@@ -1302,10 +1726,10 @@ function submit() {
                                             </a>
                                         </div>
                                         <div class="flex gap-1.5">
-                                            <Button size="sm" variant="outline" class="h-8 w-8 p-0" @click="openEditOffer(offer)">
+                                            <Button type="button" size="sm" variant="outline" class="h-8 w-8 p-0" @click="openEditOffer(offer)">
                                                 <Pencil class="h-3.5 w-3.5" />
                                             </Button>
-                                            <Button size="sm" variant="outline" class="h-8 w-8 p-0 text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/30" @click="confirmDestroyOffer(offer)">
+                                            <Button type="button" size="sm" variant="outline" class="h-8 w-8 p-0 text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/30" @click="confirmDestroyOffer(offer)">
                                                 <Trash2 class="h-3.5 w-3.5" />
                                             </Button>
                                         </div>
@@ -1318,7 +1742,10 @@ function submit() {
                                     <p class="mb-3 text-sm font-medium text-zinc-700 dark:text-zinc-300">{{ editingOffer ? t('products.edit.edit_offer', 'Editar oferta') : t('products.edit.new_offer', 'Nova oferta') }}</p>
                                     <div class="grid gap-3 sm:grid-cols-[1fr,1fr,auto]">
                                         <input v-model="offerForm.name" type="text" required :class="inputClass" placeholder="Nome (ex: Básico)" />
-                                        <input v-model="offerForm.price" type="number" step="0.01" min="0" required :class="inputClass" placeholder="Preço" />
+                                        <input v-model="offerForm.price" type="number" step="any" :min="platformMinCharge" inputmode="decimal" required :class="inputClass" placeholder="Preço" />
+                                        <p v-if="platformMinChargeLabel" class="mt-1 text-xs text-amber-700 dark:text-amber-300">
+                                            Ticket mínimo: {{ platformMinChargeLabel }}
+                                        </p>
                                         <select v-model="offerForm.currency" :class="inputClass + ' min-w-0'">
                                             <option value="BRL">BRL</option>
                                             <option value="EUR">EUR</option>
@@ -1358,10 +1785,10 @@ function submit() {
                                             </a>
                                         </div>
                                         <div class="flex gap-1.5">
-                                            <Button size="sm" variant="outline" class="h-8 w-8 p-0" @click="openEditPlan(plan)">
+                                            <Button type="button" size="sm" variant="outline" class="h-8 w-8 p-0" @click="openEditPlan(plan)">
                                                 <Pencil class="h-3.5 w-3.5" />
                                             </Button>
-                                            <Button size="sm" variant="outline" class="h-8 w-8 p-0 text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/30" @click="confirmDestroyPlan(plan)">
+                                            <Button type="button" size="sm" variant="outline" class="h-8 w-8 p-0 text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/30" @click="confirmDestroyPlan(plan)">
                                                 <Trash2 class="h-3.5 w-3.5" />
                                             </Button>
                                         </div>
@@ -1374,7 +1801,10 @@ function submit() {
                                     <p class="mb-3 text-sm font-medium text-zinc-700 dark:text-zinc-300">{{ editingPlan ? t('products.edit.edit_plan', 'Editar plano') : t('products.edit.new_plan', 'Novo plano') }}</p>
                                     <div class="grid gap-3 sm:grid-cols-2">
                                         <input v-model="planForm.name" type="text" required :class="inputClass" placeholder="Nome (ex: Mensal)" />
-                                        <input v-model="planForm.price" type="number" step="0.01" min="0" required :class="inputClass" placeholder="Preço" />
+                                        <input v-model="planForm.price" type="number" step="any" :min="platformMinCharge" inputmode="decimal" required :class="inputClass" placeholder="Preço" />
+                                        <p v-if="platformMinChargeLabel" class="mt-1 text-xs text-amber-700 dark:text-amber-300">
+                                            Ticket mínimo: {{ platformMinChargeLabel }}
+                                        </p>
                                         <select v-model="planForm.currency" :class="inputClass">
                                             <option value="BRL">BRL</option>
                                             <option value="EUR">EUR</option>
@@ -1404,31 +1834,8 @@ function submit() {
                 </section>
                 </div>
 
-                <section class="mx-auto w-full max-w-3xl space-y-4 rounded-2xl border border-zinc-200/80 bg-white p-6 shadow-sm dark:border-zinc-700/80 dark:bg-zinc-800/95 xl:max-w-6xl">
-                    <h2 class="text-base font-semibold text-zinc-900 dark:text-white">Política de reembolso</h2>
-                    <p class="text-sm text-zinc-600 dark:text-zinc-400">
-                        Configure se este produto aceita reembolso e a janela de solicitação para o comprador.
-                    </p>
-                    <label class="inline-flex items-center gap-3 text-sm text-zinc-700 dark:text-zinc-300">
-                        <input v-model="form.refund_enabled" type="checkbox" class="h-4 w-4 rounded border-zinc-300 text-[var(--color-primary)] focus:ring-[var(--color-primary)] dark:border-zinc-600 dark:bg-zinc-900" />
-                        Permitir solicitação de reembolso
-                    </label>
-                    <div>
-                        <label class="mb-1.5 block text-sm font-medium text-zinc-700 dark:text-zinc-300">Janela de solicitação</label>
-                        <select v-model.number="form.refund_policy_days" :disabled="!form.refund_enabled" :required="form.refund_enabled" :class="inputClass" class="max-w-md disabled:cursor-not-allowed disabled:opacity-60">
-                            <option :value="7">7 dias</option>
-                            <option :value="14">14 dias</option>
-                            <option :value="30">30 dias</option>
-                        </select>
-                        <p v-if="!form.refund_enabled" class="mt-1.5 text-xs text-zinc-500 dark:text-zinc-400">
-                            Com reembolso desativado, o cliente nao vera a opcao de solicitar reembolso no painel de compras.
-                        </p>
-                        <p v-if="form.errors.refund_policy_days" class="mt-1.5 text-sm text-red-600 dark:text-red-400">{{ form.errors.refund_policy_days }}</p>
-                    </div>
-                </section>
-
                 <div class="flex flex-wrap items-center gap-3">
-                    <Button type="submit" :disabled="form.processing">{{ t('products.edit.save_changes', 'Salvar alterações') }}</Button>
+                    <Button v-if="!coproductionReadonly" type="submit" :disabled="form.processing">{{ t('products.edit.save_changes', 'Salvar alterações') }}</Button>
                     <Link
                         href="/produtos"
                         class="inline-flex items-center rounded-xl border border-zinc-200 px-4 py-2.5 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-800"
@@ -1442,165 +1849,49 @@ function submit() {
         <!-- Aba Configurações -->
         <template v-if="currentTab === 'configuracoes'">
             <form class="w-full space-y-8" @submit.prevent="submit">
-                <section class="overflow-hidden rounded-2xl border border-zinc-200/80 bg-white shadow-sm dark:border-zinc-700/80 dark:bg-zinc-800/95">
-                    <div class="border-b border-zinc-200/80 px-6 py-4 dark:border-zinc-700/80">
-                        <h2 class="text-base font-semibold text-zinc-900 dark:text-white">Pagamentos no checkout</h2>
+                <section
+                    v-if="form.type === 'produto_fisico' && $page.props.physical_products_enabled_effective"
+                    class="overflow-hidden rounded-2xl border border-zinc-200/80 bg-white shadow-sm dark:border-zinc-700/80 dark:bg-zinc-800/95"
+                >
+                    <div class="border-b border-zinc-200/80 bg-zinc-50/80 px-6 py-4 dark:border-zinc-700/80 dark:bg-zinc-800/50">
+                        <h2 class="text-base font-semibold text-zinc-900 dark:text-white">Frete e entrega</h2>
+                        <p class="mt-0.5 text-sm text-zinc-500 dark:text-zinc-400">
+                            Vincule uma loja cadastrada em
+                            <Link href="/frete" class="text-[var(--color-primary)] hover:underline">Taxas e frete</Link>
+                            e defina se este produto tem frete grátis.
+                        </p>
                     </div>
                     <div class="space-y-4 p-6">
-                        <p class="text-sm text-zinc-600 dark:text-zinc-400">
-                            Escolha quais formas de pagamento ficam <strong class="font-medium text-zinc-800 dark:text-zinc-200">ativas neste produto</strong>.
-                        </p>
-                        <div class="grid gap-2 sm:gap-2.5" :class="paymentMethodGridClass">
-                            <div
-                                v-for="m in paymentMethodCardsList"
-                                :key="m.key"
-                                role="button"
-                                tabindex="0"
-                                class="group relative flex max-w-full flex-col overflow-hidden rounded-xl border-2 text-left transition focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-primary)] focus-visible:ring-offset-1 dark:focus-visible:ring-offset-zinc-900"
-                                :class="[
-                                    form.payment_methods_enabled[m.key]
-                                        ? 'border-[var(--color-primary)] bg-[var(--color-primary)]/[0.08] shadow-sm dark:bg-[var(--color-primary)]/15'
-                                        : 'border-zinc-200 bg-white hover:border-zinc-300 hover:bg-zinc-50/80 dark:border-zinc-600 dark:bg-zinc-800/40 dark:hover:border-zinc-500 dark:hover:bg-zinc-800/70',
-                                    !paymentMethodAvailable(m.key) ? 'cursor-not-allowed opacity-60 hover:border-zinc-200 dark:hover:border-zinc-600' : 'cursor-pointer',
-                                ]"
-                                @click="onPaymentCardContainerClick(m)"
-                                @keydown.enter.prevent="onPaymentCardContainerClick(m)"
-                                @keydown.space.prevent="onPaymentCardContainerClick(m)"
+                        <div>
+                            <label class="mb-1 block text-sm font-medium text-zinc-700 dark:text-zinc-300">Loja de expedição</label>
+                            <select
+                                v-model="form.shipping_store_id"
+                                class="w-full max-w-md rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-600 dark:bg-zinc-800 dark:text-white"
                             >
-                                <span
-                                    v-if="form.payment_methods_enabled[m.key] && paymentMethodAvailable(m.key)"
-                                    class="absolute right-1.5 top-1.5 z-10 flex h-5 w-5 items-center justify-center rounded-full bg-[var(--color-primary)] text-white shadow"
-                                    aria-hidden="true"
+                                <option :value="null">Selecione uma loja</option>
+                                <option
+                                    v-for="s in shipping_stores"
+                                    :key="s.id"
+                                    :value="s.id"
+                                    :disabled="!s.is_active"
                                 >
-                                    <Check class="h-3 w-3" stroke-width="3" />
-                                </span>
-                                <div
-                                    class="flex min-h-[4.25rem] flex-1 items-center justify-center bg-gradient-to-b from-zinc-50 to-zinc-100/90 px-2 pt-3 pb-1 dark:from-zinc-800/90 dark:to-zinc-900/80"
-                                >
-                                    <template v-if="m.visual === 'pix'">
-                                        <img
-                                            src="/images/gateways/pix.svg"
-                                            alt=""
-                                            class="h-10 w-10 object-contain brightness-0 dark:invert"
-                                        />
-                                    </template>
-                                    <template v-else-if="m.visual === 'card'">
-                                        <img
-                                            src="/images/gateways/card-method.png"
-                                            alt=""
-                                            class="h-10 w-10 object-contain"
-                                        />
-                                    </template>
-                                    <template v-else-if="m.visual === 'boleto'">
-                                        <img
-                                            src="/images/gateways/boleto.png"
-                                            alt=""
-                                            class="h-10 w-10 object-contain"
-                                        />
-                                    </template>
-                                    <template v-else-if="m.visual === 'pix_auto'">
-                                        <div class="relative flex h-10 w-10 items-center justify-center">
-                                            <img
-                                                src="/images/gateways/pix.svg"
-                                                alt=""
-                                                class="h-9 w-9 object-contain brightness-0 dark:invert"
-                                            />
-                                            <span
-                                                class="absolute -bottom-0.5 -right-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-[var(--color-primary)] text-white shadow ring-1 ring-white dark:ring-zinc-900"
-                                            >
-                                                <Repeat2 class="h-3 w-3" stroke-width="2.5" />
-                                            </span>
-                                        </div>
-                                    </template>
-                                </div>
-                                <div class="border-t border-zinc-100/90 px-2 py-2 text-center dark:border-zinc-700/80">
-                                    <span class="block text-xs font-semibold leading-tight text-zinc-900 dark:text-white">{{ m.label }}</span>
-                                    <span class="mt-0.5 block text-[10px] leading-snug text-zinc-500 dark:text-zinc-400">{{ m.hint }}</span>
-                                    <span
-                                        v-if="!paymentMethodAvailable(m.key)"
-                                        class="mt-1 block text-[10px] font-medium leading-tight text-amber-600 dark:text-amber-400"
-                                    >
-                                        Indisponível na plataforma
-                                    </span>
-                                </div>
-                                <button
-                                    v-if="
-                                        m.key === 'card' &&
-                                        checkout_gateway_ui.card_show_installments &&
-                                        paymentMethodAvailable('card')
-                                    "
-                                    type="button"
-                                    class="absolute left-1 top-1 z-20 rounded-full border border-zinc-200/90 bg-white p-1 text-zinc-500 shadow-sm transition hover:border-[var(--color-primary)] hover:bg-[var(--color-primary)]/10 hover:text-[var(--color-primary)] dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:border-[var(--color-primary)] dark:hover:text-[var(--color-primary)]"
-                                    title="Parcelamento no cartão"
-                                    aria-label="Abrir configurações de parcelamento no cartão"
-                                    @click.stop="openCardInstallmentsSidebar"
-                                >
-                                    <Cog class="h-3.5 w-3.5" aria-hidden="true" />
-                                </button>
-                            </div>
+                                    {{ s.name }}{{ s.is_active ? '' : ' (inativa)' }}
+                                </option>
+                            </select>
+                            <p v-if="shipping_stores.length === 0" class="mt-1 text-xs text-amber-600">
+                                Cadastre uma loja em Taxas e frete antes de publicar o produto.
+                            </p>
                         </div>
-                        <p v-if="form.errors.payment_methods_enabled" class="text-sm text-red-600 dark:text-red-400">
-                            {{ form.errors.payment_methods_enabled }}
-                        </p>
-                    </div>
-                </section>
-
-                <!-- Tipo de entrega -->
-                <section class="overflow-hidden rounded-2xl border border-zinc-200/80 bg-white shadow-sm dark:border-zinc-700/80 dark:bg-zinc-800/95">
-                    <div class="border-b border-zinc-200/80 bg-zinc-50/80 px-6 py-4 dark:border-zinc-700/80 dark:bg-zinc-800/50">
-                        <h2 class="text-base font-semibold text-zinc-900 dark:text-white">Tipo de entrega</h2>
-                        <p class="mt-0.5 text-sm text-zinc-500 dark:text-zinc-400">Como o cliente recebe o produto após a compra.</p>
-                    </div>
-                    <div class="p-6">
-                        <div class="grid gap-3 grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4">
-                            <button
-                                v-for="t in productTypes"
-                                :key="t.value"
-                                type="button"
-                                :disabled="!t.available"
-                                :class="[
-                                    'flex items-start gap-3 rounded-xl border-2 p-4 text-left transition',
-                                    form.type === t.value
-                                        ? 'border-[var(--color-primary)] bg-[var(--color-primary)]/10 dark:bg-[var(--color-primary)]/20'
-                                        : 'border-zinc-200 bg-zinc-50 hover:border-zinc-300 hover:bg-zinc-100 dark:border-zinc-600 dark:bg-zinc-800 dark:hover:border-zinc-500 dark:hover:bg-zinc-700',
-                                    !t.available && 'cursor-not-allowed opacity-60',
-                                ]"
-                                @click="t.available && (form.type = t.value)"
-                            >
-                                <component :is="typeIcons[t.value] || Package" class="mt-0.5 h-5 w-5 shrink-0 text-zinc-500 dark:text-zinc-400" />
-                                <div class="min-w-0 flex-1">
-                                    <span class="font-medium text-zinc-900 dark:text-white">{{ t.label }}</span>
-                                    <span v-if="!t.available" class="ml-1 text-xs text-zinc-500">(em breve)</span>
-                                </div>
-                                <button
-                                    v-if="t.available && t.value === 'link' && form.type === t.value"
-                                    type="button"
-                                    class="shrink-0 rounded-lg p-1.5 text-zinc-500 transition hover:bg-zinc-200 hover:text-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-600 dark:hover:text-white"
-                                    title="Configurar link do entregável"
-                                    aria-label="Configurar link do entregável"
-                                    @click.stop="deliverableLinkSidebarOpen = true"
-                                >
-                                    <Settings class="h-4 w-4" aria-hidden="true" />
-                                </button>
-                                <button
-                                    v-if="t.available && t.value === 'area_membros' && form.type === t.value"
-                                    type="button"
-                                    class="shrink-0 rounded-lg p-1.5 text-zinc-500 transition hover:bg-zinc-200 hover:text-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-600 dark:hover:text-white"
-                                    title="Abrir Member Builder"
-                                    aria-label="Abrir Member Builder"
-                                    @click.stop="goToMemberBuilder"
-                                >
-                                    <Settings class="h-4 w-4" aria-hidden="true" />
-                                </button>
-                            </button>
-                        </div>
-                        <p v-if="form.errors.type" class="mt-2 text-sm text-red-600 dark:text-red-400">{{ form.errors.type }}</p>
+                        <label class="flex items-center gap-2 text-sm text-zinc-700 dark:text-zinc-300">
+                            <Checkbox v-model:checked="form.physical_free_shipping" />
+                            Frete grátis para este produto
+                        </label>
                     </div>
                 </section>
 
                 <!-- Área de membros externa (Cademí) -->
                 <section
-                    v-if="form.type === 'area_membros_externa'"
+                    v-if="form.type === 'area_membros_externa' && cademi_available"
                     class="overflow-hidden rounded-2xl border border-zinc-200/80 bg-white shadow-sm dark:border-zinc-700/80 dark:bg-zinc-800/95"
                 >
                     <div class="border-b border-zinc-200/80 bg-zinc-50/80 px-6 py-4 dark:border-zinc-700/80 dark:bg-zinc-800/50">
@@ -1784,96 +2075,6 @@ function submit() {
                     </Transition>
                 </Teleport>
 
-                <!-- Sidebar: Parcelamento no cartão (ícone no card Cartão) -->
-                <Teleport to="body">
-                    <Transition
-                        enter-active-class="transition-opacity duration-200"
-                        enter-from-class="opacity-0"
-                        enter-to-class="opacity-100"
-                        leave-active-class="transition-opacity duration-200"
-                        leave-from-class="opacity-100"
-                        leave-to-class="opacity-0"
-                    >
-                        <div
-                            v-if="cardInstallmentsSidebarOpen"
-                            class="fixed inset-0 z-[100000] bg-black/30"
-                            aria-hidden="true"
-                            @click="cardInstallmentsSidebarOpen = false"
-                        />
-                    </Transition>
-                    <Transition
-                        enter-active-class="transition-transform duration-300 ease-out"
-                        enter-from-class="translate-x-full"
-                        enter-to-class="translate-x-0"
-                        leave-active-class="transition-transform duration-300 ease-in"
-                        leave-from-class="translate-x-0"
-                        leave-to-class="translate-x-full"
-                    >
-                        <aside
-                            v-if="cardInstallmentsSidebarOpen"
-                            class="fixed top-0 right-0 z-[100001] flex h-full w-full max-w-md flex-col bg-white shadow-2xl dark:bg-zinc-900"
-                            role="dialog"
-                            aria-labelledby="card-installments-sidebar-title"
-                            @click.stop
-                        >
-                            <div class="flex shrink-0 items-center justify-between border-b border-zinc-200 px-4 py-3 dark:border-zinc-700">
-                                <div class="flex items-center gap-2">
-                                    <Cog class="h-5 w-5 text-zinc-500 dark:text-zinc-300" aria-hidden="true" />
-                                    <h2 id="card-installments-sidebar-title" class="text-lg font-semibold text-zinc-900 dark:text-white">
-                                        Parcelamento no cartão
-                                    </h2>
-                                </div>
-                                <button
-                                    type="button"
-                                    class="rounded-lg p-2 text-zinc-500 transition hover:bg-zinc-100 hover:text-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-white"
-                                    aria-label="Fechar"
-                                    @click="cardInstallmentsSidebarOpen = false"
-                                >
-                                    <X class="h-5 w-5" />
-                                </button>
-                            </div>
-                            <div class="flex-1 overflow-y-auto p-4">
-                                <p class="mb-4 text-sm text-zinc-600 dark:text-zinc-400">
-                                    Aplica-se ao processamento de cartão definido globalmente na plataforma.
-                                </p>
-                                <div class="flex items-center justify-between rounded-xl border border-zinc-100 bg-zinc-50/50 px-4 py-3 dark:border-zinc-700 dark:bg-zinc-800/50">
-                                    <div class="min-w-0 pr-2">
-                                        <p class="text-sm font-medium text-zinc-700 dark:text-zinc-300">Permitir parcelamento</p>
-                                        <p class="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">Cliente poderá parcelar no cartão de crédito</p>
-                                    </div>
-                                    <Toggle v-model="form.card_installments.enabled" class="shrink-0" />
-                                </div>
-                                <div
-                                    v-if="form.card_installments.enabled"
-                                    class="mt-4 rounded-xl border border-zinc-100 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800/50"
-                                >
-                                    <label for="card-installments-max-sidebar" class="mb-2 block text-sm font-medium text-zinc-700 dark:text-zinc-300">
-                                        Até quantas parcelas
-                                    </label>
-                                    <select
-                                        id="card-installments-max-sidebar"
-                                        v-model.number="form.card_installments.max"
-                                        class="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-sm text-zinc-900 shadow-sm focus:border-[var(--color-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-primary)] dark:border-zinc-600 dark:bg-zinc-700 dark:text-zinc-100"
-                                    >
-                                        <option v-for="n in maxAllowedInstallments" :key="n" :value="n">{{ n }}x</option>
-                                    </select>
-                                    <p class="mt-1.5 text-xs text-zinc-500 dark:text-zinc-400">
-                                        Com o preço de R$ {{ priceNum.toFixed(2) }}, até {{ maxAllowedInstallments }}x (mín. R$ {{ MIN_PARCELA_BRL }},00 por parcela).
-                                    </p>
-                                </div>
-                            </div>
-                            <div class="flex shrink-0 gap-2 border-t border-zinc-200 p-4 dark:border-zinc-700">
-                                <Button type="button" class="flex-1" :disabled="form.processing" @click="submit(); cardInstallmentsSidebarOpen = false">
-                                    Salvar
-                                </Button>
-                                <Button type="button" variant="outline" class="flex-1" @click="cardInstallmentsSidebarOpen = false">
-                                    Fechar
-                                </Button>
-                            </div>
-                        </aside>
-                    </Transition>
-                </Teleport>
-
                 <!-- Pixels de conversão -->
                 <section class="overflow-hidden rounded-2xl border border-zinc-200/80 bg-white shadow-sm dark:border-zinc-700/80 dark:bg-zinc-800/95">
                     <div class="border-b border-zinc-200/80 bg-gradient-to-r from-zinc-50/90 to-zinc-100/50 px-6 py-5 dark:from-zinc-800/80 dark:to-zinc-800/50">
@@ -1926,11 +2127,13 @@ function submit() {
                                     <div>
                                         <label class="mb-1 block text-sm font-medium text-zinc-700 dark:text-zinc-300">Access Token (CAPI)</label>
                                         <input v-model="item.access_token" type="password" placeholder="Token para Conversions API" :class="inputClass" autocomplete="off" />
-                                        <p class="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">Usado para enviar eventos server-side (CAPI).</p>
+                                        <p class="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
+                                            Para contabilizar vendas quando o cliente fecha a página PIX ou boleto antes do redirecionamento, informe o token de acesso (Conversions API).
+                                        </p>
                                     </div>
                                     <div class="space-y-3 border-t border-zinc-200 pt-3 dark:border-zinc-700">
-                                        <Checkbox v-model="item.fire_purchase_on_pix" label="Disparar evento Purchase ao gerar PIX?" />
-                                        <Checkbox v-model="item.fire_purchase_on_boleto" label="Disparar evento Purchase ao gerar Boleto?" />
+                                        <Checkbox v-model="item.fire_purchase_on_pix" label="Disparar Purchase no navegador quando o pagamento PIX for confirmado" />
+                                        <Checkbox v-model="item.fire_purchase_on_boleto" label="Disparar Purchase no navegador quando o boleto for pago" />
                                         <Checkbox v-model="item.disable_order_bump_events" label="Desativar eventos de order bumps?" />
                                     </div>
                                 </div>
@@ -1966,8 +2169,8 @@ function submit() {
                                         <input v-model="item.access_token" type="password" placeholder="Token do TikTok Events API" :class="inputClass" autocomplete="off" />
                                     </div>
                                     <div class="space-y-3 border-t border-zinc-200 pt-3 dark:border-zinc-700">
-                                        <Checkbox v-model="item.fire_purchase_on_pix" label="Disparar evento Purchase ao gerar PIX?" />
-                                        <Checkbox v-model="item.fire_purchase_on_boleto" label="Disparar evento Purchase ao gerar Boleto?" />
+                                        <Checkbox v-model="item.fire_purchase_on_pix" label="Disparar Purchase no navegador quando o pagamento PIX for confirmado" />
+                                        <Checkbox v-model="item.fire_purchase_on_boleto" label="Disparar Purchase no navegador quando o boleto for pago" />
                                         <Checkbox v-model="item.disable_order_bump_events" label="Desativar eventos de order bumps?" />
                                     </div>
                                 </div>
@@ -2067,7 +2270,7 @@ function submit() {
                     </div>
                 </section>
                 <div class="flex flex-wrap items-center gap-3">
-                    <Button type="submit" :disabled="form.processing">{{ t('products.edit.save_changes', 'Salvar alterações') }}</Button>
+                    <Button v-if="!coproductionReadonly" type="submit" :disabled="form.processing">{{ t('products.edit.save_changes', 'Salvar alterações') }}</Button>
                     <Link
                         href="/produtos"
                         class="inline-flex items-center rounded-xl border border-zinc-200 px-4 py-2.5 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-800"
@@ -2104,7 +2307,15 @@ function submit() {
                                             <span class="mt-2 text-xs text-zinc-500">{{ t('common.sending', 'Enviando...') }}</span>
                                         </template>
                                         <template v-else-if="form.email_template.logo_url">
-                                            <img :src="form.email_template.logo_url" alt="Logo" class="max-h-20 w-auto object-contain px-2" @error="($e) => $e.target.style.display = 'none'" />
+                                            <div class="rounded-lg bg-white px-2 py-1.5 shadow-sm ring-1 ring-zinc-200/80 dark:ring-zinc-600">
+                                                <img
+                                                    :key="form.email_template.logo_url"
+                                                    :src="form.email_template.logo_url"
+                                                    alt="Logo"
+                                                    class="max-h-20 w-auto object-contain mx-auto"
+                                                    @error="($e) => $e.target.style.display = 'none'"
+                                                />
+                                            </div>
                                             <span class="mt-2 text-xs text-zinc-500">{{ t('products.edit.click_to_change', 'Clique para trocar') }}</span>
                                         </template>
                                         <template v-else>
@@ -2131,10 +2342,13 @@ function submit() {
                                 <p class="mt-1.5 text-xs text-zinc-500 dark:text-zinc-400">
                                     Placeholders: <code class="rounded bg-zinc-100 px-1 dark:bg-zinc-700">{nome_cliente}</code>,
                                     <code class="rounded bg-zinc-100 px-1 dark:bg-zinc-700">{nome_produto}</code>,
-                                    <code class="rounded bg-zinc-100 px-1 dark:bg-zinc-700">{link_acesso}</code>,
+                                    <code class="rounded bg-zinc-100 px-1 dark:bg-zinc-700">{link_acesso}</code>
+                                    (tela de login da plataforma),
                                     <code class="rounded bg-zinc-100 px-1 dark:bg-zinc-700">{email_cliente}</code>,
                                     <code class="rounded bg-zinc-100 px-1 dark:bg-zinc-700">{senha}</code>
-                                    (preenchido apenas para área de membros quando uma senha é enviada ao cliente).
+                                    (área de membros, quando disponível),
+                                    <code class="rounded bg-zinc-100 px-1 dark:bg-zinc-700">{link_esqueci_senha}</code>
+                                    (para o aluno criar uma nova senha).
                                 </p>
                             </div>
                         </div>
@@ -2156,7 +2370,7 @@ function submit() {
                     </section>
                 </div>
                 <div class="flex flex-wrap items-center gap-3">
-                    <Button type="submit" :disabled="form.processing">{{ t('products.edit.save_changes', 'Salvar alterações') }}</Button>
+                    <Button v-if="!coproductionReadonly" type="submit" :disabled="form.processing">{{ t('products.edit.save_changes', 'Salvar alterações') }}</Button>
                     <Link
                         href="/produtos"
                         class="inline-flex items-center rounded-xl border border-zinc-200 px-4 py-2.5 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-800"
@@ -2313,7 +2527,7 @@ function submit() {
                                 </div>
                                 <div>
                                     <label class="mb-1.5 block text-sm font-medium text-zinc-700 dark:text-zinc-300">Preço com desconto (opcional)</label>
-                                    <input v-model="bumpForm.price_override" type="number" step="0.01" min="0" :class="inputClass" placeholder="Deixe vazio para usar o preço do produto" />
+                                    <input v-model="bumpForm.price_override" type="number" step="any" min="0" inputmode="decimal" :class="inputClass" placeholder="Deixe vazio para usar o preço do produto" />
                                     <p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">Se não preencher, será usado o preço do produto ou da oferta selecionada.</p>
                                 </div>
                                 <div>
@@ -2620,6 +2834,14 @@ function submit() {
 
                 <!-- Lista de links -->
                 <div class="mt-6">
+                    <div
+                        v-if="checkoutOffline"
+                        class="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100"
+                    >
+                        <p class="font-semibold">Checkout ainda não está público</p>
+                        <p class="mt-1 text-xs opacity-90">{{ checkoutOfflineHint }}</p>
+                        <p class="mt-1 font-mono text-[11px] opacity-75">Os links abaixo existem, mas o visitante não compra até a liberação.</p>
+                    </div>
                     <template v-if="allCheckoutLinks.length === 0">
                         <div class="flex flex-col items-center justify-center rounded-2xl border-2 border-dashed border-zinc-200 bg-zinc-50/50 px-6 py-16 text-center dark:border-zinc-600 dark:bg-zinc-800/30">
                             <span class="flex h-14 w-14 items-center justify-center rounded-2xl bg-zinc-200/80 text-zinc-400 dark:bg-zinc-700/80 dark:text-zinc-500">
@@ -2654,6 +2876,7 @@ function submit() {
                                 </div>
                                 <div class="flex shrink-0 items-center gap-2">
                                     <a
+                                        v-if="!checkoutOffline"
                                         :href="getCheckoutLinkUrl(item)"
                                         target="_blank"
                                         rel="noopener noreferrer"
@@ -2661,6 +2884,13 @@ function submit() {
                                     >
                                         Abrir
                                     </a>
+                                    <span
+                                        v-else
+                                        class="inline-flex items-center gap-1.5 rounded-lg border border-dashed border-zinc-300 px-3 py-2 text-xs font-medium text-zinc-400 dark:border-zinc-600 dark:text-zinc-500"
+                                        :title="checkoutOfflineHint"
+                                    >
+                                        Offline
+                                    </span>
                                     <button
                                         type="button"
                                         class="inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-medium transition"
@@ -2680,7 +2910,7 @@ function submit() {
         </template>
 
         <!-- Aba Co-produção -->
-        <template v-if="coproductionPluginEnabled && currentTab === 'coproducao'">
+        <template v-if="currentTab === 'coproducao'">
             <div class="space-y-8">
                 <div class="rounded-xl border border-zinc-200 bg-white p-6 dark:border-zinc-700 dark:bg-zinc-800">
                     <h3 class="flex items-center gap-2 text-lg font-semibold text-zinc-900 dark:text-white">
@@ -2782,8 +3012,8 @@ function submit() {
             </div>
         </template>
 
-        <!-- Aba Afiliados (plugin Afiliados instalado) -->
-        <template v-if="affiliatesPluginEnabled && currentTab === 'afiliados'">
+        <!-- Aba Afiliados -->
+        <template v-if="currentTab === 'afiliados'">
             <div class="space-y-8">
                 <form class="rounded-xl border border-zinc-200 bg-white p-6 dark:border-zinc-700 dark:bg-zinc-800" @submit.prevent="submitAffiliateSettings">
                     <h2 class="text-lg font-semibold text-zinc-900 dark:text-white">{{ t('products.edit.affiliate_title', 'Programa de afiliados') }}</h2>
@@ -2816,13 +3046,52 @@ function submit() {
                             class="w-full"
                         />
                         <Checkbox
+                            v-model="affiliateForm.affiliate_hide_customer_data"
+                            :label="t('products.edit.affiliate_hide_customer', 'Ocultar dados do cliente para afiliados')"
+                            class="w-full"
+                        />
+                        <p class="text-xs text-zinc-500 dark:text-zinc-400">
+                            {{ t('products.edit.affiliate_hide_customer_hint', 'Quando ativo, afiliados veem a venda e a comissão, mas não nome nem e-mail do comprador.') }}
+                        </p>
+                        <Checkbox
                             v-model="affiliateForm.affiliate_show_in_showcase"
                             :disabled="!affiliateForm.affiliate_enabled"
                             :label="t('products.edit.affiliate_showcase', 'Mostrar na vitrine')"
                             class="w-full"
                         />
+                        <p class="text-xs text-zinc-500 dark:text-zinc-400">
+                            {{ t('products.edit.affiliate_showcase_hint', 'A vitrine é a listagem pública. Se o produto não estiver nela, compartilhe o link de afiliação abaixo para outros infoprodutores solicitarem.') }}
+                        </p>
+                        <div
+                            v-if="affiliateForm.affiliate_enabled"
+                            class="rounded-xl border border-emerald-200 bg-emerald-50/60 p-4 dark:border-emerald-900 dark:bg-emerald-950/20"
+                        >
+                            <p class="text-sm font-medium text-emerald-900 dark:text-emerald-200">
+                                {{ t('products.edit.affiliate_join_link', 'Link de afiliação do produto') }}
+                            </p>
+                            <p class="mt-1 text-xs text-emerald-800/80 dark:text-emerald-300/80">
+                                {{ t('products.edit.affiliate_join_link_hint', 'Quem receber este link pode solicitar afiliação mesmo sem o produto aparecer na vitrine. O link de checkout com ?ref= só é gerado depois da aprovação.') }}
+                            </p>
+                            <template v-if="produto.affiliate_join_url">
+                                <div class="mt-3 flex flex-wrap items-center gap-2">
+                                    <span class="max-w-[min(100%,28rem)] truncate font-mono text-xs text-emerald-900 dark:text-emerald-200">{{ produto.affiliate_join_url }}</span>
+                                    <Button type="button" size="sm" variant="outline" @click="copyAffiliateJoinLink">
+                                        {{ copiedSlug === 'affiliate-join' ? t('common.copy', 'Copiar') + ' ✓' : t('products.edit.affiliate_copy_link', 'Copiar link') }}
+                                    </Button>
+                                    <Button type="button" size="sm" variant="outline" @click="regenerateAffiliateJoinLink">
+                                        {{ t('products.edit.affiliate_join_regenerate', 'Gerar novo link') }}
+                                    </Button>
+                                </div>
+                            </template>
+                            <p v-else class="mt-2 text-xs text-amber-800 dark:text-amber-200">
+                                {{ t('products.edit.affiliate_join_link_save_hint', 'Salve as configurações para gerar o link de afiliação.') }}
+                            </p>
+                        </div>
                         <div>
                             <label class="mb-1 block text-sm font-medium text-zinc-700 dark:text-zinc-300">{{ t('products.edit.affiliate_page_url', 'Link da página de afiliados') }}</label>
+                            <p class="mb-2 text-xs text-zinc-500 dark:text-zinc-400">
+                                {{ t('products.edit.affiliate_page_url_hint', 'URL opcional com materiais para afiliados (Google Drive, Notion, página de divulgação). Não é o link de checkout.') }}
+                            </p>
                             <input
                                 v-model="affiliateForm.affiliate_page_url"
                                 type="url"
@@ -2845,6 +3114,50 @@ function submit() {
                                 rows="4"
                                 class="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 shadow-sm focus:border-[var(--color-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-primary)] dark:border-zinc-600 dark:bg-zinc-900 dark:text-white"
                             />
+                        </div>
+                        <div v-if="affiliateShareableOffers.length" class="rounded-xl border border-zinc-200 bg-zinc-50/70 p-4 dark:border-zinc-600 dark:bg-zinc-900/40">
+                            <p class="text-sm font-medium text-zinc-800 dark:text-zinc-200">
+                                {{ t('products.edit.affiliate_shared_offers', 'Links de ofertas para afiliados') }}
+                            </p>
+                            <p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                                {{ t('products.edit.affiliate_shared_offers_hint', 'Todas as ofertas do produto ficam disponíveis para o afiliado. Desmarque só as que não quiser compartilhar.') }}
+                            </p>
+                            <ul class="mt-3 space-y-2">
+                                <li
+                                    v-for="offer in affiliateShareableOffers"
+                                    :key="offer.id"
+                                    class="flex items-start gap-3 rounded-lg border border-zinc-200 bg-white px-3 py-2 dark:border-zinc-700 dark:bg-zinc-800"
+                                >
+                                    <Checkbox
+                                        :model-value="isAffiliateOfferShared(offer.id)"
+                                        :label="`${offer.name || ('Oferta #' + offer.id)} — ${Number(offer.price || 0).toLocaleString('pt-BR', { style: 'currency', currency: offer.currency || 'BRL' })}`"
+                                        class="w-full"
+                                        @update:model-value="(v) => toggleAffiliateOfferShare(offer.id, v)"
+                                    />
+                                </li>
+                            </ul>
+                            <p v-if="affiliateForm.errors.affiliate_shared_offer_ids" class="mt-2 text-sm text-red-600">
+                                {{ affiliateForm.errors.affiliate_shared_offer_ids }}
+                            </p>
+                        </div>
+                        <div v-if="affiliateShareablePlans.length" class="rounded-xl border border-zinc-200 bg-zinc-50/70 p-4 dark:border-zinc-600 dark:bg-zinc-900/40">
+                            <p class="text-sm font-medium text-zinc-800 dark:text-zinc-200">
+                                {{ t('products.edit.affiliate_shared_plans', 'Planos de assinatura para afiliados') }}
+                            </p>
+                            <p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                                {{ t('products.edit.affiliate_shared_plans_hint', 'Todos os planos deste produto ficam com link próprio no painel do afiliado.') }}
+                            </p>
+                            <ul class="mt-3 space-y-2">
+                                <li
+                                    v-for="plan in affiliateShareablePlans"
+                                    :key="plan.id"
+                                    class="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+                                >
+                                    {{ plan.name || ('Plano #' + plan.id) }}
+                                    —
+                                    {{ Number(plan.price || 0).toLocaleString('pt-BR', { style: 'currency', currency: plan.currency || 'BRL' }) }}
+                                </li>
+                            </ul>
                         </div>
                         <div class="flex justify-end">
                             <Button type="submit" :disabled="affiliateForm.processing">{{ affiliateForm.processing ? 'Salvando…' : t('common.save', 'Salvar') }}</Button>
@@ -2884,9 +3197,17 @@ function submit() {
                                     ID afiliado: {{ row.affiliate_user_id ?? '—' }} · ref: {{ row.public_ref || '—' }}
                                     <span v-if="row.updated_at"> · {{ new Date(row.updated_at).toLocaleString() }}</span>
                                 </p>
-                                <div v-if="row.affiliate_link" class="mt-2 flex flex-wrap items-center gap-2">
-                                    <span class="max-w-[min(100%,28rem)] truncate font-mono text-xs text-zinc-600 dark:text-zinc-400">{{ row.affiliate_link }}</span>
-                                    <Button type="button" size="sm" variant="outline" @click="copyAffiliateLink(row.affiliate_link)">{{ t('products.edit.affiliate_copy_link', 'Copiar link') }}</Button>
+                                <div v-if="row.affiliate_link" class="mt-2 space-y-1">
+                                    <p class="text-xs font-medium text-zinc-600 dark:text-zinc-400">
+                                        {{ t('products.edit.affiliate_checkout_link_label', 'Link de checkout do afiliado') }}
+                                    </p>
+                                    <p class="text-xs text-zinc-500 dark:text-zinc-500">
+                                        {{ t('products.edit.affiliate_checkout_link_hint', 'Gerado automaticamente após aprovação. O afiliado usa este link para rastrear vendas.') }}
+                                    </p>
+                                    <div class="flex flex-wrap items-center gap-2">
+                                        <span class="max-w-[min(100%,28rem)] truncate font-mono text-xs text-zinc-600 dark:text-zinc-400">{{ row.affiliate_link }}</span>
+                                        <Button type="button" size="sm" variant="outline" @click="copyAffiliateLink(row.affiliate_link)">{{ t('products.edit.affiliate_copy_link', 'Copiar link') }}</Button>
+                                    </div>
                                 </div>
                             </div>
                             <div v-if="row.status === 'pending'" class="flex shrink-0 gap-2">
@@ -2903,5 +3224,6 @@ function submit() {
             </div>
         </template>
         </div>
+    </div>
     </div>
 </template>

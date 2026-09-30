@@ -5,10 +5,10 @@ import Button from '@/components/ui/Button.vue';
 
 const page = usePage();
 const branding = computed(() => page.props.public_branding ?? {});
-const primary = computed(() => branding.value.theme_primary || '#8A2BE2');
-const appName = computed(() => branding.value.app_name || 'gatewayLab');
-const logoLight = computed(() => branding.value.app_logo || '/icons/logo.png');
-const logoDark = computed(() => branding.value.app_logo_dark || logoLight.value);
+const primary = computed(() => branding.value.theme_primary || '#0050fc');
+const appName = computed(() => branding.value.app_name || 'Getfy');
+const logoLight = computed(() => branding.value.app_logo || branding.value.app_logo_icon || '/images/logo.png');
+const logoDark = computed(() => branding.value.app_logo_dark || branding.value.app_logo_icon_dark || logoLight.value);
 const heroImage = computed(() => branding.value.login_hero_image || 'https://cdn.getfy.cloud/login.webp');
 
 const props = defineProps({
@@ -20,6 +20,7 @@ const props = defineProps({
     auth_email: { type: String, default: null },
     login_url: { type: String, default: '/login' },
     register_url: { type: String, default: '/cadastro' },
+    allow_register: { type: Boolean, default: true },
 });
 
 const durationLabel = computed(() => {
@@ -89,8 +90,11 @@ function acceptInvite() {
                         <Link :href="login_url" class="font-medium underline" :style="{ color: primary }">Entrar</Link>
                         com a conta
                         <strong>{{ invitation.email }}</strong>
-                        ou
-                        <Link :href="register_url" class="font-medium underline" :style="{ color: primary }">criar cadastro</Link>.
+                        <template v-if="allow_register">
+                            ou
+                            <Link :href="register_url" class="font-medium underline" :style="{ color: primary }">criar cadastro</Link>.
+                        </template>
+                        <template v-else>.</template>
                     </p>
                     <p v-else class="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
                         Entre com <strong>{{ invitation.email }}</strong> para aceitar. Você está logado como {{ auth_email }}.

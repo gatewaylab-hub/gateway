@@ -19,7 +19,7 @@ const props = defineProps({
     product: { type: Object, required: true },
     subscriptionPlan: { type: Object, default: null },
     config: { type: Object, default: () => ({}) },
-    primaryColor: { type: String, default: '#7427F1' },
+    primaryColor: { type: String, default: '#FF5A1F' },
     /** Desconto aplicado pelo cupom: { discount_amount, final_price } */
     appliedCoupon: { type: Object, default: null },
     t: { type: Function, default: (k) => k },
@@ -89,24 +89,24 @@ function selectCurrency(code) {
 </script>
 
 <template>
-    <section class="flex flex-row items-start gap-5 sm:gap-6" data-id="summary" data-checkout="summary">
+    <section class="flex flex-row items-start gap-4 sm:gap-5" data-id="summary" data-checkout="summary">
         <div class="relative flex-shrink-0" data-checkout="summary-product-image">
             <img
-                :src="product.image_url || 'https://placehold.co/96x96/e2e8f0/334155?text=Produto'"
+                :src="product.image_url || 'https://placehold.co/96x96/F1EAE2/8A7B6E?text=Produto'"
                 :alt="product.name"
-                class="h-24 w-24 rounded-2xl object-cover ring-2 ring-gray-100 shadow-lg sm:h-28 sm:w-28"
+                class="h-24 w-24 rounded-[14px] object-cover ring-1 ring-[#EBE2D8] sm:h-28 sm:w-28"
             />
         </div>
         <div class="min-w-0 flex-1" data-checkout="summary-main">
             <div class="relative flex items-start gap-3">
                 <h1
-                    class="min-w-0 flex-1 pr-0 text-xl font-bold tracking-tight text-gray-900 line-clamp-2 sm:pr-24 sm:text-2xl"
+                    class="min-w-0 flex-1 pr-0 font-display text-[20px] font-bold tracking-[-0.03em] text-[#1A1410] line-clamp-2 sm:pr-24 sm:text-[24px]"
                     data-checkout="summary-title"
                 >
                     {{ product.name }}
                 </h1>
                 <div
-                    class="absolute right-0 top-[-48px] z-10 flex shrink-0 items-center gap-1.5 rounded-full bg-white/95 p-1 shadow-sm ring-2 ring-white sm:top-0 sm:-translate-y-1/2"
+                    class="absolute right-0 top-[-48px] z-10 flex shrink-0 items-center gap-1.5 rounded-[10px] border border-[#EBE2D8] bg-white p-1 sm:top-0 sm:-translate-y-1/2"
                     data-checkout="summary-locale-currency"
                 >
                     <CheckoutDropdown
@@ -120,12 +120,12 @@ function selectCurrency(code) {
                             :key="loc"
                             type="button"
                             role="option"
-                            class="flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left text-sm transition hover:bg-gray-50"
-                            :class="locale === loc ? 'bg-gray-50 font-medium text-gray-900' : 'text-gray-700'"
+                            class="flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left text-sm transition hover:bg-[#FBF7F2]"
+                            :class="locale === loc ? 'bg-[#FBF7F2] font-medium text-[#1A1410]' : 'text-[#3D332B]'"
                             @click="selectLocale(loc)"
                         >
                             <span>{{ localeLabels[loc] || loc }}</span>
-                            <Check v-if="locale === loc" class="h-4 w-4 shrink-0 text-gray-500" />
+                            <Check v-if="locale === loc" class="h-4 w-4 shrink-0 text-[#8A7B6E]" />
                         </button>
                     </CheckoutDropdown>
                     <CheckoutDropdown
@@ -139,35 +139,35 @@ function selectCurrency(code) {
                             :key="c.code"
                             type="button"
                             role="option"
-                            class="flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left text-sm transition hover:bg-gray-50"
-                            :class="displayCurrency === c.code ? 'bg-gray-50 font-medium text-gray-900' : 'text-gray-700'"
+                            class="flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left text-sm transition hover:bg-[#FBF7F2]"
+                            :class="displayCurrency === c.code ? 'bg-[#FBF7F2] font-medium text-[#1A1410]' : 'text-[#3D332B]'"
                             @click="selectCurrency(c.code)"
                         >
                             <span>{{ c.code }} · {{ c.symbol }}</span>
-                            <Check v-if="displayCurrency === c.code" class="h-4 w-4 shrink-0 text-gray-500" />
+                            <Check v-if="displayCurrency === c.code" class="h-4 w-4 shrink-0 text-[#8A7B6E]" />
                         </button>
                     </CheckoutDropdown>
                 </div>
             </div>
             <div class="mt-3 flex flex-wrap items-baseline gap-x-3 gap-y-1" data-checkout="summary-price-row">
-                <span class="text-2xl font-bold tracking-tight sm:text-3xl" :style="{ color: primaryColor }">
+                <span class="font-display text-[26px] font-extrabold tracking-[-0.03em] sm:text-[30px]" :style="{ color: primaryColor }">
                     {{ formatPrice(priceToShow, displayCurrency) }}
-                    <span v-if="subscriptionPlan?.interval" class="text-sm font-medium text-gray-500 ml-1 align-baseline">{{ intervalLabel(subscriptionPlan.interval) }}</span>
+                    <span v-if="subscriptionPlan?.interval" class="ml-1 align-baseline text-sm font-medium text-[#8A7B6E]">{{ intervalLabel(subscriptionPlan.interval) }}</span>
                 </span>
-                <span v-if="showOriginalPriceStrikethrough && originalPriceForDisplay != null" class="text-lg font-medium text-gray-400 line-through">
+                <span v-if="showOriginalPriceStrikethrough && originalPriceForDisplay != null" class="text-lg font-medium text-[#A3958A] line-through">
                     {{ formatPrice(originalPriceForDisplay, displayCurrency) }}
                 </span>
             </div>
             <p
                 v-if="couponDiscountAmountBrl > 0"
-                class="mt-1.5 text-sm font-medium text-emerald-600"
+                class="mt-1.5 text-sm font-medium text-emerald-700"
                 data-checkout="summary-coupon-discount"
             >
                 {{ t('checkout.discount_coupon') }}: -{{ formatPrice(couponDiscountAmount, displayCurrency) }}
             </p>
             <span
                 v-if="discountText"
-                class="mt-3 inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-semibold uppercase tracking-wide text-rose-700 bg-rose-50 border border-rose-100"
+                class="mt-3 inline-flex items-center gap-1.5 rounded-[10px] border border-[#E2D7CB] bg-[#FBF7F2] px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-[#1A1410]"
                 data-checkout="summary-discount-badge"
             >
                 <Tag class="h-3.5 w-3.5" />
@@ -175,7 +175,7 @@ function selectCurrency(code) {
             </span>
             <template v-if="showDescription && fullDesc">
                 <p
-                    class="mt-3 text-sm leading-relaxed text-gray-600"
+                    class="mt-3 text-sm leading-relaxed text-[#6B5E54]"
                     data-checkout="summary-description"
                     :class="{ 'line-clamp-2': !expanded && showVerMais }"
                 >
@@ -184,7 +184,7 @@ function selectCurrency(code) {
                 <button
                     v-if="showVerMais"
                     type="button"
-                    class="mt-2 inline-flex items-center gap-1 text-sm font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 rounded-lg"
+                    class="mt-2 inline-flex items-center gap-1 rounded-lg text-sm font-semibold transition-colors focus:outline-none"
                     :style="{ color: primaryColor }"
                     @click="expanded = !expanded"
                 >

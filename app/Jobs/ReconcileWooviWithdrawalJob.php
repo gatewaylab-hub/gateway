@@ -30,7 +30,9 @@ class ReconcileWooviWithdrawalJob implements ShouldQueue
     public function handle(): void
     {
         $withdrawal = Withdrawal::query()->find($this->withdrawalId);
-        if ($withdrawal === null || $withdrawal->status !== 'pending' || $withdrawal->payout_provider !== 'woovi') {
+        if ($withdrawal === null
+            || ! in_array($withdrawal->status, ['pending', 'processing'], true)
+            || $withdrawal->payout_provider !== 'woovi') {
             return;
         }
 
@@ -70,6 +72,15 @@ class ReconcileWooviWithdrawalJob implements ShouldQueue
             return;
         }
 
+        if (in_array($apiStatus, ['cancelled', 'failed'], true)) {
+            MerchantWithdrawalService::markFailed(
+                $withdrawal->fresh(),
+                'Payout Woovi falhou (reconciliação): '.(string) $apiStatus
+            );
+
+            return;
+        }
+
         $this->maybeReleaseForRetry();
     }
 
@@ -80,7 +91,13 @@ class ReconcileWooviWithdrawalJob implements ShouldQueue
         }
 
         if ($this->attempts() >= 36) {
-            Log::info('ReconcileWooviWithdrawalJob: encerrando tentativas', ['withdrawal_id' => $this->withdrawalId]);
+            $withdrawal = Withdrawal::query()->find($this->withdrawalId);
+            if ($withdrawal !== null && in_array($withdrawal->status, ['pending', 'processing'], true)) {
+                MerchantWithdrawalService::markFailed(
+                    $withdrawal->fresh(),
+                    'Payout Woovi não confirmado após esgotar tentativas de reconciliação.'
+                );
+            }
 
             return;
         }

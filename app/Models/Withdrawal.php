@@ -15,12 +15,15 @@ class Withdrawal extends Model
         'net_amount',
         'bucket',
         'status',
+        'failed_reason',
         'notes',
         'currency',
         'payout_provider',
         'payout_external_id',
         'payout_meta',
         'payout_manual',
+        'api_application_id',
+        'api_key_id',
     ];
 
     protected function casts(): array
@@ -32,6 +35,11 @@ class Withdrawal extends Model
             'payout_meta' => 'array',
             'payout_manual' => 'boolean',
         ];
+    }
+
+    public function apiApplication(): BelongsTo
+    {
+        return $this->belongsTo(ApiApplication::class, 'api_application_id');
     }
 
     public function tenantOwner(): BelongsTo

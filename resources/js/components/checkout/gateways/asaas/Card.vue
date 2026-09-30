@@ -29,7 +29,7 @@ function getCardBrandFromNumber(digits) {
 const props = defineProps({
     method: { type: Object, required: true },
     selected: { type: Boolean, default: false },
-    primaryColor: { type: String, default: '#8A2BE2' },
+    primaryColor: { type: String, default: '#0ea5e9' },
     /** Dados do cartão (v-model cardData) */
     cardData: { type: Object, default: () => ({}) },
     /** Dados do endereço (v-model addressData) */

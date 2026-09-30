@@ -2,16 +2,30 @@
 
 namespace App\Http\Controllers;
 
+use App\Events\SellerRegistered;
 use App\Models\ProductCoproducer;
 use App\Models\TenantWallet;
 use App\Models\User;
+use App\Services\Checkout\TurnstileVerifier;
+use App\Services\LegalDocumentsService;
 use App\Services\PlatformEmailNotifications;
 use App\Support\BrazilianDocuments;
+use App\Support\CnpjLookup;
 use App\Support\DockerSetupState;
+use App\Support\EmailVerificationResendGuard;
+use App\Support\HtmlSanitizer;
+use App\Support\NormalizedEmail;
+use App\Support\RegistrationEmailVerificationSettings;
+use App\Services\PlatformAuditService;
+use App\Support\RegistrationTurnstileSettings;
+use App\Support\InfoproducerRegistrationSettings;
+use App\Services\ReferralAttributionService;
+use App\Support\ReferralProgramSettings;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\Rules\Password;
@@ -21,7 +35,8 @@ use Inertia\Response;
 class InfoprodutorRegistrationController extends Controller
 {
     public function __construct(
-        protected PlatformEmailNotifications $platformEmailNotifications
+        protected PlatformEmailNotifications $platformEmailNotifications,
+        protected TurnstileVerifier $turnstileVerifier,
     ) {}
 
     public function create(Request $request): Response|RedirectResponse
@@ -34,11 +49,18 @@ class InfoprodutorRegistrationController extends Controller
             return redirect()->route('criar-admin');
         }
 
-        return Inertia::render('Auth/RegisterWizard', [
+        if ($blocked = $this->denyIfRegistrationClosed($request)) {
+            return $blocked;
+        }
+
+        $response = Inertia::render('Auth/RegisterWizard', array_merge([
             'revenue_ranges' => self::revenueRangeOptions(),
             'coproducer_invite' => $request->query('coproducer_invite'),
+            'referral_ref' => ReferralAttributionService::resolveCodeFromRequest($request),
             'upgrade_from_customer' => false,
-        ]);
+        ], self::registrationWizardProps()));
+
+        return $this->withReferralCookie($request, $response);
     }
 
     public function createUpgrade(Request $request): Response|RedirectResponse
@@ -47,15 +69,25 @@ class InfoprodutorRegistrationController extends Controller
             return redirect('/docker-setup');
         }
         $user = Auth::user();
-        if (! $user instanceof User || ! $user->isCliente()) {
-            return redirect()->route('dashboard');
+        if (! $user instanceof User) {
+            return redirect()->route('login');
+        }
+        if (! $user->isCliente()) {
+            return redirect($user->defaultAuthenticatedHomeUrl());
         }
 
-        return Inertia::render('Auth/RegisterWizard', [
+        if ($blocked = $this->denyIfRegistrationClosed($request)) {
+            return $blocked;
+        }
+
+        $response = Inertia::render('Auth/RegisterWizard', array_merge([
             'revenue_ranges' => self::revenueRangeOptions(),
             'coproducer_invite' => $request->query('coproducer_invite'),
+            'referral_ref' => ReferralAttributionService::resolveCodeFromRequest($request),
             'upgrade_from_customer' => true,
-        ]);
+        ], self::registrationWizardProps()));
+
+        return $this->withReferralCookie($request, $response);
     }
 
     /**
@@ -74,20 +106,41 @@ class InfoprodutorRegistrationController extends Controller
 
     public function validateEmail(Request $request): \Illuminate\Http\JsonResponse
     {
+        if ($blocked = $this->denyIfRegistrationClosedJson($request)) {
+            return $blocked;
+        }
+
         $validated = $request->validate([
             'email' => ['required', 'email', 'max:255'],
         ]);
 
-        $q = User::query()->where('email', $validated['email']);
-        if (Auth::check()) {
-            $q->where('id', '!=', Auth::id());
+        $email = NormalizedEmail::normalize($validated['email']);
+
+        if (NormalizedEmail::isReservedForRegistration($email)) {
+            PlatformAuditService::log('security.registration_blocked_reserved_email', [
+                'email' => $email,
+                'context' => 'validate_email',
+            ], $request);
+
+            return response()->json([
+                'available' => false,
+                'message' => 'Este e-mail não pode ser usado para cadastro.',
+            ]);
         }
 
-        return response()->json(['available' => ! $q->exists()]);
+        $ignoreId = Auth::check() ? Auth::id() : null;
+
+        return response()->json([
+            'available' => ! NormalizedEmail::isTaken($email, is_int($ignoreId) ? $ignoreId : null),
+        ]);
     }
 
     public function validateDocument(Request $request): \Illuminate\Http\JsonResponse
     {
+        if ($blocked = $this->denyIfRegistrationClosedJson($request)) {
+            return $blocked;
+        }
+
         $validated = $request->validate([
             'person_type' => ['required', 'string', Rule::in(['pf', 'pj'])],
             'document' => ['required', 'string', 'max:20'],
@@ -172,6 +225,41 @@ class InfoprodutorRegistrationController extends Controller
         return response()->json(['available' => true]);
     }
 
+    /**
+     * Consulta CNPJ na BrasilAPI para autocompletar razão social.
+     * Nunca bloqueia o cadastro: falha devolve ok=false.
+     */
+    public function lookupCnpj(Request $request): \Illuminate\Http\JsonResponse
+    {
+        if ($blocked = $this->denyIfRegistrationClosedJson($request)) {
+            return $blocked;
+        }
+
+        $validated = $request->validate([
+            'document' => ['required', 'string', 'max:20'],
+        ]);
+
+        $cnpj = BrazilianDocuments::digits($validated['document']);
+        if (! BrazilianDocuments::isValidCnpj($cnpj)) {
+            return response()->json([
+                'ok' => false,
+                'status' => 'invalid',
+                'message' => 'CNPJ inválido.',
+            ], 422);
+        }
+
+        try {
+            $lookup = app(\App\Services\Cnpj\BrasilApiCnpjClient::class)->lookup($cnpj);
+        } catch (\Throwable) {
+            return response()->json(CnpjLookup::publicWizardPayload([
+                'status' => \App\Services\Cnpj\BrasilApiCnpjClient::STATUS_UNAVAILABLE,
+                'payload' => null,
+            ]));
+        }
+
+        return response()->json(CnpjLookup::publicWizardPayload($lookup));
+    }
+
     public function store(Request $request): RedirectResponse
     {
         if (DockerSetupState::isDocker() && ! DockerSetupState::isSetupDone()) {
@@ -182,18 +270,34 @@ class InfoprodutorRegistrationController extends Controller
             abort(403, 'Cadastro indisponível.');
         }
 
+        if ($blocked = $this->denyIfRegistrationClosed($request)) {
+            return $blocked;
+        }
+
         if (Auth::check() && Auth::user()->isCliente()) {
             return $this->upgradeClienteToInfoprodutor($request);
         }
 
+        if ($turnstileError = $this->validateRegistrationTurnstile($request)) {
+            return $turnstileError;
+        }
+
+        if ($honeypotError = $this->rejectRegistrationHoneypot($request)) {
+            return $honeypotError;
+        }
+
+        $request->merge(['email' => NormalizedEmail::normalize($request->input('email'))]);
+
         $rules = [
             'person_type' => ['required', 'string', Rule::in(['pf', 'pj'])],
             'name' => ['required', 'string', 'max:255'],
-            'email' => ['required', 'string', 'email', 'max:255', 'unique:users'],
+            'email' => ['required', 'string', 'email', 'max:255', 'unique:users,email'],
+            'phone' => ['required', 'string', 'max:32'],
             'birth_date' => ['required', 'date', 'before:'.now()->subYears(18)->format('Y-m-d')],
             'document' => ['required', 'string', 'max:20'],
             'company_name' => ['nullable', 'string', 'max:255'],
             'legal_representative_cpf' => ['nullable', 'string', 'max:20'],
+            'cnpj_suggested_razao_social' => ['nullable', 'string', 'max:255'],
             'address_zip' => ['required', 'string', 'regex:/^\d{8}$/'],
             'address_street' => ['required', 'string', 'max:255'],
             'address_number' => ['required', 'string', 'max:32'],
@@ -204,12 +308,42 @@ class InfoprodutorRegistrationController extends Controller
             'monthly_revenue_range' => ['required', 'string', Rule::in(User::MONTHLY_REVENUE_RANGES)],
             'password' => ['required', 'string', 'confirmed', Password::defaults()],
             'coproducer_invite' => ['nullable', 'string', 'max:64'],
+            'ref' => ['nullable', 'string', 'max:32'],
+            'accept_terms_privacy' => ['accepted'],
         ];
 
         $validated = $request->validate($rules, [
             'email.unique' => 'Este e-mail já está em uso.',
             'birth_date.before' => 'É necessário ter pelo menos 18 anos.',
+            'accept_terms_privacy.accepted' => 'Você precisa aceitar os Termos de Uso e a Política de Privacidade.',
         ]);
+
+        if (NormalizedEmail::isReservedForRegistration($validated['email'])) {
+            PlatformAuditService::log('security.registration_blocked_reserved_email', [
+                'email' => $validated['email'],
+                'context' => 'store',
+            ], $request);
+
+            return back()->withErrors([
+                'email' => 'Este e-mail não pode ser usado para cadastro.',
+            ])->withInput();
+        }
+
+        // Campos de texto puro: previne XSS armazenado (endereços, nomes, etc.)
+        foreach ([
+            'name' => 255,
+            'company_name' => 255,
+            'cnpj_suggested_razao_social' => 255,
+            'address_street' => 255,
+            'address_number' => 32,
+            'address_complement' => 120,
+            'address_neighborhood' => 120,
+            'address_city' => 120,
+        ] as $k => $max) {
+            if (array_key_exists($k, $validated)) {
+                $validated[$k] = HtmlSanitizer::plainText($validated[$k], $max) ?: null;
+            }
+        }
 
         $docDigits = BrazilianDocuments::digits($validated['document']);
         if ($validated['person_type'] === 'pf') {
@@ -247,32 +381,51 @@ class InfoprodutorRegistrationController extends Controller
             }
         }
 
+        $phoneDigits = $this->normalizePhoneDigits((string) ($validated['phone'] ?? ''));
+        if ($phoneDigits === null) {
+            return back()->withErrors(['phone' => 'Informe um WhatsApp válido com DDD (10 ou 11 dígitos).'])->withInput();
+        }
+
         $user = User::create([
-            'name' => $validated['name'],
+            'name' => (string) ($validated['name'] ?? ''),
             'email' => $validated['email'],
+            'phone' => $phoneDigits,
             'password' => Hash::make($validated['password']),
             'role' => User::ROLE_INFOPRODUTOR,
             'person_type' => $validated['person_type'],
             'document' => $docDigits,
             'birth_date' => $validated['birth_date'],
-            'company_name' => $validated['person_type'] === 'pj' ? trim((string) $validated['company_name']) : null,
+            'company_name' => $validated['person_type'] === 'pj' ? ($validated['company_name'] ?? null) : null,
             'legal_representative_cpf' => $validated['person_type'] === 'pj'
                 ? BrazilianDocuments::digits((string) $validated['legal_representative_cpf'])
                 : null,
             'address_zip' => $validated['address_zip'],
-            'address_street' => $validated['address_street'],
-            'address_number' => $validated['address_number'],
+            'address_street' => $validated['address_street'] ?? '',
+            'address_number' => $validated['address_number'] ?? '',
             'address_complement' => $validated['address_complement'] ?? null,
-            'address_neighborhood' => $validated['address_neighborhood'],
-            'address_city' => $validated['address_city'],
+            'address_neighborhood' => $validated['address_neighborhood'] ?? '',
+            'address_city' => $validated['address_city'] ?? '',
             'address_state' => strtoupper($validated['address_state']),
             'monthly_revenue_range' => $validated['monthly_revenue_range'],
             'kyc_status' => User::KYC_NOT_SUBMITTED,
-            'account_status' => 'approved',
+            'account_status' => 'pending',
             'seller_onboarded_at' => now(),
+            'email_verified_at' => RegistrationEmailVerificationSettings::isEnabled() ? null : now(),
         ]);
 
         $user->update(['tenant_id' => $user->id]);
+
+        $this->persistCnpjLookupIfPj($user->fresh(), $validated, $docDigits);
+
+        $this->attachReferralIfPresent($request, $user, $validated['ref'] ?? null);
+
+        try {
+            app(\App\Services\AccountManagerAssignmentService::class)->autoAssignIfConfigured($user->fresh(), $request);
+        } catch (\Throwable) {
+            // Não bloqueia o cadastro.
+        }
+
+        $this->recordLegalConsent($user);
 
         if (Schema::hasTable('tenant_wallets')) {
             TenantWallet::query()->firstOrCreate(
@@ -292,6 +445,16 @@ class InfoprodutorRegistrationController extends Controller
         }
 
         $this->platformEmailNotifications->welcomeInfoprodutor($user->fresh());
+        SellerRegistered::dispatch($user->fresh());
+
+        $verificationEmailSent = null;
+        if (RegistrationEmailVerificationSettings::isEnabled()) {
+            $freshUser = $user->fresh();
+            $verificationEmailSent = $this->platformEmailNotifications->sendEmailVerification($freshUser);
+            if ($verificationEmailSent) {
+                EmailVerificationResendGuard::markResent($freshUser);
+            }
+        }
 
         Auth::login($user);
         $request->session()->regenerate();
@@ -302,10 +465,10 @@ class InfoprodutorRegistrationController extends Controller
         }
 
         $msg = $inviteAccepted
-            ? 'Conta criada e co-produção ativada. Complete a verificação de identidade (KYC) para liberar o Financeiro.'
-            : 'Conta criada. Complete a verificação de identidade (KYC) para liberar o Financeiro.';
+            ? 'Conta criada e co-produção ativada. Envie seus documentos de verificação (KYC) para acessar o painel.'
+            : 'Conta criada. Envie seus documentos de verificação de identidade (KYC) para acessar o painel do infoprodutor.';
 
-        return redirect()->intended('/dashboard')->with('success', $msg);
+        return $this->redirectAfterRegistration($user, $msg, $verificationEmailSent);
     }
 
     /**
@@ -318,14 +481,26 @@ class InfoprodutorRegistrationController extends Controller
             abort(403);
         }
 
+        if ($turnstileError = $this->validateRegistrationTurnstile($request)) {
+            return $turnstileError;
+        }
+
+        if ($honeypotError = $this->rejectRegistrationHoneypot($request)) {
+            return $honeypotError;
+        }
+
+        $request->merge(['email' => NormalizedEmail::normalize($request->input('email'))]);
+
         $rules = [
             'person_type' => ['required', 'string', Rule::in(['pf', 'pj'])],
             'name' => ['required', 'string', 'max:255'],
             'email' => ['required', 'string', 'email', 'max:255', Rule::unique('users', 'email')->ignore($user->id)],
+            'phone' => ['required', 'string', 'max:32'],
             'birth_date' => ['required', 'date', 'before:'.now()->subYears(18)->format('Y-m-d')],
             'document' => ['required', 'string', 'max:20'],
             'company_name' => ['nullable', 'string', 'max:255'],
             'legal_representative_cpf' => ['nullable', 'string', 'max:20'],
+            'cnpj_suggested_razao_social' => ['nullable', 'string', 'max:255'],
             'address_zip' => ['required', 'string', 'regex:/^\d{8}$/'],
             'address_street' => ['required', 'string', 'max:255'],
             'address_number' => ['required', 'string', 'max:32'],
@@ -336,12 +511,41 @@ class InfoprodutorRegistrationController extends Controller
             'monthly_revenue_range' => ['required', 'string', Rule::in(User::MONTHLY_REVENUE_RANGES)],
             'password' => ['required', 'string', 'confirmed', Password::defaults()],
             'coproducer_invite' => ['nullable', 'string', 'max:64'],
+            'ref' => ['nullable', 'string', 'max:32'],
+            'accept_terms_privacy' => ['accepted'],
         ];
 
         $validated = $request->validate($rules, [
             'email.unique' => 'Este e-mail já está em uso.',
             'birth_date.before' => 'É necessário ter pelo menos 18 anos.',
+            'accept_terms_privacy.accepted' => 'Você precisa aceitar os Termos de Uso e a Política de Privacidade.',
         ]);
+
+        if (NormalizedEmail::isReservedForRegistration($validated['email'])) {
+            PlatformAuditService::log('security.registration_blocked_reserved_email', [
+                'email' => $validated['email'],
+                'context' => 'upgrade',
+            ], $request);
+
+            return back()->withErrors([
+                'email' => 'Este e-mail não pode ser usado para cadastro.',
+            ])->withInput();
+        }
+
+        foreach ([
+            'name' => 255,
+            'company_name' => 255,
+            'cnpj_suggested_razao_social' => 255,
+            'address_street' => 255,
+            'address_number' => 32,
+            'address_complement' => 120,
+            'address_neighborhood' => 120,
+            'address_city' => 120,
+        ] as $k => $max) {
+            if (array_key_exists($k, $validated)) {
+                $validated[$k] = HtmlSanitizer::plainText($validated[$k], $max) ?: null;
+            }
+        }
 
         $docDigits = BrazilianDocuments::digits($validated['document']);
         if ($validated['person_type'] === 'pf') {
@@ -379,32 +583,55 @@ class InfoprodutorRegistrationController extends Controller
             }
         }
 
+        $emailChanged = $user->email !== $validated['email'];
+        $needsEmailVerification = RegistrationEmailVerificationSettings::isEnabled()
+            && ($emailChanged || $user->email_verified_at === null);
+
+        $phoneDigits = $this->normalizePhoneDigits((string) ($validated['phone'] ?? ''));
+        if ($phoneDigits === null) {
+            return back()->withErrors(['phone' => 'Informe um WhatsApp válido com DDD (10 ou 11 dígitos).'])->withInput();
+        }
+
         $user->update([
-            'name' => $validated['name'],
+            'name' => (string) ($validated['name'] ?? ''),
             'email' => $validated['email'],
+            'phone' => $phoneDigits,
             'password' => Hash::make($validated['password']),
             'role' => User::ROLE_INFOPRODUTOR,
             'person_type' => $validated['person_type'],
             'document' => $docDigits,
             'birth_date' => $validated['birth_date'],
-            'company_name' => $validated['person_type'] === 'pj' ? trim((string) $validated['company_name']) : null,
+            'company_name' => $validated['person_type'] === 'pj' ? ($validated['company_name'] ?? null) : null,
             'legal_representative_cpf' => $validated['person_type'] === 'pj'
                 ? BrazilianDocuments::digits((string) $validated['legal_representative_cpf'])
                 : null,
             'address_zip' => $validated['address_zip'],
-            'address_street' => $validated['address_street'],
-            'address_number' => $validated['address_number'],
+            'address_street' => $validated['address_street'] ?? '',
+            'address_number' => $validated['address_number'] ?? '',
             'address_complement' => $validated['address_complement'] ?? null,
-            'address_neighborhood' => $validated['address_neighborhood'],
-            'address_city' => $validated['address_city'],
+            'address_neighborhood' => $validated['address_neighborhood'] ?? '',
+            'address_city' => $validated['address_city'] ?? '',
             'address_state' => strtoupper($validated['address_state']),
             'monthly_revenue_range' => $validated['monthly_revenue_range'],
             'kyc_status' => User::KYC_NOT_SUBMITTED,
-            'account_status' => 'approved',
+            'account_status' => 'pending',
             'seller_onboarded_at' => now(),
+            'email_verified_at' => $needsEmailVerification ? null : ($user->email_verified_at ?? now()),
         ]);
 
         $user->update(['tenant_id' => $user->id]);
+
+        $this->persistCnpjLookupIfPj($user->fresh(), $validated, $docDigits);
+
+        $this->attachReferralIfPresent($request, $user, $validated['ref'] ?? null);
+
+        try {
+            app(\App\Services\AccountManagerAssignmentService::class)->autoAssignIfConfigured($user->fresh(), $request);
+        } catch (\Throwable) {
+            // Não bloqueia o cadastro.
+        }
+
+        $this->recordLegalConsent($user);
 
         if (Schema::hasTable('tenant_wallets')) {
             TenantWallet::query()->firstOrCreate(
@@ -424,6 +651,16 @@ class InfoprodutorRegistrationController extends Controller
         }
 
         $this->platformEmailNotifications->welcomeInfoprodutor($user->fresh());
+        SellerRegistered::dispatch($user->fresh());
+
+        $verificationEmailSent = null;
+        if ($needsEmailVerification) {
+            $freshUser = $user->fresh();
+            $verificationEmailSent = $this->platformEmailNotifications->sendEmailVerification($freshUser);
+            if ($verificationEmailSent) {
+                EmailVerificationResendGuard::markResent($freshUser);
+            }
+        }
 
         $inviteAccepted = false;
         if (! empty($validated['coproducer_invite'])) {
@@ -431,10 +668,208 @@ class InfoprodutorRegistrationController extends Controller
         }
 
         $msg = $inviteAccepted
-            ? 'Conta de infoprodutor ativada e co-produção vinculada. Complete o KYC para o Financeiro.'
-            : 'Parabéns! Sua conta de infoprodutor está ativa. Complete o KYC para o Financeiro.';
+            ? 'Conta de infoprodutor ativada e co-produção vinculada. Envie seus documentos de verificação (KYC) para acessar o painel.'
+            : 'Conta de infoprodutor criada. Envie seus documentos de verificação (KYC) para acessar o painel.';
 
-        return redirect()->intended('/dashboard')->with('success', $msg);
+        return $this->redirectAfterRegistration($user, $msg, $verificationEmailSent);
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private static function registrationWizardProps(): array
+    {
+        return [
+            'registration_turnstile' => RegistrationTurnstileSettings::publicConfig(),
+        ];
+    }
+
+    private function denyIfRegistrationClosed(Request $request): ?RedirectResponse
+    {
+        if (InfoproducerRegistrationSettings::requestMayRegister($request)) {
+            return null;
+        }
+
+        return redirect()
+            ->route('login')
+            ->with('error', InfoproducerRegistrationSettings::BLOCKED_MESSAGE);
+    }
+
+    private function denyIfRegistrationClosedJson(Request $request): ?\Illuminate\Http\JsonResponse
+    {
+        if (InfoproducerRegistrationSettings::requestMayRegister($request)) {
+            return null;
+        }
+
+        return response()->json([
+            'success' => false,
+            'message' => InfoproducerRegistrationSettings::BLOCKED_MESSAGE,
+        ], 403);
+    }
+
+    private function validateRegistrationTurnstile(Request $request): ?RedirectResponse
+    {
+        if (! RegistrationTurnstileSettings::isRequired()) {
+            return null;
+        }
+
+        $token = trim((string) $request->input('turnstile_token', ''));
+        if ($token === '' || ! $this->turnstileVerifier->verify($token, $request->ip())) {
+            return back()
+                ->withErrors(['turnstile_token' => 'Confirme que você não é um robô e tente novamente.'])
+                ->withInput();
+        }
+
+        return null;
+    }
+
+    private function rejectRegistrationHoneypot(Request $request): ?RedirectResponse
+    {
+        $honeypot = trim((string) $request->input('sg_hp', ''));
+        if ($honeypot === '') {
+            $honeypot = trim((string) $request->input('website', ''));
+        }
+        if ($honeypot === '') {
+            return null;
+        }
+
+        PlatformAuditService::log('security.registration_honeypot', [
+            'ip' => $request->ip(),
+            'user_agent' => (string) $request->userAgent(),
+        ], $request);
+
+        Log::warning('registration honeypot triggered', [
+            'ip' => $request->ip(),
+            'user_agent' => (string) $request->userAgent(),
+        ]);
+
+        return back()->withErrors([
+            'email' => 'Não foi possível concluir o cadastro. Tente novamente.',
+        ])->withInput();
+    }
+
+    private function redirectAfterRegistration(User $user, string $successMessage, ?bool $verificationEmailSent = null): RedirectResponse
+    {
+        if (RegistrationEmailVerificationSettings::requiresVerificationFor($user->fresh())) {
+            $redirect = redirect()->route('verification.notice');
+
+            if ($verificationEmailSent === false) {
+                return $redirect->with(
+                    'error',
+                    'Conta criada, mas não foi possível enviar o e-mail de confirmação. Em Plataforma → Configurações → E-mail, salve o SMTP e use o teste de envio antes de reenviar.'
+                );
+            }
+
+            return $redirect->with('success', 'Conta criada! Confirme seu e-mail para continuar.');
+        }
+
+        return redirect('/financeiro?tab=seus-dados')->with('success', $successMessage);
+    }
+
+    /**
+     * @param  array<string, mixed>  $validated
+     */
+    private function persistCnpjLookupIfPj(User $user, array $validated, string $docDigits): void
+    {
+        if (($validated['person_type'] ?? '') !== 'pj' || ! CnpjLookup::columnExists()) {
+            return;
+        }
+
+        try {
+            CnpjLookup::persistForUser(
+                $user,
+                $docDigits,
+                (string) ($validated['company_name'] ?? ''),
+                isset($validated['cnpj_suggested_razao_social'])
+                    ? (string) $validated['cnpj_suggested_razao_social']
+                    : null,
+            );
+        } catch (\Throwable $e) {
+            Log::notice('cnpj_lookup.persist_failed', [
+                'user_id' => $user->id,
+                'error' => $e->getMessage(),
+            ]);
+            try {
+                if (CnpjLookup::columnExists()) {
+                    $user->forceFill([
+                        'cnpj_lookup' => CnpjLookup::failedSnapshot(
+                            \App\Services\Cnpj\BrasilApiCnpjClient::STATUS_UNAVAILABLE,
+                            'exception',
+                            (string) ($validated['company_name'] ?? ''),
+                            isset($validated['cnpj_suggested_razao_social'])
+                                ? (string) $validated['cnpj_suggested_razao_social']
+                                : null,
+                            $docDigits,
+                        ),
+                    ])->save();
+                }
+            } catch (\Throwable) {
+                // Cadastro já concluído; o admin pode reconsultar no KYC.
+            }
+        }
+    }
+
+    private function recordLegalConsent(User $user): void
+    {
+        if (! Schema::hasColumn('users', 'privacy_policy_accepted_at')) {
+            return;
+        }
+
+        $now = now();
+        $version = app(LegalDocumentsService::class)->contentVersion();
+
+        $user->forceFill([
+            'privacy_policy_accepted_at' => $now,
+            'terms_accepted_at' => $now,
+            'legal_consent_version' => $version,
+        ])->save();
+    }
+
+    /**
+     * Normaliza WhatsApp BR para dígitos (com 55 se vier só DDD+número).
+     */
+    private function normalizePhoneDigits(string $phone): ?string
+    {
+        $digits = preg_replace('/\D/', '', $phone) ?? '';
+        if (strlen($digits) < 10) {
+            return null;
+        }
+        if (strlen($digits) <= 11 && ! str_starts_with($digits, '55')) {
+            $digits = '55'.$digits;
+        }
+        if (strlen($digits) < 12 || strlen($digits) > 13) {
+            return null;
+        }
+
+        return $digits;
+    }
+
+    private function withReferralCookie(Request $request, Response $response): Response
+    {
+        if (! ReferralProgramSettings::isEnabled()) {
+            return $response;
+        }
+
+        $code = ReferralAttributionService::normalizeCode((string) $request->query('ref', ''));
+        if ($code === null || ReferralAttributionService::findReferrerByCode($code) === null) {
+            return $response;
+        }
+
+        cookie()->queue(ReferralAttributionService::makeReferralCookie($code));
+
+        return $response;
+    }
+
+    private function attachReferralIfPresent(Request $request, User $user, ?string $refFromBody): void
+    {
+        $code = ReferralAttributionService::normalizeCode($refFromBody)
+            ?? ReferralAttributionService::resolveCodeFromRequest($request);
+
+        if ($code === null) {
+            return;
+        }
+
+        ReferralAttributionService::attachOnRegistration($user->fresh(), $code);
     }
 }
 

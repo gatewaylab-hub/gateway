@@ -2,10 +2,18 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Controllers\Concerns\LogsSellerActivity;
+use App\Services\Platform\PlatformTotpService;
+use App\Services\SellerActivityLogService;
 use App\Services\StorageService;
+use App\Support\HtmlSanitizer;
+use App\Support\MerchantProfileSnapshot;
+use App\Support\PjConversion;
+use App\Support\RemoteStorage;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\Rules\Password;
 use Inertia\Inertia;
@@ -13,6 +21,7 @@ use Inertia\Response;
 
 class ProfileController extends Controller
 {
+    use LogsSellerActivity;
     public function index(Request $request): Response
     {
         $user = $request->user();
@@ -26,9 +35,57 @@ class ProfileController extends Controller
                 'name' => $user->name,
                 'email' => $user->email,
                 'username' => $user->username,
+                'trade_name' => $user->trade_name,
                 'avatar_url' => $user->avatar ? app(StorageService::class)->url($user->avatar) : null,
             ],
+            'registration' => MerchantProfileSnapshot::forUser($user, maskDocuments: false),
+            'pj_conversion' => PjConversion::forFrontend($user),
+            'pj_conversion_eligible' => PjConversion::isEligible($user) && ! PjConversion::isCollecting($user),
+            'kyc_identity_document_type' => $user->identity_document_type ?? null,
+            'kyc_company_legal_nature' => $user->company_legal_nature ?? null,
+            'kyc_company_nature_suggestion' => PjConversion::isCollectingOrPending($user)
+                ? \App\Support\KycRequiredDocuments::suggestCompanyNatureFromLookup($user)
+                : null,
+            'kyc_uploaded_kinds' => Schema::hasTable('kyc_documents')
+                ? \App\Models\KycDocument::query()
+                    ->where('user_id', $user->kycSubjectUser()->id)
+                    ->active()
+                    ->pluck('kind')
+                    ->values()
+                    ->all()
+                : [],
+            'kyc_requirements' => \App\Support\KycRequirementSettings::forSellerForm(),
+            'totp_enabled' => PlatformTotpService::isEnabledFor($user),
+            'push_preferences' => \App\Support\UserPushPreferences::forUserId((int) $user->id),
         ]);
+    }
+
+    public function updatePushPreferences(Request $request): RedirectResponse
+    {
+        $user = $request->user();
+        if (! $user) {
+            abort(403);
+        }
+
+        $validated = $request->validate([
+            'sale_approved' => ['nullable', 'boolean'],
+            'pix_generated' => ['nullable', 'boolean'],
+            'boleto_generated' => ['nullable', 'boolean'],
+            'withdrawal_paid' => ['nullable', 'boolean'],
+            'affiliate_sale_approved' => ['nullable', 'boolean'],
+            'coproduction_sale_approved' => ['nullable', 'boolean'],
+            'affiliate_enrollment_approved' => ['nullable', 'boolean'],
+            'daily_summary' => ['nullable', 'boolean'],
+            'system' => ['nullable', 'boolean'],
+            'show_product_name' => ['nullable', 'boolean'],
+            'show_sale_amount' => ['nullable', 'boolean'],
+            'sale_amount_mode' => ['nullable', 'string', 'in:gross,net'],
+            'show_payment_method' => ['nullable', 'boolean'],
+        ]);
+
+        \App\Support\UserPushPreferences::upsert((int) $user->id, $validated, $request);
+
+        return redirect()->route('profile.index')->with('success', 'Preferências de notificações atualizadas.');
     }
 
     public function update(Request $request): RedirectResponse
@@ -40,30 +97,41 @@ class ProfileController extends Controller
 
         $validated = $request->validate([
             'name' => ['required', 'string', 'max:255'],
-            'email' => ['required', 'string', 'email', 'max:255', Rule::unique('users', 'email')->ignore($user)],
+            'trade_name' => ['nullable', 'string', 'max:255'],
             'username' => ['nullable', 'string', 'max:64', 'alpha_dash', Rule::unique('users', 'username')->ignore($user)],
-            'avatar' => ['nullable', 'image', 'max:2048'],
+            'avatar' => ['nullable', 'file', 'mimes:jpg,jpeg,png,webp,gif', 'max:2048'],
         ], [
-            'email.unique' => 'Este e-mail já está em uso por outra conta.',
             'username.unique' => 'Este nome de usuário já está em uso.',
         ]);
 
-        $user->name = $validated['name'];
+        $user->name = HtmlSanitizer::plainText($validated['name'], 255);
+        $user->trade_name = ($trade = HtmlSanitizer::plainText($validated['trade_name'] ?? '', 255)) !== ''
+            ? $trade
+            : null;
         $user->username = $validated['username'] ?: null;
-        if ($user->email !== $validated['email']) {
-            $user->email = $validated['email'];
-            $user->email_verified_at = null;
-        }
 
         if ($request->hasFile('avatar')) {
-            $storage = app(StorageService::class);
-            if ($user->avatar && $storage->exists($user->avatar)) {
-                $storage->delete($user->avatar);
+            try {
+                $storage = app(StorageService::class);
+                if ($user->avatar && $storage->exists($user->avatar)) {
+                    $storage->delete($user->avatar);
+                }
+                $user->avatar = $storage->putFile('avatars', $request->file('avatar'));
+            } catch (\Throwable $e) {
+                $message = $e instanceof \RuntimeException
+                    ? $e->getMessage()
+                    : RemoteStorage::friendlyErrorMessage($e);
+
+                return redirect()->back()->withErrors(['avatar' => $message])->withInput();
             }
-            $user->avatar = $storage->putFile('avatars', $request->file('avatar'));
         }
 
         $user->save();
+
+        $this->logSellerActivity(SellerActivityLogService::PROFILE_UPDATED, $user, [
+            'name' => $user->name,
+            'username' => $user->username,
+        ]);
 
         return redirect()->route('profile.index')->with('success', 'Perfil atualizado.');
     }
@@ -84,7 +152,52 @@ class ProfileController extends Controller
         $user->username = $validated['username'] ?: null;
         $user->save();
 
+        $this->logSellerActivity(SellerActivityLogService::PROFILE_USERNAME_UPDATED, $user, [
+            'username' => $user->username,
+        ]);
+
         return back()->with('success', 'Nome de usuário atualizado.');
+    }
+
+    public function updateWhatsapp(Request $request): RedirectResponse
+    {
+        $user = $request->user();
+        if (! $user) {
+            abort(403);
+        }
+
+        if (! Schema::hasColumn('users', 'phone')) {
+            return back()->withErrors(['phone' => 'Não foi possível atualizar o WhatsApp.']);
+        }
+
+        $validated = $request->validate([
+            'phone' => ['required', 'string', 'max:32'],
+        ], [
+            'phone.required' => 'Informe um WhatsApp válido com DDD (10 ou 11 dígitos).',
+        ]);
+
+        $phoneDigits = $this->normalizeWhatsappDigits((string) $validated['phone']);
+        if ($phoneDigits === null) {
+            return back()->withErrors([
+                'phone' => 'Informe um WhatsApp válido com DDD (10 ou 11 dígitos).',
+            ])->withInput();
+        }
+
+        $previous = (string) ($user->phone ?? '');
+        if ($this->sameWhatsappNumber($previous, $phoneDigits)) {
+            return back()->with('success', 'WhatsApp atualizado.');
+        }
+
+        $user->phone = $phoneDigits;
+        $user->save();
+
+        $this->logSellerActivity(SellerActivityLogService::PROFILE_WHATSAPP_UPDATED, $user, [
+            'changed' => ['phone'],
+            'phone_from' => SellerActivityLogService::maskValue($previous !== '' ? $previous : null),
+            'phone_to' => SellerActivityLogService::maskValue($phoneDigits),
+        ]);
+
+        return back()->with('success', 'WhatsApp atualizado.');
     }
 
     public function updatePassword(Request $request): RedirectResponse
@@ -111,6 +224,38 @@ class ProfileController extends Controller
         $user->password = Hash::make($validated['password']);
         $user->save();
 
+        $this->logSellerActivity(SellerActivityLogService::PROFILE_PASSWORD_UPDATED, $user);
+
         return redirect()->route('profile.index')->with('success', 'Senha alterada.');
+    }
+
+    /**
+     * Normaliza WhatsApp BR para dígitos com DDI 55 (12 ou 13 dígitos).
+     */
+    private function normalizeWhatsappDigits(string $phone): ?string
+    {
+        $digits = preg_replace('/\D/', '', $phone) ?? '';
+        if (strlen($digits) < 10) {
+            return null;
+        }
+        if (strlen($digits) <= 11 && ! str_starts_with($digits, '55')) {
+            $digits = '55'.$digits;
+        }
+        if (strlen($digits) < 12 || strlen($digits) > 13) {
+            return null;
+        }
+
+        return $digits;
+    }
+
+    private function sameWhatsappNumber(string $current, string $incoming): bool
+    {
+        $currentDigits = $this->normalizeWhatsappDigits($current);
+        if ($currentDigits === null) {
+            $fallback = preg_replace('/\D/', '', $current) ?? '';
+            $currentDigits = $fallback !== '' ? $fallback : null;
+        }
+
+        return $currentDigits !== null && $currentDigits === $incoming;
     }
 }

@@ -3,10 +3,14 @@
 namespace App\Http\Controllers\Auth;
 
 use App\Http\Controllers\Controller;
+use App\Models\User;
+use App\Services\PlatformAuditService;
 use App\Services\TenantMailConfigService;
+use App\Support\NormalizedEmail;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Password;
 use Inertia\Inertia;
 use Inertia\Response;
@@ -29,9 +33,41 @@ class ForgotPasswordController extends Controller
             'email' => ['required', 'email'],
         ]);
 
-        // Usar o SMTP configurado nas Configurações (E-mail) em vez do .env
-        $this->mailConfig->applyMailerConfigForTenant(null);
-        config(['mail.default' => 'smtp']);
+        $email = NormalizedEmail::normalize($request->input('email'));
+        $request->merge(['email' => $email]);
+
+        $user = User::query()->whereRaw('LOWER(email) = ?', [$email])->first();
+
+        if ($user?->isPlatformAdmin()) {
+            PlatformAuditService::log('security.password_reset_blocked_platform_admin', [
+                'user_id' => $user->id,
+                'email' => $email,
+            ], $request);
+
+            return back()->with('status', 'Se o e-mail estiver cadastrado, você receberá o link de redefinição em sua caixa de entrada.');
+        }
+
+        try {
+            $this->mailConfig->applyForPasswordReset($user);
+            $this->mailConfig->assertSmtpHostIsConfigured();
+            config(['mail.default' => 'smtp']);
+            Mail::purge('smtp');
+
+            if ($user?->canAccessPlatformPanel()) {
+                app()->instance('password_reset_redirect', '/plataforma/login');
+            }
+        } catch (Throwable $e) {
+            Log::warning('ForgotPassword: SMTP não aplicado antes do envio.', [
+                'email' => $request->input('email'),
+                'user_id' => $user?->id,
+                'tenant_id' => $user?->tenant_id,
+                'message' => $e->getMessage(),
+            ]);
+
+            return back()->withErrors([
+                'email' => [$this->mailErrorMessage($e)],
+            ])->onlyInput('email');
+        }
 
         try {
             $status = Password::sendResetLink(
@@ -40,22 +76,17 @@ class ForgotPasswordController extends Controller
         } catch (Throwable $e) {
             Log::error('ForgotPassword: falha ao enviar link de redefinição.', [
                 'email' => $request->input('email'),
+                'smtp_host' => config('mail.mailers.smtp.host'),
+                'smtp_port' => config('mail.mailers.smtp.port'),
                 'message' => $e->getMessage(),
                 'exception' => $e::class,
-                'trace' => $e->getTraceAsString(),
             ]);
 
-            $message = 'Não foi possível enviar o e-mail. Verifique as configurações de SMTP em Configurações > E-mail ou tente novamente mais tarde.';
-            if (config('app.debug')) {
-                $message .= ' Detalhe: '.$e->getMessage();
-            }
-
             return back()->withErrors([
-                'email' => [$message],
+                'email' => [$this->mailErrorMessage($e)],
             ])->onlyInput('email');
         }
 
-        // Não revelar se o e-mail existe ou não (evita enumeração de usuários)
         if ($status === Password::RESET_THROTTLED) {
             return back()->withErrors([
                 'email' => ['Por favor, aguarde um minuto antes de solicitar um novo link de redefinição de senha.'],
@@ -63,5 +94,15 @@ class ForgotPasswordController extends Controller
         }
 
         return back()->with('status', 'Se o e-mail estiver cadastrado, você receberá o link de redefinição em sua caixa de entrada.');
+    }
+
+    private function mailErrorMessage(Throwable $e): string
+    {
+        $message = 'Não foi possível enviar o e-mail. Verifique as configurações de SMTP em Configurações → E-mail ou tente novamente mais tarde.';
+        if (config('app.debug')) {
+            $message .= ' Detalhe: '.$e->getMessage();
+        }
+
+        return $message;
     }
 }

@@ -1,7 +1,7 @@
 <?php
 
 /**
- * gatewayLab Installer Wizard - Entry Point
+ * Getfy Installer Wizard - Entry Point
  * Standalone installer, no Laravel dependency.
  */
 
@@ -26,7 +26,7 @@ if ($isAppInstalled($basePath)) {
 }
 
 $step = max(1, min(4, (int) ($_GET['step'] ?? $_POST['step'] ?? 1)));
-$logoUrl = '/icons/logo.png';
+$logoUrl = '/images/logo.png';
 
 ?>
 <!DOCTYPE html>
@@ -51,16 +51,16 @@ $logoUrl = '/icons/logo.png';
             theme: {
                 extend: {
                     colors: {
-                        primary: '#8A2BE2',
+                        primary: '#c8fa64',
                     }
                 }
             }
         }
     </script>
     <style>
-        .step-active { background-color: #8A2BE2; color: #ffffff; }
+        .step-active { background-color: #c8fa64; color: #18181b; }
         .step-done { background-color: #22c55e; color: white; }
-        input:focus, select:focus { outline: none; box-shadow: 0 0 0 2px rgba(138, 43, 226, 0.35); }
+        input:focus, select:focus { outline: none; box-shadow: 0 0 0 2px rgba(200, 250, 100, 0.3); }
     </style>
 </head>
 <body class="min-h-screen bg-zinc-100 dark:bg-zinc-900 text-zinc-900 dark:text-white">

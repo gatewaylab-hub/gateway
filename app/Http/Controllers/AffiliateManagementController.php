@@ -2,8 +2,11 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Controllers\Concerns\LogsSellerActivity;
 use App\Models\Product;
 use App\Models\ProductAffiliateEnrollment;
+use App\Services\AffiliateEnrollmentNotifier;
+use App\Services\SellerActivityLogService;
 use App\Services\StorageService;
 use App\Services\TeamAccessService;
 use Illuminate\Http\RedirectResponse;
@@ -13,6 +16,8 @@ use Inertia\Response;
 
 class AffiliateManagementController extends Controller
 {
+    use LogsSellerActivity;
+
     public function index(Request $request): Response
     {
         $user = $request->user();
@@ -137,6 +142,13 @@ class AffiliateManagementController extends Controller
 
         $enrollment->update(['status' => ProductAffiliateEnrollment::STATUS_APPROVED]);
         $enrollment->ensurePublicRef();
+        app(AffiliateEnrollmentNotifier::class)->notifyApproved($enrollment->fresh());
+
+        $this->logSellerActivity(SellerActivityLogService::AFFILIATE_APPROVED, $enrollment, [
+            'product_id' => $product->id,
+            'product_name' => $product->name,
+            'affiliate_user_id' => $enrollment->affiliate_user_id,
+        ]);
 
         return back()->with('success', 'Afiliação aprovada.');
     }
@@ -151,6 +163,11 @@ class AffiliateManagementController extends Controller
 
         $enrollment->update(['status' => ProductAffiliateEnrollment::STATUS_REJECTED]);
 
+        $this->logSellerActivity(SellerActivityLogService::AFFILIATE_REJECTED, $enrollment, [
+            'product_id' => $enrollment->product_id,
+            'affiliate_user_id' => $enrollment->affiliate_user_id,
+        ]);
+
         return back()->with('success', 'Solicitação recusada.');
     }
 
@@ -163,6 +180,11 @@ class AffiliateManagementController extends Controller
         }
 
         $enrollment->update(['status' => ProductAffiliateEnrollment::STATUS_REVOKED]);
+
+        $this->logSellerActivity(SellerActivityLogService::AFFILIATE_REVOKED, $enrollment, [
+            'product_id' => $enrollment->product_id,
+            'affiliate_user_id' => $enrollment->affiliate_user_id,
+        ]);
 
         return back()->with('success', 'Afiliação revogada (bloqueada).');
     }

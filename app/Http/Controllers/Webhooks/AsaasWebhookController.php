@@ -3,9 +3,9 @@
 namespace App\Http\Controllers\Webhooks;
 
 use App\Http\Controllers\Controller;
-use App\Jobs\ProcessPaymentWebhook;
-use App\Models\GatewayCredential;
 use App\Models\Order;
+use App\Support\GatewayInboundWebhookAuth;
+use App\Support\PaymentWebhookDispatcher;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
@@ -14,7 +14,7 @@ class AsaasWebhookController extends Controller
 {
     /**
      * Handle Asaas webhook (POST /webhooks/gateways/asaas).
-     * Payload: event (PAYMENT_RECEIVED, PAYMENT_CONFIRMED, PAYMENT_OVERDUE, etc.), payment (object with id).
+     * Auth: header asaas-access-token = authToken do webhook no painel Asaas.
      * Always respond 200 when order not found to avoid retries.
      */
     public function handle(Request $request): JsonResponse
@@ -32,52 +32,46 @@ class AsaasWebhookController extends Controller
         $order = Order::where('gateway', 'asaas')->where('gateway_id', $transactionId)->first();
         if (! $order) {
             Log::debug('AsaasWebhook: order not found', ['gateway_id' => $transactionId]);
+
             return response()->json(['received' => true]);
         }
 
-        if (! $this->verifyWebhookSignature('asaas', $order->tenant_id, $request)) {
+        if (! GatewayInboundWebhookAuth::verifyAsaas($request, $order->tenant_id)) {
             return response()->json(['message' => 'Unauthorized'], 401);
         }
 
-        $eventType = strtoupper((string) $request->input('event', ''));
-        $event = 'order.pending';
-        $mappedStatus = 'pending';
+        [$event, $mappedStatus] = $this->mapEvent(strtoupper((string) $request->input('event', '')));
 
-        if (in_array($eventType, ['PAYMENT_RECEIVED', 'PAYMENT_CONFIRMED'], true)) {
-            $event = 'order.paid';
-            $mappedStatus = 'paid';
-        } elseif (in_array($eventType, ['PAYMENT_CANCELLED', 'PAYMENT_REFUNDED'], true)) {
-            $event = 'order.cancelled';
-            $mappedStatus = 'cancelled';
-        } elseif (in_array($eventType, ['PAYMENT_OVERDUE'], true)) {
-            $event = 'order.pending';
-            $mappedStatus = 'pending';
-        }
-
-        ProcessPaymentWebhook::dispatchSync('asaas', $transactionId, $event, $mappedStatus, $request->all());
+        PaymentWebhookDispatcher::dispatch('asaas', $transactionId, $event, $mappedStatus, $request->all());
 
         return response()->json(['received' => true]);
     }
 
     /**
-     * Verifica assinatura do webhook quando webhook_secret estiver configurado.
+     * @return array{0: string, 1: string}
      */
-    private function verifyWebhookSignature(string $gatewaySlug, ?int $tenantId, Request $request): bool
+    private function mapEvent(string $eventType): array
     {
-        $credential = GatewayCredential::resolveForPayment($tenantId, $gatewaySlug);
-        if (! $credential) {
-            return true;
+        if (in_array($eventType, ['PAYMENT_RECEIVED', 'PAYMENT_CONFIRMED'], true)) {
+            return ['order.paid', 'paid'];
         }
-        $credentials = $credential->getDecryptedCredentials();
-        $secret = $credentials['webhook_secret'] ?? null;
-        if ($secret === null || $secret === '') {
-            return true;
+
+        if (in_array($eventType, ['PAYMENT_DELETED'], true)) {
+            return ['order.cancelled', 'cancelled'];
         }
-        $signature = $request->header('X-Webhook-Signature') ?? $request->header('X-Signature');
-        if (! is_string($signature) || $signature === '') {
-            return false;
+
+        if (in_array($eventType, ['PAYMENT_REFUNDED', 'PAYMENT_PARTIALLY_REFUNDED'], true)) {
+            return ['order.refunded', 'refunded'];
         }
-        $expected = 'sha256=' . hash_hmac('sha256', $request->getContent(), $secret);
-        return hash_equals($expected, $signature);
+
+        if (in_array($eventType, ['PAYMENT_CHARGEBACK_REQUESTED', 'PAYMENT_CHARGEBACK_DISPUTE'], true)) {
+            return ['order.disputed', 'disputed'];
+        }
+
+        if (in_array($eventType, ['PAYMENT_REPROVED_BY_RISK_ANALYSIS', 'PAYMENT_CREDIT_CARD_CAPTURE_REFUSED'], true)) {
+            return ['order.rejected', 'rejected'];
+        }
+
+        return ['order.pending', 'pending'];
     }
 }

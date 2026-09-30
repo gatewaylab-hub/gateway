@@ -3,11 +3,14 @@
 namespace App\Http\Controllers;
 
 use App\Events\DashboardLoading;
+use App\Models\CheckoutSession;
 use App\Models\Order;
 use App\Models\Product;
-use App\Models\Setting;
+use App\Support\DashboardBannerSettings;
 use App\Support\SqlDialect;
 use Carbon\Carbon;
+use App\Services\AffiliateCommissionQuery;
+use App\Services\Checkout\CheckoutAbandonmentMetrics;
 use App\Services\TeamAccessService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
@@ -28,9 +31,11 @@ class DashboardController extends Controller
         }
 
         $tenantId = auth()->user()->tenant_id;
-        $cacheKey = 'dashboard:v2:' . ($tenantId ?? 'global') . ':' . $period;
+        $userId = (int) auth()->id();
+        $hasAffiliateEnrollments = AffiliateCommissionQuery::userHasApprovedEnrollments($userId);
+        $cacheKey = 'dashboard:v6:'.($tenantId ?? 'global').':'.$userId.':'.$period;
 
-        $payload = Cache::remember($cacheKey, self::CACHE_TTL_SECONDS, function () use ($tenantId, $period) {
+        $payload = Cache::remember($cacheKey, self::CACHE_TTL_SECONDS, function () use ($tenantId, $period, $userId, $hasAffiliateEnrollments) {
             [$start, $end] = $this->rangeForPeriod($period);
 
             $ordersQuery = Order::forTenant($tenantId);
@@ -52,10 +57,29 @@ class DashboardController extends Controller
 
         $vendasTotais = (float) $ordersCompleted->sum('amount');
         $quantidadeVendas = $ordersCompleted->count();
-        $ticketMedio = $quantidadeVendas > 0 ? $vendasTotais / $quantidadeVendas : 0.0;
+        // Compras próprias (sem comissões de afiliado) para a métrica abandono / compras.
+        $comprasProprias = $quantidadeVendas;
         $vendasPendentes = (float) $ordersPending->sum('amount');
         $reembolsosCount = $ordersRefunded->count();
         $reembolsosTotal = (float) (clone $ordersQuery)->where('status', 'refunded')->sum('amount');
+
+        if ($hasAffiliateEnrollments) {
+            $affiliateRequest = Request::create('/', 'GET', ['period' => $period]);
+            $affiliateApproved = AffiliateCommissionQuery::applyFilters(
+                AffiliateCommissionQuery::baseQuery($userId),
+                $affiliateRequest,
+            )
+                ->where('status', \App\Models\AffiliateCommission::STATUS_APPROVED)
+                ->get(['commission_net']);
+
+            $affiliateTotal = (float) $affiliateApproved->sum('commission_net');
+            $affiliateCount = $affiliateApproved->count();
+
+            $vendasTotais += $affiliateTotal;
+            $quantidadeVendas += $affiliateCount;
+        }
+
+        $ticketMedio = $quantidadeVendas > 0 ? $vendasTotais / $quantidadeVendas : 0.0;
 
         $formasPagamentoRows = (clone $ordersQuery)
             ->where('status', 'completed')
@@ -63,14 +87,14 @@ class DashboardController extends Controller
             ->get();
 
         $formasPagamento = $formasPagamentoRows
-            ->groupBy(fn (Order $o) => $this->resolvePaymentMethodKey($o))
+            ->groupBy(fn (Order $o) => $o->paymentMethodReportKey())
             ->map(function ($rows, $method) {
                 return [
                     'metodo' => $method,
-                    'label' => $this->paymentMethodLabel($method),
+                    'label' => Order::paymentMethodReportLabel($method),
                     'total' => (float) $rows->sum(fn (Order $o) => (float) $o->amount),
                     'quantidade' => (int) $rows->count(),
-                    '_sort' => $this->paymentMethodSort($method),
+                    '_sort' => Order::paymentMethodReportSort($method),
                 ];
             })
             ->sortBy('_sort')
@@ -81,7 +105,7 @@ class DashboardController extends Controller
             ->values()
             ->all();
 
-        $graficoVendas = $this->buildGraficoVendas($tenantId, $period, $start, $end);
+        $graficoVendas = $this->buildGraficoVendas($tenantId, $period, $start, $end, $hasAffiliateEnrollments ? $userId : null);
 
         $productsQuery = Product::forTenant($tenantId);
         if (auth()->user()?->isTeam()) {
@@ -90,6 +114,13 @@ class DashboardController extends Controller
         }
         $quantidadeProdutos = $productsQuery->count();
 
+            $funnel = $this->checkoutFunnelStats($tenantId, $start, $end);
+            $abandonados = $funnel['abandono_carrinho'];
+            $baseAbandonoCompras = $abandonados + $comprasProprias;
+            $taxaAbandonoCompras = $baseAbandonoCompras > 0
+                ? round((float) $abandonados / $baseAbandonoCompras * 100, 1)
+                : 0.0;
+
             return [
                 'period' => $period,
                 'vendas_totais' => round($vendasTotais, 2),
@@ -97,8 +128,10 @@ class DashboardController extends Controller
                 'quantidade_vendas' => $quantidadeVendas,
                 'ticket_medio' => round($ticketMedio, 2),
                 'formas_pagamento' => $formasPagamento,
-                'taxa_conversao' => 0,
-                'abandono_carrinho' => 0,
+                'taxa_conversao' => $funnel['taxa_conversao'],
+                'abandono_carrinho' => $abandonados,
+                'taxa_abandono_compras' => $taxaAbandonoCompras,
+                'compras_periodo' => $comprasProprias,
                 'reembolsos_count' => $reembolsosCount,
                 'reembolsos_total' => round($reembolsosTotal, 2),
                 'quantidade_produtos' => $quantidadeProdutos,
@@ -107,10 +140,55 @@ class DashboardController extends Controller
         });
 
         $data = new \ArrayObject($payload);
-        $data['dashboard_banners'] = $this->dashboardBanners();
+        $data['dashboard_banners'] = DashboardBannerSettings::banners(activeOnly: true, resolveUrls: true);
+        $data['has_affiliate_enrollments'] = $hasAffiliateEnrollments;
+        $data['affiliate_stats'] = null;
+        $data['affiliate_recent_sales'] = [];
+
         event(new DashboardLoading($data));
 
         return Inertia::render('Dashboard/Index', $data->getArrayCopy());
+    }
+
+    /**
+     * Abandono: sessões válidas deduplicadas (e-mail + produto, form com e-mail, após graça).
+     * Taxa de conversão: sessões com pedido completed / total de sessões no período (created_at).
+     * Taxa abandono/compras (no payload): abandonados / (abandonados + compras completed) × 100.
+     *
+     * @return array{taxa_conversao: float, abandono_carrinho: int}
+     */
+    private function checkoutFunnelStats(?int $tenantId, ?string $start, ?string $end): array
+    {
+        $productIds = null;
+        $sessionsQuery = CheckoutSession::forTenant($tenantId);
+        if (auth()->user()?->isTeam()) {
+            $allowed = app(TeamAccessService::class)->allowedProductIdsFor(auth()->user());
+            $productIds = $allowed ?: ['__none__'];
+            $sessionsQuery->whereIn('product_id', $productIds);
+        }
+
+        if ($start && $end) {
+            $sessionsQuery->whereBetween('created_at', [$start, $end]);
+        } elseif ($start) {
+            $sessionsQuery->where('created_at', '>=', $start);
+        } elseif ($end) {
+            $sessionsQuery->where('created_at', '<=', $end);
+        }
+
+        $converted = (clone $sessionsQuery)
+            ->whereFunnelConversionCompleted()
+            ->count();
+
+        $abandonadosTotal = app(CheckoutAbandonmentMetrics::class)
+            ->countValidAbandoned($tenantId, $productIds, $start, $end);
+
+        $totalSessions = (clone $sessionsQuery)->count();
+        $taxaConversao = $totalSessions > 0 ? round((float) $converted / $totalSessions * 100, 1) : 0.0;
+
+        return [
+            'taxa_conversao' => $taxaConversao,
+            'abandono_carrinho' => $abandonadosTotal,
+        ];
     }
 
     private function rangeForPeriod(string $period): array
@@ -147,58 +225,7 @@ class DashboardController extends Controller
         return [$start?->toDateTimeString(), $end?->toDateTimeString()];
     }
 
-    private function resolvePaymentMethodKey(Order $order): string
-    {
-        $meta = is_array($order->metadata) ? $order->metadata : [];
-        $method = strtolower(trim((string) ($meta['checkout_payment_method'] ?? $order->payment_method ?? '')));
-        if ($method === 'pix_auto') {
-            $method = 'pix';
-        }
-        if (in_array($method, ['spacepag', 'woovi', 'pushinpay', 'cajupay', 'efi'], true)) {
-            $method = 'pix';
-        }
-        if (in_array($method, ['pix', 'card', 'boleto'], true)) {
-            return $method;
-        }
-
-        $gateway = strtolower(trim((string) ($order->gateway ?? '')));
-        if ($gateway === '') {
-            return 'outro';
-        }
-        if (str_contains($gateway, 'pix') || in_array($gateway, ['spacepag', 'woovi', 'pushinpay', 'cajupay', 'efi'], true)) {
-            return 'pix';
-        }
-        if ($gateway === 'card' || str_contains($gateway, 'cartao') || str_contains($gateway, 'cartão') || str_contains($gateway, 'credito')) {
-            return 'card';
-        }
-        if ($gateway === 'boleto' || str_contains($gateway, 'boleto')) {
-            return 'boleto';
-        }
-
-        return 'outro';
-    }
-
-    private function paymentMethodLabel(string $method): string
-    {
-        return match ($method) {
-            'pix' => 'PIX',
-            'card' => 'Cartão',
-            'boleto' => 'Boleto',
-            default => 'Outro',
-        };
-    }
-
-    private function paymentMethodSort(string $method): int
-    {
-        return match ($method) {
-            'pix' => 1,
-            'card' => 2,
-            'boleto' => 3,
-            default => 99,
-        };
-    }
-
-    private function buildGraficoVendas(?int $tenantId, string $period, ?string $start, ?string $end): array
+    private function buildGraficoVendas(?int $tenantId, string $period, ?string $start, ?string $end, ?int $affiliateUserId = null): array
     {
         $query = Order::forTenant($tenantId)->where('status', 'completed');
         if (auth()->user()?->isTeam()) {
@@ -214,6 +241,10 @@ class DashboardController extends Controller
             $query->where('created_at', '<=', $end);
         }
 
+        $affiliateRequest = $affiliateUserId
+            ? Request::create('/', 'GET', ['period' => $period])
+            : null;
+
         $isHourly = in_array($period, ['hoje', 'ontem'], true);
 
         if ($isHourly) {
@@ -225,11 +256,15 @@ class DashboardController extends Controller
                 ->get()
                 ->keyBy('hora');
 
+            $affiliateByHour = $affiliateUserId
+                ? AffiliateCommissionQuery::approvedCommissionTotalsByHour($affiliateUserId, $affiliateRequest)
+                : [];
+
             $result = [];
             for ($h = 0; $h <= 23; $h++) {
                 $result[] = [
                     'data' => (string) $h,
-                    'total' => (float) ($rows->get($h)?->total ?? 0),
+                    'total' => (float) ($rows->get($h)?->total ?? 0) + ($affiliateByHour[$h] ?? 0),
                 ];
             }
 
@@ -241,37 +276,25 @@ class DashboardController extends Controller
             ->selectRaw($dateExpr.' as data, SUM(amount) as total')
             ->groupBy('data')
             ->orderBy('data')
-            ->get();
+            ->get()
+            ->keyBy('data');
 
-        return $rows->map(fn ($r) => [
-            'data' => $r->data,
-            'total' => (float) $r->total,
-        ])->values()->all();
-    }
+        $affiliateByDate = $affiliateUserId
+            ? AffiliateCommissionQuery::approvedCommissionTotalsByDate($affiliateUserId, $affiliateRequest)
+            : [];
 
-    private function dashboardBanners(): array
-    {
-        $raw = Setting::get('dashboard_banners', [], null);
-        $rows = is_string($raw) ? json_decode($raw, true) : $raw;
-        if (! is_array($rows)) {
+        $dates = collect($rows->keys())->merge(array_keys($affiliateByDate))->unique()->sort()->values();
+
+        if ($dates->isEmpty()) {
             return [];
         }
 
-        return collect($rows)
-            ->filter(fn ($item) => is_array($item))
-            ->map(function (array $item, int $idx) {
-                return [
-                    'id' => (string) ($item['id'] ?? ('banner-'.$idx)),
-                    'title' => (string) ($item['title'] ?? ''),
-                    'desktop_url' => (string) ($item['desktop_url'] ?? ''),
-                    'mobile_url' => (string) ($item['mobile_url'] ?? ''),
-                    'active' => (bool) ($item['active'] ?? true),
-                    'sort_order' => (int) ($item['sort_order'] ?? ($idx + 1)),
-                ];
-            })
-            ->filter(fn (array $item) => $item['active'] && ($item['desktop_url'] !== '' || $item['mobile_url'] !== ''))
-            ->sortBy('sort_order')
-            ->values()
-            ->all();
+        return $dates->map(function (string $date) use ($rows, $affiliateByDate) {
+            return [
+                'data' => $date,
+                'total' => (float) ($rows->get($date)?->total ?? 0) + ($affiliateByDate[$date] ?? 0),
+            ];
+        })->values()->all();
     }
+
 }

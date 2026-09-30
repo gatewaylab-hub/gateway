@@ -1,9 +1,17 @@
 <script setup>
 import { ref, computed, reactive, nextTick, onMounted, watch } from 'vue';
 import axios from 'axios';
+import Draggable from 'vuedraggable';
 import MemberBuilderPreview from '@/components/member-builder/MemberBuilderPreview.vue';
 import Button from '@/components/ui/Button.vue';
 import Toggle from '@/components/ui/Toggle.vue';
+import {
+    CERTIFICATE_LAYOUT_FIELD_IDS,
+    CERTIFICATE_LAYOUT_FIELD_LABELS,
+    CERTIFICATE_LAYOUT_PRESETS,
+    mergeCertificateLayout,
+    applyCertificateLayoutPreset,
+} from '@/lib/certificateLayout';
 import {
     Palette,
     LayoutList,
@@ -30,6 +38,7 @@ import {
     BookOpen,
     Trophy,
     BarChart3,
+    GripVertical,
 } from 'lucide-vue-next';
 import {
     communityPageIconComponents,
@@ -37,6 +46,7 @@ import {
     communityPageEmojis,
     getCommunityPageIconComponent,
 } from '@/utils/communityPageIcons';
+import { normalizeMemberMenuLink } from '@/utils/memberAreaHref';
 
 const props = defineProps({
     produto: { type: Object, required: true },
@@ -44,7 +54,58 @@ const props = defineProps({
     app_url: { type: String, default: '' },
     dns_target_host: { type: String, default: null },
     dns_target_ip: { type: String, default: null },
+    /** Limites exibidos no UI (valores reais vêm do backend / .env). */
+    upload_limits: {
+        type: Object,
+        default: () => ({
+            image_max_mb: 10,
+            badge_max_mb: 5,
+            pdf_max_mb: 50,
+            material_max_mb: 50,
+            material_extensions: ['pdf', 'txt', 'csv', 'rtf', 'docx', 'xlsx', 'pptx', 'odt', 'ods', 'odp'],
+            material_accept: '.pdf,.txt,.csv,.rtf,.docx,.xlsx,.pptx,.odt,.ods,.odp,application/pdf,text/plain,text/csv',
+        }),
+    },
+    /** Nome da aplicação (Personalização global/plataforma), usado no preview do certificado. */
+    platform_app_name: { type: String, default: '' },
 });
+
+const DEFAULT_MATERIAL_EXTENSIONS = ['pdf', 'txt', 'csv', 'rtf', 'docx', 'xlsx', 'pptx', 'odt', 'ods', 'odp'];
+
+const uploadLimits = computed(() => {
+    const materialMax = props.upload_limits?.material_max_mb ?? props.upload_limits?.pdf_max_mb ?? 50;
+    const extensions = Array.isArray(props.upload_limits?.material_extensions) && props.upload_limits.material_extensions.length
+        ? props.upload_limits.material_extensions.map((ext) => String(ext).toLowerCase())
+        : DEFAULT_MATERIAL_EXTENSIONS;
+    return {
+        image_max_mb: props.upload_limits?.image_max_mb ?? 10,
+        badge_max_mb: props.upload_limits?.badge_max_mb ?? 5,
+        pdf_max_mb: props.upload_limits?.pdf_max_mb ?? 50,
+        material_max_mb: materialMax,
+        material_extensions: extensions,
+        material_accept: props.upload_limits?.material_accept
+            || extensions.map((ext) => `.${ext}`).join(','),
+    };
+});
+
+function lessonMaterialExtension(fileName) {
+    const match = /\.([a-z0-9]+)$/i.exec(fileName || '');
+    return match ? match[1].toLowerCase() : '';
+}
+
+function memberBuilderImageUploadError(e, fallbackLabel = 'imagem') {
+    const err = e?.response?.data?.errors?.file?.[0];
+    if (err) return err;
+    const m = uploadLimits.value.image_max_mb;
+    return e?.response?.data?.message || `Falha ao enviar ${fallbackLabel}. Verifique o tamanho (máx. ${m} MB) e o formato.`;
+}
+
+function memberBuilderPdfUploadError(e) {
+    const err = e?.response?.data?.errors?.file?.[0];
+    if (err) return err;
+    const m = uploadLimits.value.material_max_mb;
+    return e?.response?.data?.message || `Erro ao enviar material. Tamanho máx. ${m} MB. Use PDF, TXT, CSV, RTF, DOCX, XLSX, PPTX ou OpenDocument.`;
+}
 
 const csrfToken = () => document.querySelector('meta[name="csrf-token"]')?.content ?? '';
 
@@ -53,6 +114,52 @@ const processing = ref(false);
 const heroDesktopUploading = ref(false);
 const heroDesktopFileInput = ref(null);
 const certBgFileInput = ref(null);
+const selectedCertField = ref('body');
+const certLayoutFieldIds = CERTIFICATE_LAYOUT_FIELD_IDS;
+const certLayoutFieldLabels = CERTIFICATE_LAYOUT_FIELD_LABELS;
+const certLayoutPresets = CERTIFICATE_LAYOUT_PRESETS;
+
+function ensureCertLayout() {
+    const cert = configForm.member_area_config.certificate;
+    if (!cert.layout) {
+        cert.layout = mergeCertificateLayout({});
+    } else {
+        cert.layout = mergeCertificateLayout(cert.layout);
+    }
+    return cert.layout;
+}
+
+function onCertLayoutUpdate(layout) {
+    configForm.member_area_config.certificate.layout = mergeCertificateLayout(layout);
+}
+
+function patchCertField(id, key, value) {
+    const layout = ensureCertLayout();
+    if (!layout.fields[id]) return;
+    configForm.member_area_config.certificate.layout = {
+        ...layout,
+        fields: {
+            ...layout.fields,
+            [id]: { ...layout.fields[id], [key]: value },
+        },
+    };
+}
+
+function resetCertLayoutPositions() {
+    const layout = ensureCertLayout();
+    configForm.member_area_config.certificate.layout = {
+        ...layout,
+        fields: mergeCertificateLayout({}).fields,
+    };
+}
+
+function applyCertLayoutPreset(presetId) {
+    const next = applyCertificateLayoutPreset(presetId, ensureCertLayout());
+    configForm.member_area_config.certificate.layout = next;
+    if (presetId === 'name_date_signature') {
+        selectedCertField.value = 'body';
+    }
+}
 const heroMobileUploading = ref(false);
 const heroMobileFileInput = ref(null);
 const headerLogoUploading = ref(false);
@@ -114,8 +221,70 @@ const memberAreaFullLink = computed(() => {
     return props.produto.member_area_url || `${base}/m/${props.produto.checkout_slug}`;
 });
 
+const CERTIFICATE_TEXT_DEFAULTS = {
+    header_text: 'Certificado de conclusão',
+    recipient_intro_text: 'Certificamos que',
+    completion_text: 'completou com sucesso o curso em',
+    issued_on_text: 'em',
+    instructor_label_text: 'Assinatura do Instrutor',
+    platform_label_text: 'Plataforma de Cursos',
+    duration_label_text: 'Duração',
+};
+
+function mergeCertificateSection(stored = {}) {
+    const base = {
+        enabled: false,
+        title: '',
+        release_mode: 'completion_percent',
+        completion_percent: 100,
+        days_after_access: 0,
+        signature_text: '',
+        font_family: 'sans-serif',
+        duration_text: '',
+        platform_name: '',
+        primary_color: '',
+        background_image_url: '',
+        background_overlay_enabled: false,
+        background_overlay_color: '#000000',
+        background_overlay_opacity: 50,
+        text_color: '',
+        title_color: '',
+        signature_font_family: 'Dancing Script',
+        print_format: 'A4',
+        font_scale: 100,
+        duration_enabled: true,
+        body_template: '',
+        layout: mergeCertificateLayout({}),
+        ...CERTIFICATE_TEXT_DEFAULTS,
+    };
+    const merged = { ...base, ...(stored && typeof stored === 'object' ? stored : {}) };
+    merged.layout = mergeCertificateLayout(merged.layout);
+    for (const [key, value] of Object.entries(CERTIFICATE_TEXT_DEFAULTS)) {
+        if (!String(merged[key] ?? '').trim()) {
+            merged[key] = value;
+        }
+    }
+    return merged;
+}
+
+function applyCertificateDefaults(config, productName = '') {
+    const cert = config?.certificate;
+    if (!cert?.enabled) return;
+    if (!String(cert.title ?? '').trim()) {
+        cert.title = String(productName || '').trim() || 'Certificado';
+    }
+    if (!String(cert.signature_text ?? '').trim()) {
+        cert.signature_text = 'Instrutor';
+    }
+    for (const [key, value] of Object.entries(CERTIFICATE_TEXT_DEFAULTS)) {
+        if (!String(cert[key] ?? '').trim()) {
+            cert[key] = value;
+        }
+    }
+}
+
 const defaultConfig = () => ({
-    theme: { primary: '#8A2BE2', background: '#18181b', text: '#f8fafc', sidebar_bg: '#27272a', ...props.produto.member_area_config?.theme },
+    theme: { primary: '#0ea5e9', background: '#18181b', text: '#f8fafc', sidebar_bg: '#27272a', ...props.produto.member_area_config?.theme },
     hero: { title: '', subtitle: '', image_url: '', image_url_desktop: '', image_url_mobile: '', overlay: false, ...props.produto.member_area_config?.hero },
     header: { logo_url: '', ...props.produto.member_area_config?.header },
     logos: props.produto.member_area_config?.logos ?? {},
@@ -123,7 +292,7 @@ const defaultConfig = () => ({
     login: {
         title: '',
         subtitle: '',
-        primary_color: '#8A2BE2',
+        primary_color: '#0ea5e9',
         background_color: '#18181b',
         logo: '',
         background_image: '',
@@ -132,8 +301,8 @@ const defaultConfig = () => ({
         login_without_password: props.produto.member_area_config?.login?.login_without_password ?? false,
         ...props.produto.member_area_config?.login,
     },
-    pwa: { name: '', short_name: '', theme_color: '#8A2BE2', push_enabled: false, ...props.produto.member_area_config?.pwa },
-    certificate: { enabled: false, title: '', completion_percent: 100, signature_text: '', font_family: 'sans-serif', duration_text: '', platform_name: '', primary_color: '', background_image_url: '', background_overlay_enabled: false, background_overlay_color: '#000000', background_overlay_opacity: 50, text_color: '', title_color: '', signature_font_family: 'Dancing Script', print_format: 'A4', ...props.produto.member_area_config?.certificate },
+    pwa: { name: '', short_name: '', theme_color: '#0ea5e9', push_enabled: false, ...props.produto.member_area_config?.pwa },
+    certificate: mergeCertificateSection(props.produto.member_area_config?.certificate),
     community_enabled: props.produto.member_area_config?.community_enabled ?? false,
     community_users_can_delete_own_posts: props.produto.member_area_config?.community_users_can_delete_own_posts ?? true,
     comments_enabled: props.produto.member_area_config?.comments_enabled ?? false,
@@ -146,6 +315,15 @@ const configForm = reactive({
     domain_type: props.produto.member_area_domain?.type ?? 'path',
     domain_value: props.produto.member_area_domain?.value ?? props.produto.checkout_slug ?? '',
 });
+
+watch(
+    () => configForm.member_area_config?.certificate?.enabled,
+    (enabled) => {
+        if (enabled) {
+            applyCertificateDefaults(configForm.member_area_config, props.produto.name);
+        }
+    }
+);
 
 const tabs = [
     { id: 'aparencia', label: 'Aparência', icon: Palette, hasPreview: true, previewMode: 'area' },
@@ -258,6 +436,32 @@ watch(
     { immediate: true }
 );
 
+/** Cópia reativa da árvore (aba Módulos) para drag-and-drop; ressincroniza após reload e mutações nos props. */
+function cloneMemberSectionsStructure(sections) {
+    try {
+        const parsed = JSON.parse(JSON.stringify(sections ?? []));
+        for (const s of parsed) {
+            if (!Array.isArray(s.modules)) s.modules = [];
+            for (const m of s.modules) {
+                if (!Array.isArray(m.lessons)) m.lessons = [];
+            }
+        }
+        return parsed;
+    } catch {
+        return [];
+    }
+}
+
+const courseStructureSections = ref(cloneMemberSectionsStructure(props.produto.sections));
+
+watch(
+    () => props.produto.sections,
+    (next) => {
+        courseStructureSections.value = cloneMemberSectionsStructure(next);
+    },
+    { deep: true }
+);
+
 const headerItems = computed({
     get: () => {
         const items = configForm.member_area_config.sidebar?.items;
@@ -266,14 +470,40 @@ const headerItems = computed({
     set: () => {},
 });
 
+function normalizeHeaderMenuItem(item) {
+    if (!item || typeof item !== 'object') return;
+    const link = String(item.link ?? '').trim();
+    if (/^https?:\/\//i.test(link)) {
+        try {
+            const u = new URL(link);
+            const sameHost =
+                typeof window !== 'undefined' &&
+                u.origin === window.location.origin;
+            if (sameHost) {
+                item.link = normalizeMemberMenuLink(link);
+                item.open_external = false;
+                return;
+            }
+        } catch {
+            /* mantém URL externa */
+        }
+        item.open_external = true;
+        return;
+    }
+    item.link = normalizeMemberMenuLink(link);
+    item.open_external = Boolean(item.open_external);
+}
+
 function addHeaderItem() {
     if (!configForm.member_area_config.sidebar) configForm.member_area_config.sidebar = { collapsible: false, items: [] };
     if (!Array.isArray(configForm.member_area_config.sidebar.items)) configForm.member_area_config.sidebar.items = [];
-    configForm.member_area_config.sidebar.items.push({
+    const entry = {
         title: 'Novo menu',
         link: '/',
         open_external: false,
-    });
+    };
+    normalizeHeaderMenuItem(entry);
+    configForm.member_area_config.sidebar.items.push(entry);
     saveConfig();
 }
 
@@ -524,7 +754,7 @@ const lessonPdfUploading = ref(false);
 const modulosSelectedModule = computed(() => {
     const id = modulosSelectedModuleId.value;
     if (!id) return null;
-    for (const s of props.produto.sections ?? []) {
+    for (const s of courseStructureSections.value ?? []) {
         const mod = s.modules?.find((m) => m.id === id);
         if (mod) return mod;
     }
@@ -538,7 +768,7 @@ onMounted(() => {
     if (!moduleParam || t !== 'modulos') return;
 
     const moduleId = Number.isNaN(Number(moduleParam)) ? moduleParam : Number(moduleParam);
-    const exists = (props.produto.sections ?? []).some((section) =>
+    const exists = (courseStructureSections.value ?? []).some((section) =>
         (section.modules ?? []).some((mod) => mod.id === moduleId)
     );
     if (exists) {
@@ -562,7 +792,7 @@ function selectModuleForAulas(moduleId) {
     modulosSelectedModuleId.value = moduleId;
     modulosLessonForm.value = null;
 
-    const section = props.produto.sections?.find((s) => s.modules?.some((m) => m.id === moduleId));
+    const section = courseStructureSections.value?.find((s) => s.modules?.some((m) => m.id === moduleId));
     if (section?.id) {
         expandedSections.value = new Set([...expandedSections.value, section.id]);
     }
@@ -619,8 +849,14 @@ async function onLessonPdfChange(event) {
         if (!Array.isArray(modulosLessonForm.value.content_files)) modulosLessonForm.value.content_files = [];
         for (const file of files) {
             if (!file) continue;
-            if (file.type !== 'application/pdf') {
-                alert('Selecione apenas arquivos em formato PDF.');
+            const extension = lessonMaterialExtension(file.name);
+            if (!uploadLimits.value.material_extensions.includes(extension)) {
+                alert(`O arquivo "${file.name}" não é um formato permitido. Use PDF, TXT, CSV, RTF, DOCX, XLSX, PPTX ou OpenDocument.`);
+                continue;
+            }
+            const materialMaxBytes = uploadLimits.value.material_max_mb * 1024 * 1024;
+            if (file.size > materialMaxBytes) {
+                alert(`O arquivo "${file.name}" excede o limite de ${uploadLimits.value.material_max_mb} MB.`);
                 continue;
             }
             const formData = new FormData();
@@ -633,8 +869,7 @@ async function onLessonPdfChange(event) {
         const first = modulosLessonForm.value.content_files?.[0]?.url ?? '';
         modulosLessonForm.value.content_url = first || modulosLessonForm.value.content_url || '';
     } catch (e) {
-        const msg = e.response?.data?.message ?? e.message ?? 'Erro ao enviar material.';
-        alert(msg);
+        alert(memberBuilderPdfUploadError(e));
     } finally {
         lessonPdfUploading.value = false;
         if (lessonPdfFileInput.value) lessonPdfFileInput.value.value = '';
@@ -724,7 +959,7 @@ function toggleModule(moduleId) {
 }
 
 function expandAllModulos() {
-    const sections = props.produto.sections ?? [];
+    const sections = courseStructureSections.value ?? [];
     expandedSections.value = new Set(sections.map((s) => s.id));
     expandedModules.value = new Set(
         sections.flatMap((s) => (s.modules ?? []).map((m) => m.id))
@@ -761,6 +996,11 @@ const editingModuleExternalUrl = ref('');
 const editingModuleReleaseMode = ref('none'); // none | days | date
 const editingModuleReleaseAfterDays = ref('');
 const editingModuleReleaseAtDate = ref('');
+const editingModuleExpireEnabled = ref(false);
+const editingModuleExpireMode = ref('days'); // days | date
+const editingModuleExpireAfterDays = ref('');
+const editingModuleExpireAtDate = ref('');
+const editingModuleRenewalPrice = ref('');
 
 const sectionModalOpen = ref(false);
 const sectionModalTitle = ref('');
@@ -784,6 +1024,52 @@ const moduleModalExternalUrl = ref('');
 const moduleModalReleaseMode = ref('none'); // none | days | date
 const moduleModalReleaseAfterDays = ref('');
 const moduleModalReleaseAtDate = ref('');
+const moduleModalExpireEnabled = ref(false);
+const moduleModalExpireMode = ref('days'); // days | date
+const moduleModalExpireAfterDays = ref('');
+const moduleModalExpireAtDate = ref('');
+const moduleModalRenewalPrice = ref('');
+
+function packModuleExpirePayload(enabled, mode, daysStr, dateStr, priceStr) {
+    const payload = {
+        expire_after_days: null,
+        expire_at_date: null,
+        renewal_price: null,
+    };
+    if (!enabled) return payload;
+    if (mode === 'days') {
+        const days = parseInt(daysStr, 10);
+        payload.expire_after_days = Number.isFinite(days) && days > 0 ? days : null;
+    } else if (mode === 'date') {
+        payload.expire_at_date = dateStr?.trim() || null;
+    }
+    const normalized = String(priceStr ?? '').replace(',', '.').trim();
+    const price = parseFloat(normalized);
+    if (Number.isFinite(price) && price > 0) {
+        payload.renewal_price = Math.round(price * 100) / 100;
+    }
+    return payload;
+}
+
+function applyModuleExpireToForm(mod) {
+    if (mod.expire_at_date) {
+        editingModuleExpireEnabled.value = true;
+        editingModuleExpireMode.value = 'date';
+        editingModuleExpireAtDate.value = mod.expire_at_date;
+        editingModuleExpireAfterDays.value = '';
+    } else if (mod.expire_after_days) {
+        editingModuleExpireEnabled.value = true;
+        editingModuleExpireMode.value = 'days';
+        editingModuleExpireAfterDays.value = String(mod.expire_after_days);
+        editingModuleExpireAtDate.value = '';
+    } else {
+        editingModuleExpireEnabled.value = false;
+        editingModuleExpireMode.value = 'days';
+        editingModuleExpireAfterDays.value = '';
+        editingModuleExpireAtDate.value = '';
+    }
+    editingModuleRenewalPrice.value = mod.renewal_price ? String(mod.renewal_price) : '';
+}
 
 function openSectionEdit(section) {
     editingSectionTitle.value = section.title;
@@ -823,6 +1109,7 @@ function openModuleEdit(mod) {
         editingModuleReleaseAfterDays.value = '';
         editingModuleReleaseAtDate.value = '';
     }
+    applyModuleExpireToForm(mod);
     startEditModule(mod.id);
 }
 
@@ -830,7 +1117,7 @@ async function saveModuleTitle() {
     const id = editingModuleId.value;
     if (!id) return;
     const mod = editingModule.value;
-    const section = props.produto.sections?.find((s) => s.modules?.some((m) => m.id === id));
+    const section = courseStructureSections.value?.find((s) => s.modules?.some((m) => m.id === id));
     const sectionType = section?.section_type ?? 'courses';
     const payload = { title: editingModuleTitle.value };
     if (sectionType === 'courses') {
@@ -846,6 +1133,13 @@ async function saveModuleTitle() {
             payload.release_after_days = null;
             payload.release_at_date = null;
         }
+        Object.assign(payload, packModuleExpirePayload(
+            editingModuleExpireEnabled.value,
+            editingModuleExpireMode.value,
+            editingModuleExpireAfterDays.value,
+            editingModuleExpireAtDate.value,
+            editingModuleRenewalPrice.value,
+        ));
     } else if (sectionType === 'products') {
         payload.related_product_id = editingModuleRelatedProductId.value;
         payload.access_type = editingModuleAccessType.value;
@@ -866,15 +1160,17 @@ async function setModuleShowTitleOnCover(value) {
     if (!id) return;
     try {
         await axios.put(`${base.value}/modules/${id}`, { show_title_on_cover: value }, { headers: headers() });
-        const mod = props.produto.sections?.flatMap((s) => s.modules ?? []).find((m) => m.id === id);
-        if (mod) mod.show_title_on_cover = value;
+        const modClone = courseStructureSections.value?.flatMap((s) => s.modules ?? []).find((m) => m.id === id);
+        if (modClone) modClone.show_title_on_cover = value;
+        const modProp = props.produto.sections?.flatMap((s) => s.modules ?? []).find((m) => m.id === id);
+        if (modProp) modProp.show_title_on_cover = value;
     } catch (_) {}
 }
 
 const editingModule = computed(() => {
     const id = editingModuleId.value;
     if (!id) return null;
-    for (const s of props.produto.sections ?? []) {
+    for (const s of courseStructureSections.value ?? []) {
         const mod = s.modules?.find((m) => m.id === id);
         if (mod) return mod;
     }
@@ -884,7 +1180,7 @@ const editingModule = computed(() => {
 const editingModuleSection = computed(() => {
     const id = editingModuleId.value;
     if (!id) return null;
-    return props.produto.sections?.find((s) => s.modules?.some((m) => m.id === id)) ?? null;
+    return courseStructureSections.value?.find((s) => s.modules?.some((m) => m.id === id)) ?? null;
 });
 
 const moduleThumbnailUploading = ref(false);
@@ -923,10 +1219,66 @@ const headers = () => ({
     'X-Requested-With': 'XMLHttpRequest',
 });
 
+const memberReorderSaving = ref(false);
+
+function memberReorderIdsEqual(a, b) {
+    return a.length === b.length && a.every((id, i) => id === b[i]);
+}
+
+async function persistMemberStructureReorder(body) {
+    if (memberReorderSaving.value) return;
+    memberReorderSaving.value = true;
+    try {
+        await axios.post(`${base.value}/reorder`, body, { headers: headers() });
+        reload();
+    } catch (_) {
+        courseStructureSections.value = cloneMemberSectionsStructure(props.produto.sections);
+    } finally {
+        memberReorderSaving.value = false;
+    }
+}
+
+function onMemberSectionsReorderEnd() {
+    const ids = courseStructureSections.value.map((s) => s.id);
+    const original = (props.produto.sections ?? []).map((s) => s.id);
+    if (memberReorderIdsEqual(ids, original)) return;
+    persistMemberStructureReorder({ scope: 'sections', ordered_ids: ids });
+}
+
+function onMemberModulesReorderEnd(sectionId) {
+    const section = courseStructureSections.value.find((s) => s.id === sectionId);
+    if (!section?.modules) return;
+    const ids = section.modules.map((m) => m.id);
+    const origSection = (props.produto.sections ?? []).find((s) => s.id === sectionId);
+    const origIds = (origSection?.modules ?? []).map((m) => m.id);
+    if (memberReorderIdsEqual(ids, origIds)) return;
+    persistMemberStructureReorder({ scope: 'modules', section_id: sectionId, ordered_ids: ids });
+}
+
+function onMemberLessonsReorderEnd() {
+    const mid = modulosSelectedModuleId.value;
+    if (!mid || !modulosSelectedModule.value?.lessons) return;
+    const ids = modulosSelectedModule.value.lessons.map((l) => l.id);
+    const origMod = (props.produto.sections ?? []).flatMap((s) => s.modules ?? []).find((m) => m.id === mid);
+    const origIds = (origMod?.lessons ?? []).map((l) => l.id);
+    if (memberReorderIdsEqual(ids, origIds)) return;
+    persistMemberStructureReorder({ scope: 'lessons', module_id: mid, ordered_ids: ids });
+}
+
 async function saveConfig() {
     processing.value = true;
     try {
         const cleanedConfig = JSON.parse(JSON.stringify(configForm.member_area_config));
+        applyCertificateDefaults(cleanedConfig, props.produto.name);
+        applyCertificateDefaults(configForm.member_area_config, props.produto.name);
+        const certValidationError = validateCertificateConfig(cleanedConfig);
+        if (certValidationError) {
+            alert(certValidationError);
+            return;
+        }
+        if (cleanedConfig.sidebar?.items && Array.isArray(cleanedConfig.sidebar.items)) {
+            cleanedConfig.sidebar.items.forEach((item) => normalizeHeaderMenuItem(item));
+        }
         if (cleanedConfig.gamification && Array.isArray(cleanedConfig.gamification.achievements)) {
             cleanedConfig.gamification.achievements.forEach((a) => { delete a._editing; });
         }
@@ -958,11 +1310,33 @@ async function saveConfig() {
         url.searchParams.set('_', String(Date.now()));
         window.location.href = url.toString();
     } catch (err) {
-        const msg = err?.response?.data?.message ?? err?.response?.data?.errors ?? err?.message ?? 'Erro ao salvar.';
-        alert(Array.isArray(msg) ? Object.values(msg).flat().join('\n') : (typeof msg === 'object' ? JSON.stringify(msg) : msg));
+        const data = err?.response?.data;
+        if (data?.errors && typeof data.errors === 'object') {
+            alert(Object.values(data.errors).flat().join('\n'));
+            return;
+        }
+        const msg = data?.message ?? err?.message ?? 'Erro ao salvar.';
+        alert(typeof msg === 'object' ? JSON.stringify(msg) : msg);
     } finally {
         processing.value = false;
     }
+}
+
+function validateCertificateConfig(config) {
+    const cert = config?.certificate || {};
+    if (!cert.enabled) return '';
+    const requiredFields = [
+        ['title', 'Nome do certificado'],
+        ['signature_text', 'Texto da assinatura'],
+    ];
+    if (cert.duration_enabled !== false) {
+        requiredFields.push(['duration_text', 'Duração do curso']);
+    }
+    const missing = requiredFields
+        .filter(([key]) => !String(cert[key] ?? '').trim())
+        .map(([, label]) => label);
+    if (!missing.length) return '';
+    return `Preencha os campos obrigatórios do certificado:\n- ${missing.join('\n- ')}`;
 }
 
 const uploadHeaders = () => ({
@@ -988,7 +1362,7 @@ async function onHeroDesktopChange(event) {
     try {
         await doUpload(file, (url) => { configForm.member_area_config.hero.image_url_desktop = url; });
     } catch (e) {
-        alert(e?.response?.data?.message || 'Falha ao enviar imagem. Verifique o tamanho (máx. 4 MB) e o formato.');
+        alert(memberBuilderImageUploadError(e));
     } finally {
         heroDesktopUploading.value = false;
         if (heroDesktopFileInput.value) heroDesktopFileInput.value.value = '';
@@ -1002,7 +1376,7 @@ async function onHeroMobileChange(event) {
     try {
         await doUpload(file, (url) => { configForm.member_area_config.hero.image_url_mobile = url; });
     } catch (e) {
-        alert(e?.response?.data?.message || 'Falha ao enviar imagem. Verifique o tamanho (máx. 4 MB) e o formato.');
+        alert(memberBuilderImageUploadError(e));
     } finally {
         heroMobileUploading.value = false;
         if (heroMobileFileInput.value) heroMobileFileInput.value.value = '';
@@ -1045,7 +1419,7 @@ async function onHeaderLogoChange(event) {
             configForm.member_area_config.header.logo_url = url;
         });
     } catch (e) {
-        alert(e?.response?.data?.message || 'Falha ao enviar logo. Verifique o tamanho (máx. 4 MB) e o formato.');
+        alert(memberBuilderImageUploadError(e, 'logo'));
     } finally {
         headerLogoUploading.value = false;
         if (headerLogoFileInput.value) headerLogoFileInput.value.value = '';
@@ -1064,7 +1438,7 @@ async function onLoginLogoChange(event) {
     try {
         await doUpload(file, (url) => { configForm.member_area_config.login.logo = url; });
     } catch (e) {
-        alert(e?.response?.data?.message || 'Falha ao enviar logo. Verifique o tamanho (máx. 4 MB) e o formato.');
+        alert(memberBuilderImageUploadError(e, 'logo'));
     } finally {
         loginLogoUploading.value = false;
         if (loginLogoFileInput.value) loginLogoFileInput.value.value = '';
@@ -1086,7 +1460,7 @@ async function onFaviconChange(event) {
             configForm.member_area_config.logos.favicon = url;
         });
     } catch (e) {
-        alert(e?.response?.data?.message || 'Falha ao enviar ícone. Verifique o tamanho (máx. 4 MB) e o formato.');
+        alert(memberBuilderImageUploadError(e, 'ícone'));
     } finally {
         faviconUploading.value = false;
         if (faviconFileInput.value) faviconFileInput.value.value = '';
@@ -1105,7 +1479,7 @@ async function onLoginBackgroundChange(event) {
     try {
         await doUpload(file, (url) => { configForm.member_area_config.login.background_image = url; });
     } catch (e) {
-        alert(e?.response?.data?.message || 'Falha ao enviar imagem. Verifique o tamanho (máx. 4 MB) e o formato.');
+        alert(memberBuilderImageUploadError(e));
     } finally {
         loginBackgroundUploading.value = false;
         if (loginBackgroundFileInput.value) loginBackgroundFileInput.value.value = '';
@@ -1120,6 +1494,8 @@ function removeLoginBackground() {
 function reload() {
     const url = new URL(window.location.href);
     url.searchParams.set('tab', activeTab.value);
+    // Force navigation even when already on the same tab URL (otherwise the UI stays stale).
+    url.searchParams.set('_', String(Date.now()));
     window.location.href = url.toString();
 }
 
@@ -1238,7 +1614,7 @@ async function deleteSection(sectionId) {
     });
 }
 function openModuleModal(sectionId) {
-    const section = props.produto.sections?.find((s) => s.id === sectionId);
+    const section = courseStructureSections.value?.find((s) => s.id === sectionId);
     moduleModalSectionId.value = sectionId;
     moduleModalSectionType.value = section?.section_type ?? 'courses';
     moduleModalCoverMode.value = section?.cover_mode ?? 'vertical';
@@ -1250,6 +1626,11 @@ function openModuleModal(sectionId) {
     moduleModalReleaseMode.value = 'none';
     moduleModalReleaseAfterDays.value = '';
     moduleModalReleaseAtDate.value = '';
+    moduleModalExpireEnabled.value = false;
+    moduleModalExpireMode.value = 'days';
+    moduleModalExpireAfterDays.value = '';
+    moduleModalExpireAtDate.value = '';
+    moduleModalRenewalPrice.value = '';
     clearModuleModalFile();
     moduleModalOpen.value = true;
 }
@@ -1299,6 +1680,13 @@ async function confirmNewModule() {
                 payload.release_after_days = null;
                 payload.release_at_date = null;
             }
+            Object.assign(payload, packModuleExpirePayload(
+                moduleModalExpireEnabled.value,
+                moduleModalExpireMode.value,
+                moduleModalExpireAfterDays.value,
+                moduleModalExpireAtDate.value,
+                moduleModalRenewalPrice.value,
+            ));
         } else if (sectionType === 'products') {
             payload.related_product_id = moduleModalRelatedProductId.value;
             payload.access_type = moduleModalAccessType.value;
@@ -1323,10 +1711,18 @@ async function confirmNewModule() {
                 newModule = { ...newModule, thumbnail: up.data.url };
             }
         }
+        if (!Array.isArray(newModule.lessons)) newModule.lessons = [];
         const section = props.produto.sections?.find((s) => s.id === sectionId);
         if (section) {
             if (!section.modules) section.modules = [];
             section.modules.push(newModule);
+        }
+        const sectionClone = courseStructureSections.value.find((s) => s.id === sectionId);
+        if (sectionClone) {
+            if (!sectionClone.modules) sectionClone.modules = [];
+            sectionClone.modules.push(JSON.parse(JSON.stringify(newModule)));
+        }
+        if (section || sectionClone) {
             expandedSections.value = new Set([...expandedSections.value, sectionId]);
             expandedModules.value = new Set([...expandedModules.value, newModule.id]);
         }
@@ -1376,6 +1772,17 @@ async function removeInternalProduct(internalProductId) {
         reload();
     } catch (_) {}
 }
+// Lista reativa de turmas (atualiza a UI na hora, sem depender só de reload)
+const turmasList = ref([...(props.produto.turmas ?? [])].map((t) => ({
+    ...t,
+    users: [...(t.users ?? [])],
+})));
+watch(() => props.produto.turmas, (turmas) => {
+    turmasList.value = Array.isArray(turmas)
+        ? turmas.map((t) => ({ ...t, users: [...(t.users ?? [])] }))
+        : [];
+}, { deep: true });
+
 // Modal Nova/Editar turma
 const turmaModalOpen = ref(false);
 const turmaModalName = ref('');
@@ -1402,11 +1809,18 @@ async function saveTurmaModal() {
     try {
         if (editing) {
             await axios.put(`${base.value}/turmas/${editing.id}`, { name }, { headers: headers() });
+            const idx = turmasList.value.findIndex((t) => t.id === editing.id);
+            if (idx >= 0) turmasList.value[idx] = { ...turmasList.value[idx], name };
         } else {
-            await axios.post(`${base.value}/turmas`, { name }, { headers: headers() });
+            const { data } = await axios.post(`${base.value}/turmas`, { name }, { headers: headers() });
+            if (data?.turma) {
+                turmasList.value = [...turmasList.value, { ...data.turma, users: data.turma.users ?? [] }];
+            } else {
+                reload();
+                return;
+            }
         }
         closeTurmaModal();
-        reload();
     } catch (_) {}
     finally {
         turmaModalSaving.value = false;
@@ -1423,7 +1837,7 @@ async function deleteTurma(turmaId) {
         confirmLabel: 'Remover',
         onConfirm: async () => {
             await axios.delete(`${base.value}/turmas/${turmaId}`, { headers: headers() });
-            reload();
+            turmasList.value = turmasList.value.filter((t) => t.id !== turmaId);
         },
     });
 }
@@ -1482,21 +1896,27 @@ async function createNewAluno() {
         newAlunoFormErrors.email = 'E-mail é obrigatório.';
         return;
     }
-    if (!password || password.length < 6) {
-        newAlunoFormErrors.password = 'Senha deve ter no mínimo 6 caracteres.';
-        return;
-    }
     addAlunoModalCreateSaving.value = true;
     try {
-        const payload = { name, email, password };
-        if (addAlunoModalTurma?.id) payload.turma_id = addAlunoModalTurma.id;
+        const payload = { name, email };
+        if (password) payload.password = password;
+        const turmaId = addAlunoModalTurma.value?.id;
+        if (turmaId) payload.turma_id = turmaId;
         const res = await axios.post(`${base.value}/alunos`, payload, { headers: headers() });
         if (res.data?.errors) {
             Object.assign(newAlunoFormErrors, res.data.errors);
             return;
         }
+        const created = res.data?.user;
+        if (created && turmaId) {
+            const idx = turmasList.value.findIndex((t) => t.id === turmaId);
+            if (idx >= 0) {
+                const users = [...(turmasList.value[idx].users ?? []), created];
+                turmasList.value[idx] = { ...turmasList.value[idx], users };
+            }
+        }
         closeAddAlunoModal();
-        reload();
+        if (!created) reload();
     } catch (err) {
         const data = err.response?.data;
         if (data?.errors && typeof data.errors === 'object') {
@@ -1505,7 +1925,7 @@ async function createNewAluno() {
             newAlunoFormErrors.email = Array.isArray(e.email) ? e.email[0] : e.email || '';
             newAlunoFormErrors.password = Array.isArray(e.password) ? e.password[0] : e.password || '';
         } else {
-            newAlunoFormErrors.email = data?.message || 'Erro ao criar aluno. Tente outro e-mail.';
+            newAlunoFormErrors.email = data?.message || 'Erro ao cadastrar aluno. Tente outro e-mail.';
         }
     } finally {
         addAlunoModalCreateSaving.value = false;
@@ -1515,8 +1935,19 @@ async function attachTurmaUser(turmaId, userId) {
     if (!userId) return;
     addAlunoModalSaving.value = true;
     try {
-        await axios.post(`${base.value}/turmas/${turmaId}/users`, { user_id: userId }, { headers: headers() });
-        reload();
+        const { data } = await axios.post(`${base.value}/turmas/${turmaId}/users`, { user_id: userId }, { headers: headers() });
+        const user = data?.user ?? (props.produto.product_users ?? []).find((a) => a.id === userId);
+        if (user) {
+            const idx = turmasList.value.findIndex((t) => t.id === turmaId);
+            if (idx >= 0) {
+                const users = [...(turmasList.value[idx].users ?? [])];
+                if (!users.some((u) => u.id === user.id)) users.push({ id: user.id, name: user.name, email: user.email });
+                turmasList.value[idx] = { ...turmasList.value[idx], users };
+            }
+        } else {
+            reload();
+            return;
+        }
         closeAddAlunoModal();
     } catch (_) {}
     finally {
@@ -1526,7 +1957,11 @@ async function attachTurmaUser(turmaId, userId) {
 async function detachTurmaUser(turmaId, userId) {
     try {
         await axios.delete(`${base.value}/turmas/${turmaId}/users/${userId}`, { headers: headers() });
-        reload();
+        const idx = turmasList.value.findIndex((t) => t.id === turmaId);
+        if (idx >= 0) {
+            const users = (turmasList.value[idx].users ?? []).filter((u) => u.id !== userId);
+            turmasList.value[idx] = { ...turmasList.value[idx], users };
+        }
     } catch (_) {}
 }
 // Lista reativa de páginas da comunidade (sidebar + preview usam esta; atualizada ao criar/editar/remover)
@@ -1543,6 +1978,7 @@ const communityPageModalIcon = ref('');
 const communityPageModalPublic = ref(true);
 const communityPageModalDefault = ref(false);
 const communityPageModalSaving = ref(false);
+const communityPageModalError = ref('');
 const communityPageModalBannerPath = ref('');
 const communityPageModalBannerPreviewUrl = ref('');
 const communityPageModalBannerFile = ref(null);
@@ -1551,15 +1987,25 @@ const communityPageModalBannerInputRef = ref(null);
 /** Qual seletor está aberto: 'emoji' | 'icon' | null */
 const communityPageIconPickerOpen = ref(null);
 
+function isCommunityPageRecord(page) {
+    if (!page || typeof page !== 'object' || typeof page.preventDefault === 'function') {
+        return false;
+    }
+    const id = Number(page.id);
+    return Number.isFinite(id) && id > 0;
+}
+
 function openCommunityPageModal(page = null) {
-    communityPageModalEditing.value = page ?? null;
-    if (page) {
-        communityPageModalTitle.value = page.title ?? '';
-        communityPageModalIcon.value = page.icon ?? '';
-        communityPageModalPublic.value = page.is_public_posting !== false;
-        communityPageModalDefault.value = page.is_default === true;
-        communityPageModalBannerPath.value = page.banner ?? '';
-        communityPageModalBannerPreviewUrl.value = page.banner_url ?? '';
+    const record = isCommunityPageRecord(page) ? page : null;
+    communityPageModalEditing.value = record;
+    communityPageModalError.value = '';
+    if (record) {
+        communityPageModalTitle.value = record.title ?? '';
+        communityPageModalIcon.value = record.icon ?? '';
+        communityPageModalPublic.value = record.is_public_posting !== false;
+        communityPageModalDefault.value = record.is_default === true;
+        communityPageModalBannerPath.value = record.banner ?? '';
+        communityPageModalBannerPreviewUrl.value = record.banner_url ?? '';
         communityPageModalBannerFile.value = null;
     } else {
         communityPageModalTitle.value = '';
@@ -1582,6 +2028,21 @@ function closeCommunityPageModal() {
     communityPageModalBannerPath.value = '';
     communityPageModalBannerPreviewUrl.value = '';
     communityPageModalBannerFile.value = null;
+    communityPageModalError.value = '';
+}
+
+function formatCommunityPageError(err) {
+    const data = err?.response?.data;
+    if (data?.errors && typeof data.errors === 'object') {
+        return Object.values(data.errors).flat().join('\n');
+    }
+    if (typeof data?.message === 'string' && data.message.trim()) {
+        return data.message.trim();
+    }
+    if (typeof err?.message === 'string' && err.message.trim()) {
+        return err.message.trim();
+    }
+    return 'Não foi possível salvar a página da comunidade. Tente novamente.';
 }
 function setCommunityPageModalEmoji(emoji) {
     communityPageModalIcon.value = emoji;
@@ -1623,6 +2084,7 @@ async function saveCommunityPageModal() {
     if (!title) return;
     const editing = communityPageModalEditing.value;
     communityPageModalSaving.value = true;
+    communityPageModalError.value = '';
     try {
         let banner = communityPageModalBannerPath.value || null;
         if (communityPageModalBannerFile.value && !banner) {
@@ -1639,8 +2101,9 @@ async function saveCommunityPageModal() {
             is_default: communityPageModalDefault.value,
         };
         let res;
-        if (editing) {
-            res = await axios.put(`${base.value}/community-pages/${editing.id}`, payload, { headers: headers() });
+        if (isCommunityPageRecord(editing)) {
+            // POST explícito: PUT com JSON falha em alguns ambientes (proxy/servidor)
+            res = await axios.post(`${base.value}/community-pages/${editing.id}`, payload, { headers: headers() });
         } else {
             res = await axios.post(`${base.value}/community-pages`, payload, { headers: headers() });
         }
@@ -1649,8 +2112,7 @@ async function saveCommunityPageModal() {
         }
         closeCommunityPageModal();
     } catch (err) {
-        const msg = err?.response?.data?.message ?? err?.response?.data?.errors ?? err?.message ?? 'Erro ao salvar.';
-        alert(Array.isArray(msg) ? Object.values(msg).flat().join('\n') : msg);
+        communityPageModalError.value = formatCommunityPageError(err);
     } finally {
         communityPageModalSaving.value = false;
     }
@@ -1662,8 +2124,8 @@ async function deleteCommunityPage(pageId) {
         message: 'Remover esta página e todos os posts?',
         confirmLabel: 'Remover',
         onConfirm: async () => {
-            const res = await axios.delete(`${base.value}/community-pages/${pageId}`, {
-                headers: { ...headers(), Accept: 'application/json' },
+            const res = await axios.post(`${base.value}/community-pages/${pageId}/delete`, {}, {
+                headers: headers(),
             });
             if (Array.isArray(res?.data?.community_pages)) {
                 communityPagesList.value = res.data.community_pages;
@@ -1700,8 +2162,8 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
             </nav>
             <div class="flex shrink-0 items-center gap-2">
                 <a
-                    v-if="produto.member_area_url"
-                    :href="produto.member_area_url"
+                    v-if="memberAreaFullLink"
+                    :href="memberAreaFullLink"
                     target="_blank"
                     rel="noopener"
                     class="hidden items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800 sm:flex"
@@ -1766,7 +2228,7 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                                         </Button>
                                     </template>
                                 </div>
-                                <p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">Tamanho ideal: 180×40 px (ou proporção similar). PNG ou SVG com fundo transparente. Máx. 4 MB.</p>
+                                <p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">Tamanho ideal: 180×40 px (ou proporção similar). PNG ou SVG com fundo transparente. Máx. {{ uploadLimits.image_max_mb }} MB.</p>
                             </div>
                             <div>
                                 <label class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Favicon (ícone da aba do navegador)</label>
@@ -1783,7 +2245,7 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                                         {{ faviconUploading ? 'Enviando…' : 'Enviar favicon (192×192 ou 512×512)' }}
                                     </Button>
                                 </div>
-                                <p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">Usado na aba do navegador e no PWA. Tamanho ideal: 192×192 ou 512×512 px. Máx. 4 MB.</p>
+                                <p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">Usado na aba do navegador e no PWA. Tamanho ideal: 192×192 ou 512×512 px. Máx. {{ uploadLimits.image_max_mb }} MB.</p>
                             </div>
                             <div>
                                 <input v-model="configForm.member_area_config.theme.primary" type="color" class="h-9 w-full cursor-pointer rounded-lg border dark:border-zinc-600" />
@@ -1819,7 +2281,7 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                                         </Button>
                                     </template>
                                 </div>
-                                <p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">Tamanho ideal: 1920×600 px (banner horizontal). Usado em telas maiores. Máx. 4 MB.</p>
+                                <p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">Tamanho ideal: 1920×600 px (banner horizontal). Usado em telas maiores. Máx. {{ uploadLimits.image_max_mb }} MB.</p>
                             </div>
                             <div>
                                 <label class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Banner do hero — Mobile</label>
@@ -1848,7 +2310,7 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                                         </Button>
                                     </template>
                                 </div>
-                                <p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">Tamanho ideal: 800×600 px ou 800×900 px (vertical). Usado em celulares. Se não enviar, usa o banner desktop. Máx. 4 MB.</p>
+                                <p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">Tamanho ideal: 800×600 px ou 800×900 px (vertical). Usado em celulares. Se não enviar, usa o banner desktop. Máx. {{ uploadLimits.image_max_mb }} MB.</p>
                             </div>
                             <div>
                                 <label class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Título do hero</label>
@@ -1884,8 +2346,8 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                                     </div>
                                     <div>
                                         <label class="mb-0.5 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Link</label>
-                                        <input v-model="item.link" type="text" :class="inputClass" placeholder="Ex: / ou /modulos ou https://..." />
-                                        <p class="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">Interno: use / ou /modulos. Externo: URL completa.</p>
+                                        <input v-model="item.link" type="text" :class="inputClass" placeholder="Ex: /, /loja, /comunidade ou https://..." />
+                                        <p class="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">Use caminhos relativos: /, /loja, /comunidade, /certificado (não cole /m/slug/... — isso quebra em domínio próprio).</p>
                                     </div>
                                     <div class="flex items-center gap-2">
                                         <input
@@ -1994,13 +2456,33 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                             <button type="button" class="text-xs text-zinc-500 underline hover:text-zinc-700 dark:hover:text-zinc-300" @click="expandAllModulos">Expandir tudo</button>
                             <button type="button" class="text-xs text-zinc-500 underline hover:text-zinc-700 dark:hover:text-zinc-300" @click="collapseAllModulos">Recolher tudo</button>
                         </div>
-                        <div class="space-y-2">
-                            <template v-for="section in produto.sections" :key="section.id">
+                        <p v-if="memberReorderSaving" class="mb-2 text-xs text-sky-600 dark:text-sky-400">Salvando ordem…</p>
+                        <Draggable
+                            v-model="courseStructureSections"
+                            tag="div"
+                            :component-data="{ class: 'space-y-2' }"
+                            item-key="id"
+                            handle=".mb-drag-handle--section"
+                            :animation="160"
+                            ghost-class="opacity-60"
+                            :disabled="memberReorderSaving"
+                            @end="onMemberSectionsReorderEnd"
+                        >
+                            <template #item="{ element: section }">
                                 <div class="min-w-0 rounded-lg border border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-900">
                                     <div class="flex min-w-0 items-start gap-2 py-2 px-3">
                                         <button type="button" class="mt-0.5 shrink-0 rounded p-0.5 text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300" @click="toggleSection(section.id)" aria-label="Expandir ou recolher">
                                             <ChevronRight v-if="!expandedSections.has(section.id)" class="h-4 w-4" />
                                             <ChevronDown v-else class="h-4 w-4" />
+                                        </button>
+                                        <button
+                                            type="button"
+                                            class="mb-drag-handle--section mt-0.5 shrink-0 cursor-grab rounded p-0.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 active:cursor-grabbing dark:hover:bg-zinc-800 dark:hover:text-zinc-300"
+                                            title="Arrastar para reordenar"
+                                            aria-label="Arrastar seção"
+                                            @click.prevent
+                                        >
+                                            <GripVertical class="h-4 w-4" />
                                         </button>
                                         <div class="min-w-0 flex-1 flex flex-col gap-2">
                                             <!-- Tags sempre em cima -->
@@ -2062,10 +2544,19 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                                     <div v-if="expandedSections.has(section.id)" class="min-w-0 border-t border-zinc-200 bg-zinc-50/50 px-3 pb-3 pt-2 dark:border-zinc-700 dark:bg-zinc-800/30">
                                         <!-- Seção tipo Cursos/Aulas: grid de cards de módulos -->
                                         <template v-if="(section.section_type ?? 'courses') === 'courses'">
-                                            <div class="grid grid-cols-3 gap-2">
+                                            <Draggable
+                                                v-model="section.modules"
+                                                tag="div"
+                                                :component-data="{ class: 'grid grid-cols-3 gap-2' }"
+                                                item-key="id"
+                                                handle=".mb-drag-handle--module"
+                                                :animation="160"
+                                                ghost-class="opacity-60"
+                                                :disabled="memberReorderSaving"
+                                                @end="onMemberModulesReorderEnd(section.id)"
+                                            >
+                                                <template #item="{ element: mod }">
                                                 <div
-                                                    v-for="mod in section.modules"
-                                                    :key="mod.id"
                                                     class="flex flex-col overflow-hidden rounded-lg border border-zinc-200 bg-white shadow-sm transition dark:border-zinc-700 dark:bg-zinc-800/80"
                                                     :class="{ 'ring-2 ring-sky-500/50 dark:ring-sky-400/40': modulosSelectedModuleId === mod.id }"
                                                 >
@@ -2082,12 +2573,16 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                                                         </div>
                                                     </button>
                                                     <div class="flex items-center gap-0.5 border-t border-zinc-200 p-1 dark:border-zinc-700">
+                                                        <button type="button" class="mb-drag-handle--module shrink-0 cursor-grab rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 active:cursor-grabbing dark:hover:bg-zinc-700 dark:hover:text-zinc-300" title="Arrastar para reordenar" aria-label="Arrastar módulo" @click.prevent>
+                                                            <GripVertical class="h-3 w-3" />
+                                                        </button>
                                                         <Button size="sm" variant="outline" class="!py-0.5 !text-[10px] flex-1 min-w-0" @click.stop="selectModuleForAulas(mod.id)">Aulas</Button>
                                                         <button type="button" class="rounded p-1 text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-700 dark:hover:text-zinc-300" title="Editar módulo" @click.stop="openModuleEdit(mod)"><Pencil class="h-3 w-3" /></button>
                                                         <button type="button" class="rounded p-1 text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30" title="Remover módulo" @click.stop="deleteModule(mod.id)"><Trash2 class="h-3 w-3" /></button>
                                                     </div>
                                                 </div>
-                                            </div>
+                                                </template>
+                                            </Draggable>
                                             <!-- Edição do módulo (quando editingModuleId está neste módulo da seção) -->
                                             <template v-for="mod in section.modules" :key="'edit-' + mod.id">
                                                 <div v-if="editingModuleId === mod.id" class="mt-3 rounded-xl border border-zinc-200 bg-zinc-50/80 p-3 dark:border-zinc-600 dark:bg-zinc-800/50">
@@ -2131,6 +2626,50 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                                                             <div v-else class="hidden sm:block" />
                                                         </div>
                                                     </div>
+                                                    <div class="mb-3">
+                                                        <label class="mb-2 flex items-center gap-2 text-xs font-medium text-zinc-600 dark:text-zinc-400">
+                                                            <input v-model="editingModuleExpireEnabled" type="checkbox" class="h-3.5 w-3.5 rounded border-zinc-300 text-[var(--color-primary)]" />
+                                                            Ativar validade do acesso
+                                                        </label>
+                                                        <div v-if="editingModuleExpireEnabled" class="space-y-2">
+                                                            <div class="grid gap-2 sm:grid-cols-3">
+                                                                <select v-model="editingModuleExpireMode" :class="inputClass" class="!py-1.5 !text-xs w-full">
+                                                                    <option value="days">Por X dias</option>
+                                                                    <option value="date">Até a data</option>
+                                                                </select>
+                                                                <input
+                                                                    v-if="editingModuleExpireMode === 'days'"
+                                                                    v-model="editingModuleExpireAfterDays"
+                                                                    type="number"
+                                                                    min="1"
+                                                                    step="1"
+                                                                    :class="inputClass"
+                                                                    class="!py-1.5 !text-xs w-full"
+                                                                    placeholder="Ex.: 365"
+                                                                />
+                                                                <input
+                                                                    v-else
+                                                                    v-model="editingModuleExpireAtDate"
+                                                                    type="date"
+                                                                    :class="inputClass"
+                                                                    class="!py-1.5 !text-xs w-full"
+                                                                />
+                                                            </div>
+                                                            <div>
+                                                                <label class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Valor para renovar acesso (R$)</label>
+                                                                <input
+                                                                    v-model="editingModuleRenewalPrice"
+                                                                    type="number"
+                                                                    min="0.01"
+                                                                    step="0.01"
+                                                                    :class="inputClass"
+                                                                    class="!py-1.5 !text-xs w-full"
+                                                                    placeholder="Opcional"
+                                                                />
+                                                                <p class="mt-1 text-[10px] text-zinc-500 dark:text-zinc-400">Se preenchido e a validade for em dias, o aluno pode pagar PIX para renovar só este módulo. Conta a partir da compra de cada aluno.</p>
+                                                            </div>
+                                                        </div>
+                                                    </div>
                                                     <div v-if="editingModule?.thumbnail" class="mb-3 flex items-center gap-3">
                                                         <div :class="section.cover_mode === 'horizontal' ? 'aspect-video w-24 shrink-0' : 'aspect-[2/3] h-20 w-14 shrink-0'" class="overflow-hidden rounded-lg shadow-sm">
                                                             <img :src="editingModule.thumbnail" alt="Capa" class="h-full w-full object-cover" />
@@ -2145,7 +2684,7 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                                                             <Button type="button" size="sm" variant="outline" class="!py-1.5 !text-xs" :disabled="moduleThumbnailUploading" @click="moduleThumbnailFileInput?.click()">
                                                                 {{ moduleThumbnailUploading ? 'Enviando…' : 'Enviar capa' }}
                                                             </Button>
-                                                            <span class="text-xs text-zinc-500 dark:text-zinc-400">{{ section.cover_mode === 'horizontal' ? 'Banner.' : 'Vertical.' }} Máx. 4 MB.</span>
+                                                            <span class="text-xs text-zinc-500 dark:text-zinc-400">{{ section.cover_mode === 'horizontal' ? 'Banner.' : 'Vertical.' }} Máx. {{ uploadLimits.image_max_mb }} MB.</span>
                                                         </div>
                                                     </template>
                                                     <div class="flex gap-2">
@@ -2157,10 +2696,24 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                                         </template>
                                         <!-- Seção tipo Outros produtos -->
                                         <template v-else-if="(section.section_type ?? 'courses') === 'products'">
-                                            <template v-for="mod in section.modules" :key="mod.id">
-                                                <div class="ml-2 mt-2 min-w-0 rounded-md border border-zinc-200 bg-white/80 dark:border-zinc-600 dark:bg-zinc-800/50">
+                                            <Draggable
+                                                v-model="section.modules"
+                                                tag="div"
+                                                :component-data="{ class: 'ml-2 mt-2 space-y-2' }"
+                                                item-key="id"
+                                                handle=".mb-drag-handle--module-list"
+                                                :animation="160"
+                                                ghost-class="opacity-60"
+                                                :disabled="memberReorderSaving"
+                                                @end="onMemberModulesReorderEnd(section.id)"
+                                            >
+                                                <template #item="{ element: mod }">
+                                                <div class="min-w-0 rounded-md border border-zinc-200 bg-white/80 dark:border-zinc-600 dark:bg-zinc-800/50">
                                                     <div class="flex min-w-0 flex-wrap items-center gap-2 py-1.5 px-2">
                                                         <span class="flex shrink-0 items-center gap-1 rounded bg-zinc-100/80 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-zinc-500 dark:bg-zinc-700 dark:text-zinc-400"><ShoppingBag class="h-3 w-3" /> Produto</span>
+                                                        <button type="button" class="mb-drag-handle--module-list shrink-0 cursor-grab rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 active:cursor-grabbing dark:hover:bg-zinc-700 dark:hover:text-zinc-300" title="Arrastar para reordenar" aria-label="Arrastar módulo" @click.prevent>
+                                                            <GripVertical class="h-3.5 w-3.5" />
+                                                        </button>
                                                         <template v-if="editingModuleId === mod.id">
                                                             <div class="flex min-w-0 flex-1 flex-col gap-2">
                                                                 <input v-model="editingModuleTitle" type="text" :class="inputClass" class="!py-1.5 !text-xs min-w-0 w-full" placeholder="Título" @keydown.enter="saveModuleTitle" @keydown.escape="cancelEdit" />
@@ -2213,19 +2766,34 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                                                                 <Button type="button" size="sm" variant="outline" class="!py-1.5 !text-xs" :disabled="moduleThumbnailUploading" @click="moduleThumbnailFileInput?.click()">
                                                                     {{ moduleThumbnailUploading ? 'Enviando…' : 'Enviar capa' }}
                                                                 </Button>
-                                                                <span class="text-xs text-zinc-500 dark:text-zinc-400">{{ section.cover_mode === 'horizontal' ? 'Recomendado: 1200×630 px (banner).' : 'Recomendado: 400×600 px (vertical).' }} Máx. 4 MB.</span>
+                                                                <span class="text-xs text-zinc-500 dark:text-zinc-400">{{ section.cover_mode === 'horizontal' ? 'Recomendado: 1200×630 px (banner).' : 'Recomendado: 400×600 px (vertical).' }} Máx. {{ uploadLimits.image_max_mb }} MB.</span>
                                                             </div>
                                                         </template>
                                                     </div>
                                                 </div>
-                                            </template>
+                                                </template>
+                                            </Draggable>
                                         </template>
                                         <!-- Seção tipo Links externos -->
                                         <template v-else>
-                                            <template v-for="mod in section.modules" :key="mod.id">
-                                                <div class="ml-2 mt-2 min-w-0 rounded-md border border-zinc-200 bg-white/80 dark:border-zinc-600 dark:bg-zinc-800/50">
+                                            <Draggable
+                                                v-model="section.modules"
+                                                tag="div"
+                                                :component-data="{ class: 'ml-2 mt-2 space-y-2' }"
+                                                item-key="id"
+                                                handle=".mb-drag-handle--module-list"
+                                                :animation="160"
+                                                ghost-class="opacity-60"
+                                                :disabled="memberReorderSaving"
+                                                @end="onMemberModulesReorderEnd(section.id)"
+                                            >
+                                                <template #item="{ element: mod }">
+                                                <div class="min-w-0 rounded-md border border-zinc-200 bg-white/80 dark:border-zinc-600 dark:bg-zinc-800/50">
                                                     <div class="flex min-w-0 flex-wrap items-center gap-2 py-1.5 px-2">
                                                         <span class="flex shrink-0 items-center gap-1 rounded bg-zinc-100/80 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-zinc-500 dark:bg-zinc-700 dark:text-zinc-400"><ExternalLink class="h-3 w-3" /> Link</span>
+                                                        <button type="button" class="mb-drag-handle--module-list shrink-0 cursor-grab rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 active:cursor-grabbing dark:hover:bg-zinc-700 dark:hover:text-zinc-300" title="Arrastar para reordenar" aria-label="Arrastar módulo" @click.prevent>
+                                                            <GripVertical class="h-3.5 w-3.5" />
+                                                        </button>
                                                         <template v-if="editingModuleId === mod.id">
                                                             <div class="flex min-w-0 flex-1 flex-col gap-2">
                                                                 <input v-model="editingModuleTitle" type="text" :class="inputClass" class="!py-1.5 !text-xs min-w-0 w-full" placeholder="Título" @keydown.enter="saveModuleTitle" @keydown.escape="cancelEdit" />
@@ -2270,19 +2838,20 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                                                                 <Button type="button" size="sm" variant="outline" class="!py-1.5 !text-xs" :disabled="moduleThumbnailUploading" @click="moduleThumbnailFileInput?.click()">
                                                                     {{ moduleThumbnailUploading ? 'Enviando…' : 'Enviar capa' }}
                                                                 </Button>
-                                                                <span class="text-xs text-zinc-500 dark:text-zinc-400">{{ section.cover_mode === 'horizontal' ? 'Recomendado: 1200×630 px (banner).' : 'Recomendado: 400×600 px (vertical).' }} Máx. 4 MB.</span>
+                                                                <span class="text-xs text-zinc-500 dark:text-zinc-400">{{ section.cover_mode === 'horizontal' ? 'Recomendado: 1200×630 px (banner).' : 'Recomendado: 400×600 px (vertical).' }} Máx. {{ uploadLimits.image_max_mb }} MB.</span>
                                                             </div>
                                                         </template>
                                                     </div>
                                                 </div>
-                                            </template>
+                                                </template>
+                                            </Draggable>
                                         </template>
                                         <p v-if="!section.modules?.length" class="ml-4 mt-2 text-xs text-zinc-400 dark:text-zinc-500">Nenhum módulo. Clique em + Módulo.</p>
                                     </div>
                                 </div>
                             </template>
-                            <p v-if="!produto.sections?.length" class="rounded-lg border border-dashed border-zinc-300 py-6 text-center text-sm text-zinc-500 dark:border-zinc-600 dark:text-zinc-400">Nenhuma seção. Clique em &quot;Nova seção&quot; para começar.</p>
-                        </div>
+                        </Draggable>
+                            <p v-if="!courseStructureSections?.length" class="rounded-lg border border-dashed border-zinc-300 py-6 text-center text-sm text-zinc-500 dark:border-zinc-600 dark:text-zinc-400">Nenhuma seção. Clique em &quot;Nova seção&quot; para começar.</p>
                             </div>
 
                             <!-- Backdrop mobile: fecha o sidebar ao clicar (só abaixo de lg) -->
@@ -2306,14 +2875,32 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                                     <p v-if="modulosSelectedModule" class="mb-3 truncate text-xs text-zinc-500 dark:text-zinc-400">{{ modulosSelectedModule.title }}</p>
 
                                     <template v-if="!modulosLessonForm">
-                                        <ul class="space-y-1">
+                                        <Draggable
+                                            v-if="modulosSelectedModule"
+                                            v-model="modulosSelectedModule.lessons"
+                                            tag="ul"
+                                            :component-data="{ class: 'space-y-1' }"
+                                            item-key="id"
+                                            handle=".mb-drag-handle--lesson"
+                                            :animation="160"
+                                            ghost-class="opacity-60"
+                                            :disabled="memberReorderSaving"
+                                            @end="onMemberLessonsReorderEnd"
+                                        >
+                                            <template #item="{ element: lesson }">
                                             <li
-                                                v-for="lesson in (modulosSelectedModule?.lessons ?? [])"
-                                                :key="lesson.id"
-                                                class="flex cursor-pointer items-center justify-between gap-2 rounded-lg py-2 px-2 text-sm transition hover:bg-zinc-200/80 dark:hover:bg-zinc-700/50"
-                                                @click="openModulosLessonForm(lesson)"
+                                                class="flex items-center justify-between gap-2 rounded-lg py-2 px-2 text-sm transition hover:bg-zinc-200/80 dark:hover:bg-zinc-700/50"
                                             >
-                                                <span class="flex min-w-0 flex-1 items-center gap-2 truncate">
+                                                <button
+                                                    type="button"
+                                                    class="mb-drag-handle--lesson shrink-0 cursor-grab rounded p-0.5 text-zinc-400 hover:bg-zinc-200 hover:text-zinc-600 active:cursor-grabbing dark:hover:bg-zinc-600 dark:hover:text-zinc-300"
+                                                    title="Arrastar para reordenar"
+                                                    aria-label="Arrastar aula"
+                                                    @click.prevent
+                                                >
+                                                    <GripVertical class="h-4 w-4" />
+                                                </button>
+                                                <span class="flex min-w-0 flex-1 cursor-pointer items-center gap-2 truncate" @click="openModulosLessonForm(lesson)">
                                                     <FileVideo v-if="lesson.type === 'video'" class="h-4 w-4 shrink-0 text-zinc-500" />
                                                     <Link v-else-if="lesson.type === 'link'" class="h-4 w-4 shrink-0 text-zinc-500" />
                                                     <FileText v-else class="h-4 w-4 shrink-0 text-zinc-500" />
@@ -2321,7 +2908,8 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                                                 </span>
                                                 <button type="button" class="shrink-0 rounded p-1 text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30" title="Remover aula" @click.stop="deleteLesson(lesson.id)"><Trash2 class="h-3 w-3" /></button>
                                             </li>
-                                        </ul>
+                                            </template>
+                                        </Draggable>
                                         <p v-if="!modulosSelectedModule?.lessons?.length" class="py-3 text-xs text-zinc-500 dark:text-zinc-400">Nenhuma aula neste módulo.</p>
                                         <Button size="sm" class="mt-3 w-full" @click="openModulosLessonForm(null)">
                                             <Plus class="mr-2 h-4 w-4" />
@@ -2383,7 +2971,7 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                                                 </p>
                                             </div>
                                             <div v-if="modulosLessonForm.type === 'pdf'" class="space-y-2">
-                                                <input ref="lessonPdfFileInput" type="file" accept=".pdf,application/pdf" multiple class="hidden" @change="onLessonPdfChange" />
+                                                <input ref="lessonPdfFileInput" type="file" :accept="uploadLimits.material_accept" multiple class="hidden" @change="onLessonPdfChange" />
                                                 <label class="block text-xs font-medium text-zinc-600 dark:text-zinc-400">Enviar arquivo (material)</label>
                                                 <div class="flex flex-wrap items-center gap-2">
                                                     <Button type="button" size="sm" variant="outline" :disabled="lessonPdfUploading" @click="lessonPdfFileInput?.click()">
@@ -2404,7 +2992,7 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                                                         <button type="button" class="shrink-0 text-red-600 hover:underline" @click="removeLessonPdfAt(i)">Remover</button>
                                                     </div>
                                                 </div>
-                                                <p class="text-xs text-zinc-500 dark:text-zinc-400">Ou use a URL acima se o material estiver hospedado em outro site. Máx. 20 MB.</p>
+                                                <p class="text-xs text-zinc-500 dark:text-zinc-400">Formatos: PDF, TXT, CSV, RTF, Word (DOCX), Excel (XLSX), PowerPoint (PPTX) e OpenDocument. Ou use a URL acima se o material estiver hospedado em outro site. Máx. {{ uploadLimits.material_max_mb }} MB.</p>
                                             </div>
                                             <div v-if="modulosLessonForm.type === 'text'">
                                                 <label class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Texto</label>
@@ -2455,7 +3043,7 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                             <div class="min-w-0 flex-1">
                                 <div class="space-y-4">
                                     <div
-                                        v-for="t in produto.turmas"
+                                        v-for="t in turmasList"
                                         :key="t.id"
                                         class="rounded-xl border border-zinc-200 bg-white shadow-sm transition dark:border-zinc-600 dark:bg-zinc-800/50 dark:shadow-none"
                                     >
@@ -2494,7 +3082,7 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                                         </div>
                                     </div>
                                 </div>
-                                <div v-if="!produto.turmas?.length" class="rounded-xl border border-dashed border-zinc-200 py-12 text-center dark:border-zinc-600">
+                                <div v-if="!turmasList?.length" class="rounded-xl border border-dashed border-zinc-200 py-12 text-center dark:border-zinc-600">
                                     <Users class="mx-auto h-12 w-12 text-zinc-300 dark:text-zinc-600" />
                                     <p class="mt-3 text-sm font-medium text-zinc-600 dark:text-zinc-400">Nenhuma turma ainda</p>
                                     <p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">Crie uma turma para organizar os alunos.</p>
@@ -2659,7 +3247,7 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                         </div>
                         <div class="mt-6 flex items-center justify-between">
                             <h3 class="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Páginas da comunidade</h3>
-                            <Button size="sm" @click="openCommunityPageModal">Nova página</Button>
+                            <Button size="sm" @click="openCommunityPageModal()">Nova página</Button>
                         </div>
                         <ul class="mt-2 space-y-2">
                             <li v-for="p in communityPagesList" :key="p.id" class="flex items-center justify-between gap-3 rounded-lg bg-zinc-50 py-2 px-3 text-sm dark:bg-zinc-800/50">
@@ -2690,15 +3278,55 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                             <Toggle v-model="configForm.member_area_config.certificate.enabled" label="Habilitar certificado" />
                             <div>
                                 <label class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Nome do certificado</label>
-                                <input v-model="configForm.member_area_config.certificate.title" type="text" :class="inputClass" placeholder="Deixe vazio para usar o nome do produto" />
+                                <input v-model="configForm.member_area_config.certificate.title" type="text" :class="inputClass" placeholder="Obrigatório" />
                             </div>
                             <div>
+                                <label class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Liberar certificado quando</label>
+                                <select v-model="configForm.member_area_config.certificate.release_mode" :class="inputClass">
+                                    <option value="completion_percent">Atingir % de conclusão do curso</option>
+                                    <option value="days_after_access">Após X dias de acesso ao curso</option>
+                                    <option value="both">% de conclusão e dias de acesso</option>
+                                </select>
+                            </div>
+                            <div v-if="configForm.member_area_config.certificate.release_mode !== 'days_after_access'">
                                 <label class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">% conclusão mínima</label>
                                 <input v-model.number="configForm.member_area_config.certificate.completion_percent" type="number" min="0" max="100" :class="inputClass" />
                             </div>
+                            <div v-if="configForm.member_area_config.certificate.release_mode !== 'completion_percent'">
+                                <label class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Dias após o acesso ao curso</label>
+                                <input v-model.number="configForm.member_area_config.certificate.days_after_access" type="number" min="0" max="3650" :class="inputClass" />
+                                <p class="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">Conta a partir da data em que o aluno ganhou acesso (compra/matrícula).</p>
+                            </div>
                             <div>
-                                <label class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Duração do curso</label>
+                                <label class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Tamanho do texto</label>
+                                <select v-model.number="configForm.member_area_config.certificate.font_scale" :class="inputClass">
+                                    <option :value="75">75% — menor</option>
+                                    <option :value="100">100% — padrão</option>
+                                    <option :value="125">125% — maior</option>
+                                    <option :value="150">150% — muito maior</option>
+                                </select>
+                                <p class="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">Afeta a visualização e a exportação em PDF.</p>
+                            </div>
+                            <Toggle v-model="configForm.member_area_config.certificate.duration_enabled" label="Exibir carga horária" />
+                            <div v-if="configForm.member_area_config.certificate.duration_enabled !== false">
+                                <label class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Carga horária / duração do curso</label>
                                 <input v-model="configForm.member_area_config.certificate.duration_text" type="text" :class="inputClass" placeholder="Ex: 40 horas" />
+                            </div>
+                            <div>
+                                <label class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Nome da plataforma (opcional)</label>
+                                <input v-model="configForm.member_area_config.certificate.platform_name" type="text" :class="inputClass" placeholder="Deixe vazio para usar o nome global da plataforma" />
+                            </div>
+                            <div>
+                                <label class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Texto completo (opcional)</label>
+                                <textarea
+                                    v-model="configForm.member_area_config.certificate.body_template"
+                                    rows="3"
+                                    :class="inputClass"
+                                    placeholder="Certificamos que [ALUNO] concluiu com sucesso o curso [CURSO] em [DATA]."
+                                />
+                                <p class="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
+                                    Se preenchido, substitui o bloco central. Placeholders: [ALUNO], [CURSO], [DATA], [PLATAFORMA], [CARGA_HORARIA].
+                                </p>
                             </div>
                             <div>
                                 <label class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Fonte</label>
@@ -2710,11 +3338,39 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                             </div>
                             <div>
                                 <label class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Texto da assinatura</label>
-                                <input v-model="configForm.member_area_config.certificate.signature_text" type="text" :class="inputClass" placeholder="Ex: Diretor, Escola XYZ" />
+                                <input v-model="configForm.member_area_config.certificate.signature_text" type="text" :class="inputClass" placeholder="Obrigatório (ex: Diretor, Escola XYZ)" />
                             </div>
                             <div>
-                                <label class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Nome da plataforma</label>
-                                <input v-model="configForm.member_area_config.certificate.platform_name" type="text" :class="inputClass" placeholder="Deixe vazio para usar o nome do sistema" />
+                                <label class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Texto do cabeçalho</label>
+                                <input v-model="configForm.member_area_config.certificate.header_text" type="text" :class="inputClass" placeholder="Obrigatório" />
+                            </div>
+                            <div>
+                                <label class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Texto de introdução</label>
+                                <input v-model="configForm.member_area_config.certificate.recipient_intro_text" type="text" :class="inputClass" placeholder="Obrigatório (ex: Certificamos que)" />
+                            </div>
+                            <div>
+                                <label class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Texto de conclusão</label>
+                                <input v-model="configForm.member_area_config.certificate.completion_text" type="text" :class="inputClass" placeholder="Obrigatório" />
+                            </div>
+                            <div>
+                                <label class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Prefixo da data de emissão</label>
+                                <input v-model="configForm.member_area_config.certificate.issued_on_text" type="text" :class="inputClass" placeholder="Obrigatório (ex: em)" />
+                            </div>
+                            <div>
+                                <label class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Rótulo da assinatura</label>
+                                <input v-model="configForm.member_area_config.certificate.instructor_label_text" type="text" :class="inputClass" placeholder="Obrigatório" />
+                            </div>
+                            <div>
+                                <label class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Rótulo da plataforma</label>
+                                <input v-model="configForm.member_area_config.certificate.platform_label_text" type="text" :class="inputClass" placeholder="Obrigatório" />
+                            </div>
+                            <div v-if="configForm.member_area_config.certificate.duration_enabled !== false">
+                                <label class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Rótulo da duração</label>
+                                <input v-model="configForm.member_area_config.certificate.duration_label_text" type="text" :class="inputClass" placeholder="Obrigatório" />
+                            </div>
+                            <div class="rounded-lg border border-zinc-200 bg-zinc-50 p-3 text-xs text-zinc-600 dark:border-zinc-600 dark:bg-zinc-800/50 dark:text-zinc-300">
+                                Se o nome da plataforma estiver vazio, usa o valor de <strong>Configurações &gt; Personalização &gt; Nome da aplicação</strong>.
+                                Os campos de introdução/conclusão abaixo só aparecem quando o texto completo opcional estiver vazio.
                             </div>
                             <div>
                                 <label class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Cor primária</label>
@@ -2769,6 +3425,14 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                                 </div>
                             </template>
                             <div>
+                                <label class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Formato da folha (PDF / preview)</label>
+                                <select v-model="configForm.member_area_config.certificate.print_format" :class="inputClass">
+                                    <option value="A4">A4 paisagem</option>
+                                    <option value="A3">A3 paisagem</option>
+                                </select>
+                                <p class="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">O preview à direita usa o mesmo formato do PDF.</p>
+                            </div>
+                            <div>
                                 <label class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Fonte da assinatura</label>
                                 <select v-model="configForm.member_area_config.certificate.signature_font_family" :class="inputClass">
                                     <option value="Dancing Script">Dancing Script</option>
@@ -2777,6 +3441,132 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                                     <option value="Caveat">Caveat</option>
                                     <option value="Satisfy">Satisfy</option>
                                 </select>
+                            </div>
+
+                            <div class="rounded-lg border border-zinc-200 bg-zinc-50/50 p-3 dark:border-zinc-600 dark:bg-zinc-800/30">
+                                <p class="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-600 dark:text-zinc-400">Posição dos textos</p>
+                                <p class="mb-3 text-xs text-zinc-500 dark:text-zinc-400">
+                                    Use com modelos de fundo personalizados. No preview (desktop), arraste os campos ou ajuste altura/lateral abaixo.
+                                </p>
+                                <div class="mb-3 space-y-1.5">
+                                    <p class="text-xs font-medium text-zinc-600 dark:text-zinc-400">Atalhos</p>
+                                    <div class="flex flex-wrap gap-1.5">
+                                        <button
+                                            v-for="(preset, presetId) in certLayoutPresets"
+                                            :key="presetId"
+                                            type="button"
+                                            class="rounded-lg border border-zinc-300 bg-white px-2.5 py-1.5 text-left text-xs font-medium text-zinc-700 transition hover:border-sky-400 hover:bg-sky-50 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:border-sky-500 dark:hover:bg-zinc-700"
+                                            :title="preset.description"
+                                            @click="applyCertLayoutPreset(presetId)"
+                                        >
+                                            {{ preset.label }}
+                                        </button>
+                                    </div>
+                                </div>
+                                <Toggle
+                                    :model-value="!!configForm.member_area_config.certificate.layout?.background_only"
+                                    label="Usar só a imagem de fundo (esconder medalha e cantos)"
+                                    @update:model-value="(v) => {
+                                        const l = ensureCertLayout();
+                                        configForm.member_area_config.certificate.layout = { ...l, background_only: !!v };
+                                    }"
+                                />
+                                <div class="mt-3">
+                                    <Toggle
+                                        :model-value="!!configForm.member_area_config.certificate.layout?.custom_positions"
+                                        label="Posicionar campos manualmente"
+                                        @update:model-value="(v) => {
+                                            const l = ensureCertLayout();
+                                            configForm.member_area_config.certificate.layout = { ...l, custom_positions: !!v };
+                                        }"
+                                    />
+                                </div>
+                                <template v-if="configForm.member_area_config.certificate.layout?.custom_positions">
+                                    <div class="mt-3 flex flex-wrap gap-1.5">
+                                        <button
+                                            v-for="fid in certLayoutFieldIds"
+                                            :key="fid"
+                                            type="button"
+                                            class="rounded-lg px-2.5 py-1 text-xs font-medium transition"
+                                            :class="selectedCertField === fid
+                                                ? 'bg-sky-500 text-white'
+                                                : 'bg-zinc-200 text-zinc-700 hover:bg-zinc-300 dark:bg-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-600'"
+                                            @click="selectedCertField = fid"
+                                        >
+                                            {{ certLayoutFieldLabels[fid] }}
+                                        </button>
+                                    </div>
+                                    <div
+                                        v-if="selectedCertField && configForm.member_area_config.certificate.layout?.fields?.[selectedCertField]"
+                                        class="mt-3 space-y-3"
+                                    >
+                                        <Toggle
+                                            :model-value="configForm.member_area_config.certificate.layout.fields[selectedCertField].visible !== false"
+                                            :label="`Exibir «${certLayoutFieldLabels[selectedCertField]}»`"
+                                            @update:model-value="(v) => patchCertField(selectedCertField, 'visible', !!v)"
+                                        />
+                                        <div>
+                                            <label class="mb-1 flex justify-between text-xs font-medium text-zinc-600 dark:text-zinc-400">
+                                                <span>Lateral (X)</span>
+                                                <span>{{ Math.round(configForm.member_area_config.certificate.layout.fields[selectedCertField].x) }}%</span>
+                                            </label>
+                                            <input
+                                                type="range"
+                                                min="0"
+                                                max="100"
+                                                step="0.5"
+                                                class="w-full"
+                                                :value="configForm.member_area_config.certificate.layout.fields[selectedCertField].x"
+                                                @input="patchCertField(selectedCertField, 'x', Number($event.target.value))"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label class="mb-1 flex justify-between text-xs font-medium text-zinc-600 dark:text-zinc-400">
+                                                <span>Altura (Y)</span>
+                                                <span>{{ Math.round(configForm.member_area_config.certificate.layout.fields[selectedCertField].y) }}%</span>
+                                            </label>
+                                            <input
+                                                type="range"
+                                                min="0"
+                                                max="100"
+                                                step="0.5"
+                                                class="w-full"
+                                                :value="configForm.member_area_config.certificate.layout.fields[selectedCertField].y"
+                                                @input="patchCertField(selectedCertField, 'y', Number($event.target.value))"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label class="mb-1 flex justify-between text-xs font-medium text-zinc-600 dark:text-zinc-400">
+                                                <span>Largura</span>
+                                                <span>{{ Math.round(configForm.member_area_config.certificate.layout.fields[selectedCertField].w) }}%</span>
+                                            </label>
+                                            <input
+                                                type="range"
+                                                min="10"
+                                                max="100"
+                                                step="1"
+                                                class="w-full"
+                                                :value="configForm.member_area_config.certificate.layout.fields[selectedCertField].w"
+                                                @input="patchCertField(selectedCertField, 'w', Number($event.target.value))"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Alinhamento</label>
+                                            <select
+                                                :class="inputClass"
+                                                :value="configForm.member_area_config.certificate.layout.fields[selectedCertField].align"
+                                                @change="patchCertField(selectedCertField, 'align', $event.target.value)"
+                                            >
+                                                <option value="left">Esquerda</option>
+                                                <option value="center">Centro</option>
+                                                <option value="right">Direita</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <Button type="button" variant="ghost" size="sm" class="mt-3" @click="resetCertLayoutPositions">
+                                        Restaurar posições padrão
+                                    </Button>
+                                </template>
                             </div>
                         </div>
                         <Button type="button" class="mt-4" @click="saveConfig" :disabled="processing">Salvar</Button>
@@ -2974,7 +3764,7 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                                                     type="text"
                                                     :class="inputClass"
                                                     class="flex-1 font-mono text-sm"
-                                                    placeholder="#8A2BE2"
+                                                    placeholder="#0ea5e9"
                                                     maxlength="20"
                                                 />
                                             </div>
@@ -3053,6 +3843,7 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                         :key="previewKey"
                         :mode="previewMode"
                         :config="configForm.member_area_config"
+                        :platform-app-name="platform_app_name"
                         :product-name="produto.name"
                         :sections="produto.sections ?? []"
                         :internal-products="produto.internal_products ?? []"
@@ -3062,6 +3853,11 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                         :community-pages="communityPagesList"
                         :certificate-enabled="configForm.member_area_config.certificate?.enabled ?? false"
                         :can-issue-certificate="(configForm.member_area_config.certificate?.enabled ?? false) ? true : false"
+                        :certificate-editable="previewMode === 'certificate'"
+                        :certificate-selected-field="selectedCertField"
+                        @update:certificate-layout="onCertLayoutUpdate"
+                        @select-certificate-field="selectedCertField = $event"
+                        @update:print-format="(fmt) => { configForm.member_area_config.certificate.print_format = fmt === 'A3' ? 'A3' : 'A4'; }"
                     />
                 </div>
             </div>
@@ -3259,6 +4055,50 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                                 </div>
                             </div>
                             <div>
+                                <label class="mb-2 flex items-center gap-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                                    <input v-model="moduleModalExpireEnabled" type="checkbox" class="h-4 w-4 rounded border-zinc-300 text-[var(--color-primary)]" />
+                                    Ativar validade do acesso
+                                </label>
+                                <div v-if="moduleModalExpireEnabled" class="space-y-2">
+                                    <div class="grid gap-2 sm:grid-cols-3">
+                                        <select v-model="moduleModalExpireMode" :class="inputClass" class="w-full">
+                                            <option value="days">Por X dias</option>
+                                            <option value="date">Até a data</option>
+                                        </select>
+                                        <input
+                                            v-if="moduleModalExpireMode === 'days'"
+                                            v-model="moduleModalExpireAfterDays"
+                                            type="number"
+                                            min="1"
+                                            step="1"
+                                            :class="inputClass"
+                                            class="w-full"
+                                            placeholder="Ex.: 365"
+                                        />
+                                        <input
+                                            v-else
+                                            v-model="moduleModalExpireAtDate"
+                                            type="date"
+                                            :class="inputClass"
+                                            class="w-full"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label class="mb-1 block text-sm font-medium text-zinc-700 dark:text-zinc-300">Valor para renovar acesso (R$)</label>
+                                        <input
+                                            v-model="moduleModalRenewalPrice"
+                                            type="number"
+                                            min="0.01"
+                                            step="0.01"
+                                            :class="inputClass"
+                                            class="w-full"
+                                            placeholder="Opcional"
+                                        />
+                                        <p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">Se preenchido e a validade for em dias, o aluno pode pagar PIX para renovar só este módulo. O prazo conta da compra de cada aluno.</p>
+                                    </div>
+                                </div>
+                            </div>
+                            <div>
                                 <label class="mb-1 block text-sm font-medium text-zinc-700 dark:text-zinc-300">Capa — {{ moduleModalCoverMode === 'horizontal' ? 'banner' : 'vertical' }}</label>
                                 <input
                                     ref="moduleModalFileInputRef"
@@ -3279,7 +4119,7 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                                 <Button v-else type="button" size="sm" variant="outline" class="w-full !py-2 !text-xs" @click="moduleModalFileInputRef?.click()">
                                     Escolher imagem
                                 </Button>
-                                <p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{{ moduleModalCoverMode === 'horizontal' ? 'Recomendado: 1200×630 px (banner).' : 'Recomendado: 400×600 px (vertical).' }} Máx. 4 MB.</p>
+                                <p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{{ moduleModalCoverMode === 'horizontal' ? 'Recomendado: 1200×630 px (banner).' : 'Recomendado: 400×600 px (vertical).' }} Máx. {{ uploadLimits.image_max_mb }} MB.</p>
                             </div>
                         </template>
                         <!-- Outros produtos: selecionar produto + acesso + capa -->
@@ -3322,7 +4162,7 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                                 <Button v-else type="button" size="sm" variant="outline" class="w-full !py-2 !text-xs" @click="moduleModalFileInputRef?.click()">
                                     Escolher imagem
                                 </Button>
-                                <p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{{ moduleModalCoverMode === 'horizontal' ? 'Recomendado: 1200×630 px (banner).' : 'Recomendado: 400×600 px (vertical).' }} Máx. 4 MB.</p>
+                                <p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{{ moduleModalCoverMode === 'horizontal' ? 'Recomendado: 1200×630 px (banner).' : 'Recomendado: 400×600 px (vertical).' }} Máx. {{ uploadLimits.image_max_mb }} MB.</p>
                             </div>
                         </template>
                         <!-- Links externos: URL + capa -->
@@ -3356,7 +4196,7 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                                 <Button v-else type="button" size="sm" variant="outline" class="w-full !py-2 !text-xs" @click="moduleModalFileInputRef?.click()">
                                     Escolher imagem
                                 </Button>
-                                <p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{{ moduleModalCoverMode === 'horizontal' ? 'Recomendado: 1200×630 px (banner).' : 'Recomendado: 400×600 px (vertical).' }} Máx. 4 MB.</p>
+                                <p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{{ moduleModalCoverMode === 'horizontal' ? 'Recomendado: 1200×630 px (banner).' : 'Recomendado: 400×600 px (vertical).' }} Máx. {{ uploadLimits.image_max_mb }} MB.</p>
                             </div>
                         </template>
                     </div>
@@ -3497,7 +4337,7 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                             <p v-if="newAlunoFormErrors.email" class="mt-1 text-xs text-red-600 dark:text-red-400">{{ newAlunoFormErrors.email }}</p>
                         </div>
                         <div>
-                            <label class="mb-1 block text-sm font-medium text-zinc-700 dark:text-zinc-300">Senha</label>
+                            <label class="mb-1 block text-sm font-medium text-zinc-700 dark:text-zinc-300">Senha — necessária apenas para novos usuários</label>
                             <input
                                 v-model="newAlunoForm.password"
                                 type="password"
@@ -3507,7 +4347,7 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                                 autocomplete="new-password"
                             />
                             <p v-if="newAlunoFormErrors.password" class="mt-1 text-xs text-red-600 dark:text-red-400">{{ newAlunoFormErrors.password }}</p>
-                            <p class="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">O aluno usará esta senha para acessar a área de membros.</p>
+                            <p class="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">Se o e-mail já possuir uma conta, a senha existente será mantida.</p>
                         </div>
                         <p class="text-xs text-zinc-500 dark:text-zinc-400">
                             O aluno será adicionado ao produto e à turma <strong>{{ addAlunoModalTurma?.name }}</strong>.
@@ -3534,6 +4374,9 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                         <h3 class="text-lg font-semibold text-zinc-900 dark:text-zinc-100">{{ communityPageModalEditing ? 'Editar página' : 'Nova página da comunidade' }}</h3>
                     </div>
                     <div class="space-y-5 p-5">
+                        <p v-if="communityPageModalError" class="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-300 whitespace-pre-line">
+                            {{ communityPageModalError }}
+                        </p>
                         <div>
                             <label class="mb-1.5 block text-sm font-medium text-zinc-700 dark:text-zinc-300">Título da página</label>
                             <input v-model="communityPageModalTitle" type="text" :class="inputClass" placeholder="Ex: Dúvidas, Anúncios..." class="w-full" />
@@ -3620,7 +4463,7 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                             <Button v-else type="button" size="sm" variant="outline" class="w-full" :disabled="communityPageModalBannerUploading" @click="communityPageModalBannerInputRef?.click()">
                                 {{ communityPageModalBannerUploading ? 'Enviando…' : 'Escolher imagem' }}
                             </Button>
-                            <p class="mt-1.5 text-xs text-zinc-500 dark:text-zinc-400">Tamanho ideal: 1200×400 px (proporção 3:1). Máx. 4 MB.</p>
+                            <p class="mt-1.5 text-xs text-zinc-500 dark:text-zinc-400">Tamanho ideal: 1200×400 px (proporção 3:1). Máx. {{ uploadLimits.image_max_mb }} MB.</p>
                         </div>
                         <div>
                             <p class="mb-2 block text-sm font-medium text-zinc-700 dark:text-zinc-300">Quem pode publicar?</p>

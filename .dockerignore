@@ -1,17 +1,15 @@
-.git
-.gitignore
-.idea
-.vscode
-*.md
 .env
-.docker
-node_modules
-vendor
-storage/logs/*
-storage/framework/cache/*
-storage/framework/sessions/*
-storage/framework/views/*
-bootstrap/cache/*
-.phpunit.cache
-coverage
-.DS_Store
+.env.*
+!.env.example
+/node_modules
+# vendor/ e public/build/ são gerados no host antes do build
+# (docker/install-composer-deps.sh e docker/build-frontend.sh) e entram na imagem via COPY.
+/storage/logs
+/storage/framework
+/agent/node_modules
+/dist-releases
+/.stacker-update-staging
+/getfy-gateway.zip
+.git
+# Symlink storage:link — no Windows o BuildKit falha com "invalid file request public/storage"
+/public/storage

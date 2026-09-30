@@ -5,6 +5,8 @@ namespace App\Http\Controllers;
 use App\Http\Middleware\ApplyBrandingConfig;
 use App\Models\BrandingSetting;
 use App\Models\User;
+use App\Services\StorageService;
+use App\Support\BrandingAssetUrls;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
@@ -19,7 +21,11 @@ class BrandingSettingsController extends Controller
         'app_logo_dark',
         'app_logo_icon',
         'app_logo_icon_dark',
+        'pwa_nav_logo',
+        'pwa_nav_logo_dark',
         'login_hero_image',
+        'login_hero_tagline',
+        'login_hero_subtagline',
         'favicon_url',
     ];
 
@@ -28,6 +34,8 @@ class BrandingSettingsController extends Controller
         'app_logo_dark',
         'app_logo_icon',
         'app_logo_icon_dark',
+        'pwa_nav_logo',
+        'pwa_nav_logo_dark',
         'login_hero_image',
         'favicon_url',
     ];
@@ -43,7 +51,7 @@ class BrandingSettingsController extends Controller
         $branding = ApplyBrandingConfig::mergeLayers($globalData, $tenantData);
 
         return response()->json([
-            'branding' => $branding,
+            'branding' => BrandingAssetUrls::resolveData($branding),
             'can_sync_global' => $user->isAdmin(),
         ]);
     }
@@ -73,7 +81,11 @@ class BrandingSettingsController extends Controller
             if ($v === null || trim((string) $v) === '') {
                 unset($data[$key]);
             } else {
-                $data[$key] = trim((string) $v);
+                $v = trim((string) $v);
+                if (in_array($key, self::UPLOAD_FIELDS, true)) {
+                    $v = app(StorageService::class)->toStoragePath($v) ?? $v;
+                }
+                $data[$key] = $v;
             }
         }
 
@@ -107,21 +119,22 @@ class BrandingSettingsController extends Controller
             'file' => ['required', 'file', 'max:4096', 'mimes:jpg,jpeg,png,webp,gif,ico,svg'],
         ]);
 
-        $path = $request->file('file')->store("white-label/{$user->tenant_id}", 'public');
-        $url = Storage::disk('public')->url($path);
-        if (! str_starts_with($url, 'http')) {
-            $url = rtrim((string) config('app.url'), '/').'/'.ltrim($url, '/');
-        }
+        $uploaded = app(StorageService::class)->storeUploadedPublicFile(
+            $request->file('file'),
+            self::brandingUploadDirectory($user->tenant_id),
+        );
+        $stored = $uploaded['path'];
+        $publicUrl = $uploaded['url'];
 
         $row = BrandingSetting::query()->firstOrCreate(
             ['tenant_id' => $user->tenant_id],
             ['data' => []]
         );
         $data = is_array($row->data) ? $row->data : [];
-        $data[$validated['field']] = $url;
+        $data[$validated['field']] = $stored;
         $row->update(['data' => $data]);
 
-        return response()->json(['ok' => true, 'url' => $url, 'field' => $validated['field']]);
+        return response()->json(['ok' => true, 'url' => $publicUrl, 'field' => $validated['field']]);
     }
 
     public function clearField(Request $request): JsonResponse
@@ -163,5 +176,12 @@ class BrandingSettingsController extends Controller
         );
 
         return response()->json(['ok' => true]);
+    }
+
+    private static function brandingUploadDirectory(?int $tenantId): string
+    {
+        return $tenantId !== null && $tenantId > 0
+            ? "white-label/{$tenantId}"
+            : 'white-label/global';
     }
 }

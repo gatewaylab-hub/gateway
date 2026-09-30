@@ -1,6 +1,7 @@
 <script setup>
 import { Link } from '@inertiajs/vue3';
 import LayoutPlatform from '@/Layouts/LayoutPlatform.vue';
+import { htmlToText } from '@/lib/sanitizeHtml';
 import { ShieldCheck } from 'lucide-vue-next';
 
 defineOptions({ layout: LayoutPlatform });
@@ -12,6 +13,7 @@ defineProps({
 
 const filters = [
     { value: 'pending_review', label: 'Pendentes' },
+    { value: 'needs_document_review', label: 'Revisão de docs' },
     { value: 'all', label: 'Todos' },
     { value: 'rejected', label: 'Rejeitados' },
     { value: 'not_submitted', label: 'Sem envio' },
@@ -56,35 +58,86 @@ function statusLabel(s) {
             </Link>
         </div>
 
-        <div class="overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-700 dark:bg-zinc-900/40">
-            <table class="min-w-full divide-y divide-zinc-200 dark:divide-zinc-700">
-                <thead class="bg-zinc-50 dark:bg-zinc-800/50">
-                    <tr>
-                        <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-zinc-500">Nome</th>
-                        <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-zinc-500">E-mail</th>
-                        <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-zinc-500">Tipo</th>
-                        <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-zinc-500">Status KYC</th>
-                        <th class="px-4 py-3 text-right text-xs font-semibold uppercase text-zinc-500">Ação</th>
-                    </tr>
-                </thead>
-                <tbody class="divide-y divide-zinc-200 dark:divide-zinc-700">
-                    <tr v-for="u in users.data" :key="u.id" class="hover:bg-zinc-50/80 dark:hover:bg-zinc-800/30">
-                        <td class="px-4 py-3 text-sm font-medium text-zinc-900 dark:text-white">{{ u.name }}</td>
-                        <td class="px-4 py-3 text-sm text-zinc-600 dark:text-zinc-300">{{ u.email }}</td>
-                        <td class="px-4 py-3 text-sm text-zinc-600 dark:text-zinc-400">{{ u.person_type === 'pj' ? 'PJ' : 'PF' }}</td>
-                        <td class="px-4 py-3 text-sm">{{ statusLabel(u.kyc_status) }}</td>
-                        <td class="px-4 py-3 text-right">
-                            <Link
-                                :href="`/plataforma/verificacoes-kyc/usuario/${u.id}`"
-                                class="text-sm font-medium text-[var(--color-primary)] hover:underline"
-                            >
-                                Abrir
-                            </Link>
-                        </td>
-                    </tr>
-                </tbody>
-            </table>
-            <div v-if="!users.data?.length" class="px-4 py-10 text-center text-sm text-zinc-500">Nenhum registro neste filtro.</div>
+        <!-- Mobile: cards clicáveis -->
+        <div v-if="users.data?.length" class="space-y-3 md:hidden">
+            <Link
+                v-for="u in users.data"
+                :key="`mobile-${u.id}`"
+                :href="`/plataforma/verificacoes-kyc/usuario/${u.id}`"
+                class="block rounded-2xl border border-zinc-200 bg-white p-4 shadow-sm transition hover:border-[var(--color-primary)]/40 dark:border-zinc-700 dark:bg-zinc-900/40"
+            >
+                <div class="flex items-start justify-between gap-3">
+                    <div class="min-w-0 flex-1">
+                        <p class="break-words text-sm font-semibold text-zinc-900 dark:text-white">{{ u.name }}</p>
+                        <p class="mt-0.5 break-all text-xs text-zinc-500 dark:text-zinc-400">{{ u.email }}</p>
+                    </div>
+                    <span
+                        class="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium"
+                        :class="
+                            u.kyc_status === 'pending_review'
+                                ? 'bg-amber-100 text-amber-900 dark:bg-amber-950/50 dark:text-amber-200'
+                                : 'bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300'
+                        "
+                    >
+                        {{ statusLabel(u.kyc_status) }}
+                    </span>
+                    <span
+                        v-if="u.pj_conversion_status === 'pending_review'"
+                        class="mt-1 inline-flex rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-semibold uppercase text-violet-900 dark:bg-violet-950/50 dark:text-violet-200"
+                    >
+                        PF→PJ
+                    </span>
+                </div>
+                <div class="mt-3 flex items-center justify-between gap-2 border-t border-zinc-100 pt-3 dark:border-zinc-800">
+                    <span class="text-xs text-zinc-500">{{ u.person_type === 'pj' ? 'Pessoa jurídica' : 'Pessoa física' }}</span>
+                    <span class="text-sm font-semibold text-[var(--color-primary)]">Abrir verificação →</span>
+                </div>
+            </Link>
+        </div>
+
+        <!-- Desktop: tabela -->
+        <div class="hidden overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-700 dark:bg-zinc-900/40 md:block">
+            <div class="overflow-x-auto">
+                <table class="min-w-full divide-y divide-zinc-200 dark:divide-zinc-700">
+                    <thead class="bg-zinc-50 dark:bg-zinc-800/50">
+                        <tr>
+                            <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-zinc-500">Nome</th>
+                            <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-zinc-500">E-mail</th>
+                            <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-zinc-500">Tipo</th>
+                            <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-zinc-500">Status KYC</th>
+                            <th class="px-4 py-3 text-right text-xs font-semibold uppercase text-zinc-500">Ação</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-zinc-200 dark:divide-zinc-700">
+                        <tr v-for="u in users.data" :key="u.id" class="hover:bg-zinc-50/80 dark:hover:bg-zinc-800/30">
+                            <td class="px-4 py-3 text-sm font-medium text-zinc-900 dark:text-white">{{ u.name }}</td>
+                            <td class="px-4 py-3 text-sm text-zinc-600 dark:text-zinc-300">{{ u.email }}</td>
+                            <td class="px-4 py-3 text-sm text-zinc-600 dark:text-zinc-400">{{ u.person_type === 'pj' ? 'PJ' : 'PF' }}</td>
+                            <td class="px-4 py-3 text-sm">
+                                {{ statusLabel(u.kyc_status) }}
+                                <span
+                                    v-if="u.pj_conversion_status === 'pending_review'"
+                                    class="ml-2 inline-flex rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-semibold uppercase text-violet-900 dark:bg-violet-950/50 dark:text-violet-200"
+                                >
+                                    PF→PJ
+                                </span>
+                            </td>
+                            <td class="px-4 py-3 text-right">
+                                <Link
+                                    :href="`/plataforma/verificacoes-kyc/usuario/${u.id}`"
+                                    class="text-sm font-medium text-[var(--color-primary)] hover:underline"
+                                >
+                                    Abrir
+                                </Link>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div v-if="!users.data?.length" class="rounded-xl border border-dashed border-zinc-200 px-4 py-10 text-center text-sm text-zinc-500 dark:border-zinc-700">
+            Nenhum registro neste filtro.
         </div>
 
         <div v-if="users.links && users.links.length > 3" class="flex flex-wrap justify-center gap-2">
@@ -95,7 +148,7 @@ function statusLabel(s) {
                 class="rounded-lg px-3 py-1.5 text-sm"
                 :class="l.active ? 'bg-[var(--color-primary)]/20 font-semibold' : 'bg-zinc-100 dark:bg-zinc-800'"
             >
-                <span v-html="l.label" />
+                <span v-text="htmlToText(l.label)" />
             </Link>
         </div>
     </div>

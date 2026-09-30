@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_URL="${GETFY_REPO_URL:-https://github.com/gatewaylab-hub/gateway.git}"
+REPO_URL="${GETFY_REPO_URL:-https://github.com/stacker-builders/stacker-gateway.git}"
 BRANCH="${GETFY_BRANCH:-main}"
 INSTALL_DIR="${GETFY_DIR:-/opt/getfy}"
 HTTP_PORT="${GETFY_HTTP_PORT:-80}"
 SWAP_MODE="${GETFY_SWAP_MODE:-auto}"
+LEGACY_GIT="${GETFY_LEGACY_GIT_UPDATE:-0}"
 
 if [ "$(uname -s)" != "Linux" ]; then
   echo "Este instalador é para Linux." >&2
@@ -110,40 +111,54 @@ if [ -e "$INSTALL_DIR" ] && [ ! -d "$INSTALL_DIR" ]; then
   exit 1
 fi
 
-if [ -d "$INSTALL_DIR/.git" ]; then
-  GIT_BASE=(git -c safe.directory="$INSTALL_DIR" -C "$INSTALL_DIR")
-  $SUDO "${GIT_BASE[@]}" remote set-url origin "$REPO_URL" >/dev/null 2>&1 || true
-  HAS_LOCAL_CHANGES=0
-  STATUS_OUT="$($SUDO "${GIT_BASE[@]}" status --porcelain 2>/dev/null || true)"
-  if [ -n "$STATUS_OUT" ]; then
-    HAS_LOCAL_CHANGES=1
-    if ! $SUDO "${GIT_BASE[@]}" stash push -u -m "getfy-install" >/dev/null 2>&1; then
-      echo "Falha ao aplicar stash automaticamente. Resolva manualmente em: $INSTALL_DIR" >&2
+if [ "$LEGACY_GIT" = "1" ]; then
+  if [ -d "$INSTALL_DIR/.git" ]; then
+    GIT_BASE=(git -c safe.directory="$INSTALL_DIR" -C "$INSTALL_DIR")
+    $SUDO "${GIT_BASE[@]}" remote set-url origin "$REPO_URL" >/dev/null 2>&1 || true
+    HAS_LOCAL_CHANGES=0
+    STATUS_OUT="$($SUDO "${GIT_BASE[@]}" status --porcelain 2>/dev/null || true)"
+    if [ -n "$STATUS_OUT" ]; then
+      HAS_LOCAL_CHANGES=1
+      if ! $SUDO "${GIT_BASE[@]}" stash push -u -m "getfy-install" >/dev/null 2>&1; then
+        echo "Falha ao aplicar stash automaticamente. Resolva manualmente em: $INSTALL_DIR" >&2
+        exit 1
+      fi
+    fi
+    $SUDO "${GIT_BASE[@]}" fetch --all --prune
+    if ! $SUDO "${GIT_BASE[@]}" checkout -B "$BRANCH" "origin/$BRANCH"; then
+      echo "Falha ao atualizar código (checkout). Se você tem alterações locais, rode:" >&2
+      echo "  cd \"$INSTALL_DIR\" && git stash push -u -m getfy-install" >&2
       exit 1
     fi
-  fi
-  $SUDO "${GIT_BASE[@]}" fetch --all --prune
-  if ! $SUDO "${GIT_BASE[@]}" checkout -B "$BRANCH" "origin/$BRANCH"; then
-    echo "Falha ao atualizar código (checkout). Se você tem alterações locais, rode:" >&2
-    echo "  cd \"$INSTALL_DIR\" && git stash push -u -m getfy-install" >&2
-    exit 1
-  fi
-  $SUDO "${GIT_BASE[@]}" reset --hard "origin/$BRANCH"
-  if [ "$HAS_LOCAL_CHANGES" -eq 1 ]; then
-    if ! $SUDO "${GIT_BASE[@]}" stash pop >/dev/null 2>&1; then
-      echo "Aviso: havia alterações locais. O instalador fez stash, mas não conseguiu reaplicar automaticamente." >&2
-      echo "Para ver e resolver manualmente: cd \"$INSTALL_DIR\" && git stash list && git stash show -p" >&2
+    $SUDO "${GIT_BASE[@]}" reset --hard "origin/$BRANCH"
+    if [ "$HAS_LOCAL_CHANGES" -eq 1 ]; then
+      if ! $SUDO "${GIT_BASE[@]}" stash pop >/dev/null 2>&1; then
+        echo "Aviso: havia alterações locais. O instalador fez stash, mas não conseguiu reaplicar automaticamente." >&2
+        echo "Para ver e resolver manualmente: cd \"$INSTALL_DIR\" && git stash list && git stash show -p" >&2
+      fi
     fi
+  else
+    $SUDO mkdir -p "$(dirname "$INSTALL_DIR")"
+    $SUDO git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR"
   fi
 else
-  $SUDO mkdir -p "$(dirname "$INSTALL_DIR")"
-  $SUDO git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR"
+  if [ ! -d "$INSTALL_DIR" ] || [ -z "$(ls -A "$INSTALL_DIR" 2>/dev/null || true)" ]; then
+    echo "GETFY_LEGACY_GIT_UPDATE não está ativo e o diretório está vazio." >&2
+    echo "Copie o artefato de release ou defina GETFY_LEGACY_GIT_UPDATE=1 para bootstrap via Git público." >&2
+    exit 1
+  fi
+  echo "Modo Stacker: pulando clone Git público (use artefato ou GETFY_LEGACY_GIT_UPDATE=1)."
 fi
 
 cd "$INSTALL_DIR"
 
 # shellcheck source=docker/prompt-public-url.sh
 . docker/prompt-public-url.sh
+
+$SUDO chmod +x docker/prompt-stacker-agent-token.sh docker/ensure-stacker-agent.sh 2>/dev/null || true
+echo ""
+echo "=== Agente Stacker (licença + métricas) ==="
+$SUDO bash docker/prompt-stacker-agent-token.sh || true
 
 if [ -f ".docker/stack.env" ]; then
   if grep -Eq '^\s*GETFY_HTTP_PORT\s*=' ".docker/stack.env"; then
@@ -154,25 +169,49 @@ if [ -f ".docker/stack.env" ]; then
   else
     echo "GETFY_HTTP_PORT=$HTTP_PORT" | $SUDO tee -a ".docker/stack.env" >/dev/null
   fi
-  if ! grep -Eq '^\s*GETFY_COMPOSE_FILES\s*=' ".docker/stack.env"; then
-    echo "GETFY_COMPOSE_FILES=docker-compose.yml;docker-compose.prod.yml" | $SUDO tee -a ".docker/stack.env" >/dev/null
-  fi
 fi
 
-$SUDO chmod +x docker/up.sh >/dev/null 2>&1 || true
+$SUDO chmod +x docker/up.sh docker/build-frontend.sh docker/install-composer-deps.sh docker/ensure-upload-limits.sh docker/verify-workers.sh docker/prompt-stacker-agent-token.sh docker/ensure-stacker-agent.sh >/dev/null 2>&1 || true
+
+echo ""
+echo "=== Limites de upload (PHP / Member Builder) ==="
+$SUDO sh docker/ensure-upload-limits.sh
+
+if [ -f docker/build-frontend.sh ]; then
+  echo ""
+  echo "=== Build do frontend ==="
+  $SUDO sh docker/build-frontend.sh
+fi
+
+if [ -f docker/install-composer-deps.sh ]; then
+  echo ""
+  echo "=== Dependências PHP (Composer) ==="
+  $SUDO sh docker/install-composer-deps.sh
+fi
 
 if ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "(^|:)$HTTP_PORT$"; then
   echo "Aviso: porta $HTTP_PORT parece estar em uso. Se o compose falhar, mude GETFY_HTTP_PORT." >&2
-fi
-if ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE '(^|:)443$'; then
-  echo "Aviso: porta 443 parece estar em uso. O Caddy (HTTPS) usa 443 no host; libere ou ajuste o serviço conflitante." >&2
 fi
 
 $SUDO env \
   GETFY_APP_URL="${GETFY_APP_URL:-}" \
   GETFY_WEBHOOK_PUBLIC_URL="${GETFY_WEBHOOK_PUBLIC_URL:-}" \
-  GETFY_COMPOSE_FILES="${GETFY_COMPOSE_FILES:-docker-compose.yml;docker-compose.prod.yml}" \
+  GETFY_APP_ENV=production \
+  GETFY_APP_DEBUG=false \
   sh docker/up.sh
+
+$SUDO mkdir -p .docker
+echo "standard" | $SUDO tee .docker/compose-profile >/dev/null
+
+echo ""
+echo "=== Verificação de workers (API) ==="
+$SUDO chmod +x docker/verify-workers.sh 2>/dev/null || true
+$SUDO sh docker/verify-workers.sh || true
+
+if [ -f docker/ensure-stacker-agent.sh ]; then
+  $SUDO chmod +x docker/ensure-stacker-agent.sh 2>/dev/null || true
+  $SUDO bash docker/ensure-stacker-agent.sh
+fi
 
 IP="$(curl -fsSL https://api.ipify.org 2>/dev/null || true)"
 if [ -z "$IP" ]; then
@@ -182,41 +221,8 @@ if [ -z "$IP" ]; then
   IP="SEU_IP"
 fi
 
-APP_URL_FOR_MSG="${GETFY_APP_URL:-${GETFY_WEBHOOK_PUBLIC_URL:-}}"
-SETUP_HOST=""
-if [ -f ".docker/stack.env" ]; then
-  LINE_APP="$(grep -E '^GETFY_APP_URL=' ".docker/stack.env" 2>/dev/null | head -1 || true)"
-  VAL_STACK="${LINE_APP#GETFY_APP_URL=}"
-  VAL_STACK="${VAL_STACK//\"/}"
-  VAL_STACK="${VAL_STACK//\'/}"
-  APP_URL_FOR_MSG="${APP_URL_FOR_MSG:-$VAL_STACK}"
-fi
-if [ -n "$APP_URL_FOR_MSG" ]; then
-  host_raw="${APP_URL_FOR_MSG#*://}"
-  SETUP_HOST="${host_raw%%[/:]*}"
-  case "$SETUP_HOST" in
-    \[*\]*|'')
-      SETUP_HOST=""
-      ;;
-    *:*)
-      SETUP_HOST="${SETUP_HOST%%:*}"
-      ;;
-  esac
-  SETUP_HOST=$(printf '%s' "$SETUP_HOST" | tr '[:upper:]' '[:lower:]')
-fi
-
 echo ""
-echo "Getfy iniciado via Docker (Nginx + PHP-FPM; Caddy na borda com Let's Encrypt quando o URL usa um domínio público)."
-echo "Configuração inicial (docker-setup):"
-echo "  - Por IP (HTTP): http://$IP:$HTTP_PORT/docker-setup"
-if [ -n "$SETUP_HOST" ] && printf '%s' "$SETUP_HOST" | grep -q '\.' \
-  && ! printf '%s' "$SETUP_HOST" | grep -qE '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' \
-  && [ "$SETUP_HOST" != "localhost" ]; then
-  echo "  - Com domínio (HTTPS automático na origem após DNS apontar para este IP): https://$SETUP_HOST/docker-setup"
-  echo "    Cloudflare: prefira SSL/TLS \"Full\" ou \"Full (strict)\". Evite \"Flexible\": a origem recebe só HTTP:80 e redirecionamentos para HTTPS na VPS podem gerar 502."
-fi
-echo ""
-echo "HTTPS automático (Let's Encrypt) exige domínio resolvendo para este servidor e portas 80/443 liberadas até o container Caddy."
-echo "Acesso por IP: use sempre http:// (não https://IP) — sem certificado para o endereço IP o navegador mostra ERR_SSL_PROTOCOL_ERROR."
+echo "Getfy iniciado via Docker."
+echo "Abra: http://$IP:$HTTP_PORT/docker-setup"
 echo ""
 echo "Se você adicionou seu usuário ao grupo docker, reabra o SSH para aplicar."

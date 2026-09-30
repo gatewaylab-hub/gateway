@@ -2,10 +2,12 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\MedDispute;
 use App\Models\RefundRequest;
 use App\Services\RefundRequestService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use InvalidArgumentException;
 use Inertia\Inertia;
 use Inertia\Response;
 
@@ -28,9 +30,16 @@ class SellerRefundRequestsController extends Controller
 
         $rows = $q->paginate(20)->withQueryString();
 
+        $orderIdsWithOpenMed = MedDispute::query()
+            ->forTenant($tenantId)
+            ->open()
+            ->pluck('order_id')
+            ->all();
+
         return Inertia::render('Reembolsos/Index', [
             'requests' => $rows,
             'filter_status' => $status,
+            'order_ids_with_open_med' => $orderIdsWithOpenMed,
             'pageTitle' => 'Reembolsos',
         ]);
     }
@@ -43,6 +52,8 @@ class SellerRefundRequestsController extends Controller
         }
         try {
             $this->refundRequestService->approve($user, $refundRequest);
+        } catch (InvalidArgumentException $e) {
+            return back()->with('error', $e->getMessage());
         } catch (\Throwable $e) {
             report($e);
 

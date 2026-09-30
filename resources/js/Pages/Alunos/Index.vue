@@ -3,14 +3,26 @@ import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { router } from '@inertiajs/vue3';
 import LayoutInfoprodutor from '@/Layouts/LayoutInfoprodutor.vue';
 import AlunoDetailSidebar from '@/components/alunos/AlunoDetailSidebar.vue';
+import AuroraPageHeader from '@/components/aurora/AuroraPageHeader.vue';
+import AuroraPageSection from '@/components/aurora/AuroraPageSection.vue';
+import AuroraStatCard from '@/components/aurora/AuroraStatCard.vue';
 import Button from '@/components/ui/Button.vue';
 import Checkbox from '@/components/ui/Checkbox.vue';
 import { Users, BookOpen, Package, UserPlus, Plus, ChevronDown, X, Upload, Download, Search } from 'lucide-vue-next';
 import axios from 'axios';
 import { useI18n } from '@/composables/useI18n';
+import { usePanelThemeClasses } from '@/composables/usePanelThemeClasses';
+import { htmlToText } from '@/lib/sanitizeHtml';
 
 defineOptions({ layout: LayoutInfoprodutor });
 const { t } = useI18n();
+const {
+    pageClass,
+    mobileCardClass,
+    tablePanel,
+    themePrefix,
+    isThemedShell,
+} = usePanelThemeClasses();
 
 const props = defineProps({
     alunos: { type: [Array, Object], default: () => [] },
@@ -215,14 +227,15 @@ function toggleNovoProduct(id) {
 }
 
 async function saveNovoAluno() {
-    if (!novoAlunoForm.value.name?.trim() || !novoAlunoForm.value.email?.trim() || !novoAlunoForm.value.password) {
-        showToast(t('students.new.required_fields', 'Preencha nome, e-mail e senha.'), 'error');
+    if (!novoAlunoForm.value.name?.trim() || !novoAlunoForm.value.email?.trim()) {
+        showToast(t('students.new.required_fields', 'Preencha nome e e-mail.'), 'error');
         return;
     }
     savingNovo.value = true;
     try {
         const { data } = await axios.post('/produtos/alunos', {
             ...novoAlunoForm.value,
+            password: novoAlunoForm.value.password || null,
             send_access_email: novoAlunoForm.value.send_access_email ?? true,
         });
         showToast(data.message ?? t('students.new.success', 'Aluno cadastrado com sucesso.'), 'success');
@@ -230,7 +243,10 @@ async function saveNovoAluno() {
         router.reload({ only: ['alunos', 'stats'], preserveState: false });
     } catch (err) {
         showToast(
-            err.response?.data?.message ?? err.response?.data?.errors?.email?.[0] ?? t('students.new.error', 'Erro ao cadastrar. Tente novamente.'),
+            err.response?.data?.message
+                ?? err.response?.data?.errors?.email?.[0]
+                ?? err.response?.data?.errors?.password?.[0]
+                ?? t('students.new.error', 'Erro ao cadastrar. Tente novamente.'),
             'error'
         );
     } finally {
@@ -272,60 +288,47 @@ onUnmounted(() => {
 </script>
 
 <template>
-    <div class="space-y-6">
-        <!-- Cards de métricas -->
-        <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            <div
-                class="rounded-xl border border-zinc-200 bg-zinc-50 p-5 dark:border-zinc-700 dark:bg-zinc-800/50"
-            >
-                <div class="flex items-center gap-2 text-zinc-600 dark:text-zinc-400">
-                    <Users class="h-5 w-5" />
-                    <span class="text-sm font-medium">{{ t('students.total', 'Total de alunos') }}</span>
-                </div>
-                <p class="mt-2 text-2xl font-bold text-zinc-900 dark:text-white">
-                    {{ displayNumber(stats.total_alunos) }}
-                </p>
-            </div>
-            <div
-                class="rounded-xl border border-zinc-200 bg-zinc-50 p-5 dark:border-zinc-700 dark:bg-zinc-800/50"
-            >
-                <div class="flex items-center gap-2 text-zinc-600 dark:text-zinc-400">
-                    <BookOpen class="h-5 w-5" />
-                    <span class="text-sm font-medium">{{ t('students.total_enrollments', 'Total de inscrições') }}</span>
-                </div>
-                <p class="mt-2 text-2xl font-bold text-zinc-900 dark:text-white">
-                    {{ displayNumber(stats.total_inscricoes) }}
-                </p>
-            </div>
-            <div
-                class="rounded-xl border border-zinc-200 bg-zinc-50 p-5 dark:border-zinc-700 dark:bg-zinc-800/50"
-            >
-                <div class="flex items-center gap-2 text-zinc-600 dark:text-zinc-400">
-                    <Package class="h-5 w-5" />
-                    <span class="text-sm font-medium">{{ t('students.products_with_students', 'Produtos com alunos') }}</span>
-                </div>
-                <p class="mt-2 text-2xl font-bold text-zinc-900 dark:text-white">
-                    {{ displayNumber(stats.produtos_ativos) }}
-                </p>
-            </div>
-            <div
-                class="rounded-xl border border-zinc-200 bg-zinc-50 p-5 dark:border-zinc-700 dark:bg-zinc-800/50"
-            >
-                <div class="flex items-center gap-2 text-zinc-600 dark:text-zinc-400">
-                    <UserPlus class="h-5 w-5" />
-                    <span class="text-sm font-medium">{{ t('students.new_30_days', 'Novos (30 dias)') }}</span>
-                </div>
-                <p class="mt-2 text-2xl font-bold text-zinc-900 dark:text-white">
-                    {{ displayNumber(stats.alunos_novos_30dias) }}
-                </p>
-            </div>
-        </div>
+    <div :class="pageClass">
+        <AuroraPageHeader
+            :title="t('sidebar.customers', 'Clientes')"
+            :subtitle="t('customers.subtitle', 'Gerencie acessos e compras dos seus clientes.')"
+        />
 
+        <AuroraPageSection>
+            <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <AuroraStatCard
+                    :icon="Users"
+                    :label="t('customers.total', 'Total de clientes')"
+                    :value="displayNumber(stats.total_alunos)"
+                />
+                <AuroraStatCard
+                    :icon="BookOpen"
+                    :label="t('students.total_enrollments', 'Total de inscrições')"
+                    :value="displayNumber(stats.total_inscricoes)"
+                />
+                <AuroraStatCard
+                    :icon="Package"
+                    :label="t('students.products_with_students', 'Produtos com alunos')"
+                    :value="displayNumber(stats.produtos_ativos)"
+                />
+                <AuroraStatCard
+                    :icon="UserPlus"
+                    :label="t('students.new_30_days', 'Novos (30 dias)')"
+                    :value="displayNumber(stats.alunos_novos_30dias)"
+                />
+            </div>
+        </AuroraPageSection>
+
+        <AuroraPageSection>
         <!-- Abas de filtro + Filtro por produto + Novo aluno -->
         <div class="flex flex-wrap items-start justify-between gap-3">
             <div class="flex flex-col flex-wrap gap-3 sm:flex-row sm:flex-nowrap sm:items-center">
                 <nav
-                    class="inline-flex rounded-xl bg-zinc-100/80 p-1 dark:bg-zinc-800/80"
+                    :class="[
+                        themePrefix
+                            ? `${themePrefix}-subnav`
+                            : 'inline-flex rounded-xl bg-zinc-100/80 p-1 dark:bg-zinc-800/80',
+                    ]"
                     :aria-label="t('students.filter', 'Filtrar alunos')"
                 >
                     <button
@@ -334,10 +337,14 @@ onUnmounted(() => {
                         type="button"
                         :aria-current="filter === opt.value ? 'true' : undefined"
                         :class="[
-                            'rounded-lg px-4 py-2.5 text-sm font-medium transition-all duration-200',
-                            filter === opt.value
-                                ? 'bg-white text-[var(--color-primary)] shadow-sm dark:bg-zinc-700 dark:text-[var(--color-primary)]'
-                                : 'text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-white',
+                            themePrefix
+                                ? [`${themePrefix}-subnav-item`, filter === opt.value && `${themePrefix}-subnav-item-active`]
+                                : [
+                                    'rounded-lg px-4 py-2.5 text-sm font-medium transition-all duration-200',
+                                    filter === opt.value
+                                        ? 'bg-white text-[var(--color-primary)] shadow-sm dark:bg-zinc-700 dark:text-[var(--color-primary)]'
+                                        : 'text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-white',
+                                ],
                         ]"
                         @click="setFilter(opt.value)"
                     >
@@ -432,13 +439,18 @@ onUnmounted(() => {
                 </Button>
             </div>
         </div>
+        </AuroraPageSection>
 
+        <AuroraPageSection flush>
         <!-- Tabela de alunos -->
-        <div v-if="alunosList.length" class="sm:hidden space-y-3">
+        <div v-if="alunosList.length" :class="['sm:hidden space-y-3', isThemedShell && 'p-4']">
             <div
                 v-for="a in alunosList"
                 :key="a.id"
-                class="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm transition hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-800/60 dark:hover:bg-zinc-700/80"
+                :class="[
+                    'p-4 transition',
+                    mobileCardClass,
+                ]"
                 role="button"
                 tabindex="0"
                 @click="openDetail(a)"
@@ -467,7 +479,10 @@ onUnmounted(() => {
         </div>
 
         <div
-            class="hidden overflow-hidden rounded-xl border border-zinc-200 dark:border-zinc-700 dark:bg-zinc-800/80 sm:block"
+            :class="[
+                'hidden sm:block',
+                tablePanel,
+            ]"
         >
             <table class="min-w-full divide-y divide-zinc-200 dark:divide-zinc-700">
                 <thead class="bg-zinc-50 dark:bg-zinc-800">
@@ -536,10 +551,11 @@ onUnmounted(() => {
                           ? 'text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-700'
                           : 'cursor-not-allowed text-zinc-400 dark:text-zinc-500',
                 ]"
-                v-html="link.label"
+                v-text="htmlToText(link.label)"
                 @click.prevent="link.url && router.visit(link.url, { preserveState: true })"
             />
         </nav>
+        </AuroraPageSection>
 
         <!-- Sidebar detalhes -->
         <AlunoDetailSidebar
@@ -605,6 +621,9 @@ onUnmounted(() => {
                         <div class="space-y-2">
                             <label class="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
                                 {{ t('common.password', 'Senha') }}
+                                <span class="font-normal normal-case tracking-normal text-zinc-400">
+                                    — {{ t('students.password_new_only', 'necessária apenas para novos usuários') }}
+                                </span>
                             </label>
                             <input
                                 v-model="novoAlunoForm.password"
@@ -614,6 +633,9 @@ onUnmounted(() => {
                                 class="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-white"
                                 placeholder="Mínimo 6 caracteres"
                             />
+                            <p class="text-xs text-zinc-500 dark:text-zinc-400">
+                                {{ t('students.password_existing_hint', 'Se o e-mail já possuir uma conta na plataforma, a senha existente será mantida.') }}
+                            </p>
                         </div>
                         <div class="space-y-2">
                             <label class="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-left">

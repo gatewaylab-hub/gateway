@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Events\OrderCompleted;
+use App\Models\GatewayCredential;
 use App\Models\Order;
 use App\Models\Setting;
 use App\Models\User;
@@ -40,6 +41,119 @@ class MerchantSettlementAndGatewayTest extends TestCase
         $this->assertNotEmpty($order);
         $this->assertSame('efi', $order[0]);
         $this->assertContains('cajupay', $order);
+    }
+
+    public function test_payment_service_reads_gateway_order_for_seller_tenant_not_only_global(): void
+    {
+        $seller = User::factory()->create([
+            'role' => User::ROLE_INFOPRODUTOR,
+        ]);
+        $seller->forceFill(['tenant_id' => $seller->id])->save();
+
+        Setting::set('gateway_order', [
+            'pix' => ['mercadopago', 'cajupay'],
+            'card' => [],
+            'boleto' => [],
+            'pix_auto' => [],
+        ], null);
+
+        Setting::set('gateway_order', [
+            'pix' => ['cajupay', 'mercadopago'],
+            'card' => [],
+            'boleto' => [],
+            'pix_auto' => [],
+        ], $seller->id);
+
+        /** @var PaymentService $ps */
+        $ps = app(PaymentService::class);
+        $order = $ps->getGatewayOrderForMethod((int) $seller->id, 'pix');
+
+        $this->assertNotEmpty($order);
+        $this->assertSame('cajupay', $order[0], 'PIX deve seguir a ordem do Financeiro do tenant, não só a configuração global.');
+    }
+
+    public function test_checkout_payment_methods_follow_platform_gateway_order_not_only_default(): void
+    {
+        foreach (['cajupay' => ['public_key' => 'pk', 'secret_key' => 'sk'], 'mercadopago' => ['public_key' => 'pk', 'access_token' => 'TEST']] as $slug => $creds) {
+            $cred = GatewayCredential::query()->firstOrNew([
+                'tenant_id' => null,
+                'gateway_slug' => $slug,
+            ]);
+            $cred->is_connected = true;
+            $cred->setEncryptedCredentials($creds);
+            $cred->save();
+        }
+
+        Setting::set('gateway_order', [
+            'pix' => ['mercadopago', 'cajupay'],
+            'card' => ['mercadopago', 'cajupay'],
+            'boleto' => [],
+            'pix_auto' => [],
+        ], null);
+
+        $seller = User::factory()->create(['role' => User::ROLE_INFOPRODUTOR]);
+        $seller->forceFill(['tenant_id' => $seller->id])->save();
+        $product = $this->createTestProduct(['tenant_id' => $seller->id]);
+
+        $methods = app(PaymentService::class)->availablePaymentMethodsForCheckout($product);
+        $pix = collect($methods)->firstWhere('id', 'pix');
+        $card = collect($methods)->firstWhere('id', 'card');
+
+        $this->assertSame('mercadopago', $pix['gateway_slug'] ?? null);
+        $this->assertSame('mercadopago', $card['gateway_slug'] ?? null);
+    }
+
+    public function test_wallet_credit_applies_fractional_platform_fee_percent(): void
+    {
+        if (! Schema::hasTable('wallet_transactions') || ! Schema::hasTable('tenant_wallets')) {
+            $this->markTestSkipped('wallet tables');
+        }
+
+        Setting::set('merchant_fee_rules', [
+            'pix' => ['percent' => 0.99, 'fixed' => 0],
+            'api_pix' => ['percent' => 0, 'fixed' => 0],
+            'card' => ['percent' => 0, 'fixed' => 0],
+            'apple_pay' => ['percent' => 0, 'fixed' => 0],
+            'google_pay' => ['percent' => 0, 'fixed' => 0],
+            'boleto' => ['percent' => 0, 'fixed' => 0],
+            'withdrawal' => ['percent' => 0, 'fixed' => 0],
+        ], null);
+
+        Setting::set('merchant_settlement_rules', [
+            'pix' => ['days_to_available' => 0, 'reserve_percent' => 0],
+            'card' => ['days_to_available' => 0, 'reserve_percent' => 0],
+            'boleto' => ['days_to_available' => 0, 'reserve_percent' => 0],
+        ], null);
+
+        $seller = User::factory()->create(['role' => User::ROLE_INFOPRODUTOR]);
+        $seller->forceFill(['tenant_id' => $seller->id])->save();
+
+        $buyer = User::factory()->create(['role' => User::ROLE_ALUNO]);
+        $product = $this->createTestProduct(['tenant_id' => $seller->id]);
+
+        $order = Order::create([
+            'tenant_id' => $seller->id,
+            'user_id' => $buyer->id,
+            'product_id' => $product->id,
+            'status' => 'completed',
+            'amount' => 100.00,
+            'email' => $buyer->email,
+            'payment_method' => 'pix',
+            'metadata' => [],
+        ]);
+
+        event(new OrderCompleted($order->fresh()));
+
+        $tx = WalletTransaction::query()
+            ->where('order_id', $order->id)
+            ->where('type', WalletTransaction::TYPE_CREDIT_SALE)
+            ->first();
+
+        $this->assertNotNull($tx);
+        $this->assertEqualsWithDelta(0.99, (float) $tx->amount_fee, 0.001);
+        $this->assertEqualsWithDelta(99.01, (float) $tx->amount_net, 0.001);
+        $meta = is_array($tx->meta) ? $tx->meta : [];
+        $this->assertEqualsWithDelta(0.99, (float) ($meta['percent_applied'] ?? 0), 0.0001);
     }
 
     public function test_settlement_pending_created_when_delay_configured(): void

@@ -1,5 +1,6 @@
 <script setup>
 import { computed } from 'vue';
+import { sanitizeHtmlAllowlist } from '@/lib/sanitizeHtml';
 
 const props = defineProps({
   logoUrl: { type: String, default: '' },
@@ -11,8 +12,10 @@ const props = defineProps({
 const SAMPLE = {
   nome_cliente: 'Maria Silva',
   nome_produto: 'Meu Curso',
-  link_acesso: 'https://exemplo.com/m/xxxxx',
+  link_acesso: 'https://exemplo.com/login',
   email_cliente: 'maria@exemplo.com',
+  senha: 'SenhaExemplo123',
+  link_esqueci_senha: 'https://exemplo.com/esqueci-senha',
 };
 
 function replacePlaceholders(text) {
@@ -21,11 +24,13 @@ function replacePlaceholders(text) {
     .replace(/\{nome_cliente\}/g, SAMPLE.nome_cliente)
     .replace(/\{nome_produto\}/g, SAMPLE.nome_produto)
     .replace(/\{link_acesso\}/g, SAMPLE.link_acesso)
-    .replace(/\{email_cliente\}/g, SAMPLE.email_cliente);
+    .replace(/\{email_cliente\}/g, SAMPLE.email_cliente)
+    .replace(/\{senha\}/g, SAMPLE.senha)
+    .replace(/\{link_esqueci_senha\}/g, SAMPLE.link_esqueci_senha);
 }
 
 const previewSubject = computed(() => replacePlaceholders(props.subject));
-const previewBodyHtml = computed(() => replacePlaceholders(props.bodyHtml));
+const previewBodyHtml = computed(() => sanitizeHtmlAllowlist(replacePlaceholders(props.bodyHtml)));
 </script>
 
 <template>
@@ -47,7 +52,15 @@ const previewBodyHtml = computed(() => replacePlaceholders(props.bodyHtml));
         </div>
       </div>
       <div v-if="logoUrl" class="mb-3 flex justify-center">
-        <img :src="logoUrl" alt="Logo" class="max-h-10 w-auto object-contain mx-auto" @error="($e) => $e.target.style.display = 'none'" />
+        <div class="rounded-lg bg-white px-3 py-2 shadow-sm ring-1 ring-zinc-200/90 dark:ring-zinc-600">
+          <img
+            :key="logoUrl"
+            :src="logoUrl"
+            alt="Logo"
+            class="max-h-10 w-auto object-contain mx-auto block"
+            @error="($e) => $e.target.style.display = 'none'"
+          />
+        </div>
       </div>
       <div
         class="email-preview-body text-sm text-zinc-700 dark:text-zinc-300 font-sans max-w-none break-words"
@@ -59,7 +72,7 @@ const previewBodyHtml = computed(() => replacePlaceholders(props.bodyHtml));
 
 <style scoped>
 .email-preview-body :deep(table) { width: 100%; max-width: 100%; }
-.email-preview-body :deep(a) { color: #8A2BE2; text-decoration: none; }
+.email-preview-body :deep(a) { color: #0ea5e9; text-decoration: none; }
 .email-preview-body :deep(p) { margin: 0 0 0.75em; line-height: 1.5; }
 .email-preview-body :deep(strong) { font-weight: 600; }
 </style>

@@ -41,7 +41,8 @@ class StripeDriver implements GatewayDriver
         float $amount,
         array $consumer,
         string $externalId,
-        string $postbackUrl
+        string $postbackUrl,
+        array $options = []
     ): array {
         throw new \RuntimeException('Stripe não suporta PIX neste gateway. Use cartão de crédito.');
     }
@@ -193,6 +194,42 @@ class StripeDriver implements GatewayDriver
             Log::debug('StripeDriver getTransactionStatus failed', ['tx' => $transactionId, 'message' => $e->getMessage()]);
             return null;
         }
+    }
+
+    /**
+     * Saldo da conta (GET /v1/balance). Auth HTTP Basic com a secret key, como na documentação da Stripe.
+     *
+     * @param  array<string, mixed>  $credentials
+     * @return array<string, mixed>
+     */
+    public function fetchAccountBalance(array $credentials): array
+    {
+        $secret = trim((string) ($credentials['secret_key'] ?? ''));
+        if ($secret === '') {
+            throw new \RuntimeException('Stripe: chave secreta não configurada.');
+        }
+
+        try {
+            $balance = (new StripeClient($secret))->balance->retrieve();
+        } catch (ApiErrorException $e) {
+            throw new \RuntimeException('Stripe: falha ao consultar saldo: '.$e->getMessage(), 0, $e);
+        } catch (\Throwable $e) {
+            throw new \RuntimeException('Stripe: falha ao consultar saldo.', 0, $e);
+        }
+
+        $payload = $balance->toArray();
+
+        return is_array($payload) ? $payload : [];
+    }
+
+    public static function fromSmallestUnit(int $amount, string $currency): float
+    {
+        $currency = strtolower($currency);
+        if (in_array($currency, self::ZERO_DECIMAL_CURRENCIES, true)) {
+            return round((float) $amount, 2);
+        }
+
+        return round($amount / 100, 2);
     }
 
     private function amountToSmallestUnit(float $amount, string $currency): int

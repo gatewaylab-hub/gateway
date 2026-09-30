@@ -4,7 +4,7 @@ import { CreditCard } from 'lucide-vue-next';
 defineProps({
     method: { type: Object, required: true },
     selected: { type: Boolean, default: false },
-    primaryColor: { type: String, default: '#8A2BE2' },
+    primaryColor: { type: String, default: '#0ea5e9' },
 });
 </script>
 
@@ -32,9 +32,33 @@ defineProps({
             class="h-7 w-7 shrink-0 object-contain self-center"
         />
         <img
+            v-else-if="method.id === 'apple_pay'"
+            src="/images/gateways/apple.png"
+            alt="Apple Pay"
+            class="h-7 w-7 shrink-0 object-contain self-center"
+        />
+        <img
+            v-else-if="method.id === 'google_pay'"
+            src="/images/gateways/gpay.png"
+            alt="Google Pay"
+            class="h-7 w-7 shrink-0 object-contain self-center"
+        />
+        <img
             v-else-if="method.id === 'boleto'"
             src="/images/gateways/boleto.png"
             alt="Boleto"
+            class="h-7 w-7 shrink-0 object-contain self-center"
+        />
+        <img
+            v-else-if="method.id === 'open_finance'"
+            src="/images/gateways/open-finance.svg"
+            alt="Open Finance"
+            class="h-7 w-7 shrink-0 object-contain self-center"
+        />
+        <img
+            v-else-if="method.id === 'paypal'"
+            src="/images/gateways/paypal.svg"
+            alt="PayPal"
             class="h-7 w-7 shrink-0 object-contain self-center"
         />
         <CreditCard v-else class="h-5 w-5" />

@@ -3,11 +3,14 @@
 namespace App\Models;
 
 // use Illuminate\Contracts\Auth\MustVerifyEmail;
+use App\Mail\PasswordResetMail;
 use App\Policies\UserPolicy;
 use Illuminate\Database\Eloquent\Attributes\UsePolicy;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
+use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Str;
 
 #[UsePolicy(UserPolicy::class)]
 class User extends Authenticatable
@@ -40,11 +43,16 @@ class User extends Authenticatable
     protected $fillable = [
         'name',
         'email',
+        'phone',
         'username',
         'avatar',
         'password',
         'role',
         'tenant_id',
+        'referral_code',
+        'referred_by_user_id',
+        'referred_at',
+        'referral_commission_percent',
         'team_role_id',
         'person_type',
         'document',
@@ -52,10 +60,14 @@ class User extends Authenticatable
         'merchant_fees',
         'merchant_settlement_overrides',
         'merchant_gateway_order',
+        'cajupay_account_id',
         'payout_settings',
         'birth_date',
         'company_name',
+        'trade_name',
         'legal_representative_cpf',
+        'cnpj_lookup',
+        'pj_conversion',
         'address_zip',
         'address_street',
         'address_number',
@@ -68,7 +80,15 @@ class User extends Authenticatable
         'kyc_rejection_reason',
         'kyc_reviewed_at',
         'kyc_reviewed_by',
+        'kyc_needs_document_review',
+        'identity_document_type',
+        'company_legal_nature',
+        'kyc_requirements_version',
         'seller_onboarded_at',
+        'privacy_policy_accepted_at',
+        'terms_accepted_at',
+        'legal_consent_version',
+        'last_seen_at',
     ];
 
     /** @deprecated Migração: antigo admin virou infoprodutor; manter só por compatibilidade de dados legados */
@@ -186,6 +206,36 @@ class User extends Authenticatable
     }
 
     /**
+     * URL inicial após login ou ao acessar a raiz autenticado.
+     */
+    public function defaultAuthenticatedHomeUrl(): string
+    {
+        if ($this->canAccessPlatformPanel()) {
+            return route('plataforma.dashboard');
+        }
+        if ($this->canAccessSellerPanel()) {
+            return '/dashboard';
+        }
+        if ($this->canAccessCustomerPanel()) {
+            return '/painel-cliente';
+        }
+
+        return '/painel-cliente';
+    }
+
+    /**
+     * Destino quando o usuário tenta acessar rotas do painel do vendedor sem permissão.
+     */
+    public function sellerPanelFallbackUrl(): string
+    {
+        if ($this->canAccessCustomerPanel()) {
+            return '/painel-cliente';
+        }
+
+        return route('login');
+    }
+
+    /**
      * Painel operador da plataforma (/plataforma): platform_admin sem tenant, ou papel admin global.
      */
     public function canAccessPlatformPanel(): bool
@@ -232,6 +282,26 @@ class User extends Authenticatable
         return $this->belongsTo(User::class, 'kyc_reviewed_by');
     }
 
+    public function referredBy(): \Illuminate\Database\Eloquent\Relations\BelongsTo
+    {
+        return $this->belongsTo(User::class, 'referred_by_user_id');
+    }
+
+    public function accountManager(): \Illuminate\Database\Eloquent\Relations\BelongsTo
+    {
+        return $this->belongsTo(AccountManager::class, 'account_manager_id');
+    }
+
+    public function referrals(): \Illuminate\Database\Eloquent\Relations\HasMany
+    {
+        return $this->hasMany(User::class, 'referred_by_user_id');
+    }
+
+    public function referralWallet(): \Illuminate\Database\Eloquent\Relations\HasOne
+    {
+        return $this->hasOne(ReferralWallet::class);
+    }
+
     /**
      * Usuário dono do tenant para checagem de KYC (infoprodutor ou dono quando equipe).
      */
@@ -248,9 +318,117 @@ class User extends Authenticatable
 
     public function hasApprovedKyc(): bool
     {
+        if (! \Illuminate\Support\Facades\Schema::hasColumn('users', 'kyc_status')) {
+            return true;
+        }
+
         $status = $this->kycSubjectUser()->kyc_status;
 
         return $status === self::KYC_APPROVED;
+    }
+
+    public function isAwaitingKycReview(): bool
+    {
+        if (! \Illuminate\Support\Facades\Schema::hasColumn('users', 'kyc_status')) {
+            return false;
+        }
+
+        return $this->kycSubjectUser()->kyc_status === self::KYC_PENDING_REVIEW;
+    }
+
+    public function mustCompleteKycOnboarding(): bool
+    {
+        if (! $this->canAccessSellerPanel()) {
+            return false;
+        }
+
+        if (! \Illuminate\Support\Facades\Schema::hasColumn('users', 'kyc_status')) {
+            return false;
+        }
+
+        $status = $this->kycSubjectUser()->kyc_status;
+
+        return in_array($status, [self::KYC_NOT_SUBMITTED, self::KYC_REJECTED], true);
+    }
+
+    public function isMerchantOperationallyApproved(): bool
+    {
+        if (! $this->canAccessSellerPanel()) {
+            return false;
+        }
+
+        $subject = $this->kycSubjectUser();
+
+        if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'kyc_status')
+            && $subject->kyc_status !== self::KYC_APPROVED) {
+            return false;
+        }
+
+        $accountStatus = (string) ($subject->account_status ?? 'approved');
+
+        return $accountStatus === 'approved';
+    }
+
+    /**
+     * Documentos KYC já enviados (em análise ou aprovados).
+     */
+    public function hasSubmittedKyc(): bool
+    {
+        if (! \Illuminate\Support\Facades\Schema::hasColumn('users', 'kyc_status')) {
+            return true;
+        }
+
+        $status = $this->kycSubjectUser()->kyc_status;
+
+        return in_array($status, [self::KYC_PENDING_REVIEW, self::KYC_APPROVED], true);
+    }
+
+    /**
+     * Infoprodutor/equipe precisa enviar documentos antes de usar o painel do vendedor.
+     *
+     * @deprecated Prefer mustCompleteKycOnboarding() + isMerchantOperationallyApproved()
+     */
+    public function mustSubmitKycBeforeSellerPanel(): bool
+    {
+        if (! $this->canAccessSellerPanel()) {
+            return false;
+        }
+
+        return ! $this->hasSubmittedKyc();
+    }
+
+    /**
+     * Painel operacional bloqueado até KYC/conta aprovados (exceto rotas de onboarding).
+     */
+    public function mustStayOnKycOnboardingRoutes(): bool
+    {
+        if (! $this->canAccessSellerPanel()) {
+            return false;
+        }
+
+        if ($this->sellerAccountAccessBlocked()) {
+            return false;
+        }
+
+        return ! $this->isMerchantOperationallyApproved();
+    }
+
+    public function sellerPanelRestrictedMessage(): string
+    {
+        if ($this->mustCompleteKycOnboarding()) {
+            return 'Envie seus documentos de verificação de identidade (KYC) para acessar o painel do infoprodutor.';
+        }
+
+        if ($this->isAwaitingKycReview()) {
+            return 'Documentos em análise. Aguarde a aprovação da plataforma.';
+        }
+
+        $subject = $this->kycSubjectUser();
+        if ((string) ($subject->account_status ?? 'approved') === 'pending') {
+            return 'Sua conta ainda não foi aprovada pela plataforma.';
+        }
+
+        return 'Complete a verificação de identidade (KYC) para acessar o painel do infoprodutor.';
     }
 
     /**
@@ -268,6 +446,30 @@ class User extends Authenticatable
         return in_array($status, ['suspended', 'blocked', 'rejected'], true);
     }
 
+    public function getEmailForVerification(): string
+    {
+        return (string) $this->email;
+    }
+
+    public function sendPasswordResetNotification(#[\SensitiveParameter] $token): void
+    {
+        $params = [
+            'token' => $token,
+            'email' => $this->getEmailForPasswordReset(),
+        ];
+        $redirect = app()->bound('password_reset_redirect') ? app('password_reset_redirect') : null;
+        if ($redirect !== null) {
+            $params['redirect'] = $redirect;
+        }
+        $url = url(route('password.reset', $params, false));
+        $expire = (int) config('auth.passwords.'.config('auth.defaults.passwords').'.expire');
+        $tenantId = $this->tenant_id;
+
+        Mail::mailer('smtp')->to($this->getEmailForPasswordReset())->send(
+            new PasswordResetMail($url, $expire, is_int($tenantId) ? $tenantId : null)
+        );
+    }
+
     /**
      * The attributes that should be hidden for serialization.
      *
@@ -283,6 +485,11 @@ class User extends Authenticatable
      *
      * @return array<string, string>
      */
+    public function setEmailAttribute(?string $value): void
+    {
+        $this->attributes['email'] = $value === null ? null : strtolower(trim($value));
+    }
+
     protected function casts(): array
     {
         return [
@@ -292,9 +499,37 @@ class User extends Authenticatable
             'merchant_settlement_overrides' => 'array',
             'merchant_gateway_order' => 'array',
             'payout_settings' => 'array',
+            'cnpj_lookup' => 'array',
+            'pj_conversion' => 'array',
             'birth_date' => 'date',
             'kyc_reviewed_at' => 'datetime',
+            'kyc_needs_document_review' => 'boolean',
+            'kyc_requirements_version' => 'integer',
             'seller_onboarded_at' => 'datetime',
+            'referred_at' => 'datetime',
+            'referral_commission_percent' => 'decimal:4',
+            'privacy_policy_accepted_at' => 'datetime',
+            'terms_accepted_at' => 'datetime',
+            'last_seen_at' => 'datetime',
         ];
+    }
+
+    public function isOnline(int $withinMinutes = 5): bool
+    {
+        if (! $this->last_seen_at) {
+            return false;
+        }
+
+        return $this->last_seen_at->greaterThan(now()->subMinutes($withinMinutes));
+    }
+
+    public function publicUsername(): string
+    {
+        $username = trim((string) ($this->username ?? ''));
+        if ($username !== '') {
+            return $username;
+        }
+
+        return Str::slug((string) $this->name) ?: 'vendedor';
     }
 }

@@ -2,8 +2,10 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Controllers\Concerns\LogsSellerActivity;
 use App\Models\Webhook;
 use App\Models\WebhookLog;
+use App\Services\SellerActivityLogService;
 use App\Support\WebhookUrlValidator;
 use Illuminate\Http\JsonResponse;
 use InvalidArgumentException;
@@ -14,6 +16,8 @@ use Illuminate\Validation\Rule;
 
 class WebhookController extends Controller
 {
+    use LogsSellerActivity;
+
     public function index(): JsonResponse
     {
         $tenantId = auth()->user()->tenant_id;
@@ -79,6 +83,10 @@ class WebhookController extends Controller
 
         $webhook->load('products:id,name');
 
+        $this->logSellerActivity(SellerActivityLogService::INTEGRATION_WEBHOOK_CREATED, $webhook, [
+            'name' => $webhook->name,
+        ]);
+
         return response()->json([
             'webhook' => [
                 'id' => $webhook->id,
@@ -128,6 +136,10 @@ class WebhookController extends Controller
 
         $webhook->load('products:id,name');
 
+        $this->logSellerActivity(SellerActivityLogService::INTEGRATION_WEBHOOK_UPDATED, $webhook, [
+            'name' => $webhook->name,
+        ]);
+
         return response()->json([
             'webhook' => [
                 'id' => $webhook->id,
@@ -148,6 +160,9 @@ class WebhookController extends Controller
     {
         $this->authorizeWebhook($webhook);
 
+        $this->logSellerActivity(SellerActivityLogService::INTEGRATION_WEBHOOK_DELETED, $webhook, [
+            'name' => $webhook->name,
+        ]);
         $webhook->delete();
 
         return response()->noContent();
@@ -189,6 +204,38 @@ class WebhookController extends Controller
                 'qrcode' => 'data:image/png;base64,iVBORw0KGgo=',
                 'copy_paste' => '00020126580014br.gov.bcb.pix...',
                 'transaction_id' => 'txid-exemplo-teste',
+            ];
+        }
+
+        if ($eventSlug === 'carrinho_abandonado') {
+            $payload = [
+                'checkoutSession' => [
+                    'id' => 99901,
+                    'tenant_id' => $webhook->tenant_id,
+                    'product_id' => 'produto-exemplo',
+                    'checkout_slug' => 'exemplo-checkout',
+                    'step' => 'form_filled',
+                    'email' => 'exemplo@email.com',
+                    'name' => 'Cliente Exemplo',
+                    'phone' => '5511999999999',
+                    'customer_ip' => '127.0.0.1',
+                    'utm_source' => 'facebook',
+                    'utm_medium' => 'cpc',
+                    'utm_campaign' => 'teste',
+                    'created_at' => now()->toIso8601String(),
+                    'updated_at' => now()->toIso8601String(),
+                    'product' => [
+                        'id' => 'produto-exemplo',
+                        'name' => 'Produto Exemplo',
+                        'checkout_slug' => 'exemplo-checkout',
+                    ],
+                ],
+                'customer' => [
+                    'name' => 'Cliente Exemplo',
+                    'email' => 'exemplo@email.com',
+                    'phone' => '5511999999999',
+                ],
+                'checkout_link' => rtrim(config('app.url'), '/').'/c/exemplo-checkout',
             ];
         }
 

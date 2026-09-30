@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\Product;
 use App\Models\ProductAffiliateEnrollment;
 use App\Services\StorageService;
+use App\Support\AffiliateCheckoutLinks;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
@@ -37,7 +38,7 @@ class AffiliateProductPanelController extends Controller
         $items = [];
         foreach ($enrollments as $e) {
             $p = $e->product;
-            if (! $p || ! $p->is_active) {
+            if (! $p || ! $p->isAvailableForPurchase()) {
                 continue;
             }
             // Opcional: não listar como "afiliado" o próprio produto da conta (dono = mesmo tenant)
@@ -85,10 +86,16 @@ class AffiliateProductPanelController extends Controller
         $user = $request->user();
         $enrollment = $this->approvedEnrollmentOrAbort($user->id, $produto);
 
-        $checkoutBaseUrl = $produto->checkout_slug ? url('/c/'.$produto->checkout_slug) : '';
-        $affiliateLink = $enrollment->public_ref && $checkoutBaseUrl
-            ? $checkoutBaseUrl.(str_contains($checkoutBaseUrl, '?') ? '&' : '?').'ref='.urlencode((string) $enrollment->public_ref)
-            : null;
+        $produto->loadMissing([
+            'offers' => fn ($q) => $q->orderBy('position')->orderBy('id'),
+            'subscriptionPlans' => fn ($q) => $q->orderBy('position')->orderBy('id'),
+        ]);
+        $offerLinks = AffiliateCheckoutLinks::linksForEnrollment($produto, $enrollment);
+        $mainLink = collect($offerLinks)->firstWhere('type', 'main');
+        $affiliateLink = is_array($mainLink) ? ($mainLink['url'] ?? null) : null;
+        if ($affiliateLink === null) {
+            $affiliateLink = AffiliateCheckoutLinks::mainLink($produto, (string) ($enrollment->public_ref ?? ''));
+        }
 
         $storage = app(StorageService::class);
         $imageUrl = $produto->image ? $storage->url($produto->image) : null;
@@ -104,6 +111,7 @@ class AffiliateProductPanelController extends Controller
                 'id' => $enrollment->id,
                 'public_ref' => $enrollment->public_ref,
                 'affiliate_link' => $affiliateLink,
+                'offer_links' => $offerLinks,
                 'conversion_pixels' => $enrollment->conversion_pixels ?? Product::defaultConversionPixels(),
             ],
         ]);

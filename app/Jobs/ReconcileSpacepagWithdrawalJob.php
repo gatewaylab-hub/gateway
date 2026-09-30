@@ -32,7 +32,9 @@ class ReconcileSpacepagWithdrawalJob implements ShouldQueue
     public function handle(): void
     {
         $withdrawal = Withdrawal::query()->find($this->withdrawalId);
-        if ($withdrawal === null || $withdrawal->status !== 'pending' || $withdrawal->payout_provider !== 'spacepag') {
+        if ($withdrawal === null
+            || ! in_array($withdrawal->status, ['pending', 'processing'], true)
+            || $withdrawal->payout_provider !== 'spacepag') {
             return;
         }
 
@@ -72,6 +74,15 @@ class ReconcileSpacepagWithdrawalJob implements ShouldQueue
             return;
         }
 
+        if ($apiStatus === 'cancelled') {
+            MerchantWithdrawalService::markFailed(
+                $withdrawal->fresh(),
+                'Payout Spacepag cancelado (reconciliação).'
+            );
+
+            return;
+        }
+
         $this->maybeReleaseForRetry();
     }
 
@@ -82,7 +93,13 @@ class ReconcileSpacepagWithdrawalJob implements ShouldQueue
         }
 
         if ($this->attempts() >= 36) {
-            Log::info('ReconcileSpacepagWithdrawalJob: encerrando tentativas', ['withdrawal_id' => $this->withdrawalId]);
+            $withdrawal = Withdrawal::query()->find($this->withdrawalId);
+            if ($withdrawal !== null && in_array($withdrawal->status, ['pending', 'processing'], true)) {
+                MerchantWithdrawalService::markFailed(
+                    $withdrawal->fresh(),
+                    'Payout Spacepag não confirmado após esgotar tentativas de reconciliação.'
+                );
+            }
 
             return;
         }

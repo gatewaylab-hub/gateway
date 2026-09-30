@@ -2,6 +2,9 @@ import { defineConfig } from 'vite';
 import laravel from 'laravel-vite-plugin';
 import vue from '@vitejs/plugin-vue';
 import tailwindcss from '@tailwindcss/vite';
+import { visualizer } from 'rollup-plugin-visualizer';
+
+const analyzeBundle = process.env.ANALYZE === '1' || process.env.ANALYZE === 'true';
 
 export default defineConfig({
     plugins: [
@@ -21,13 +24,67 @@ export default defineConfig({
             },
         }),
         tailwindcss(),
+        ...(analyzeBundle
+            ? [
+                  visualizer({
+                      filename: 'storage/app/bundle-stats.html',
+                      gzipSize: true,
+                      open: false,
+                  }),
+              ]
+            : []),
     ],
     resolve: {
         alias: {
             '@': '/resources/js',
         },
     },
+    build: {
+        rollupOptions: {
+            output: {
+                manualChunks(id) {
+                    if (!id.includes('node_modules')) {
+                        return undefined;
+                    }
+                    if (id.includes('vidstack')) {
+                        return 'vendor-vidstack';
+                    }
+                    if (id.includes('apexcharts') || id.includes('vue3-apexcharts')) {
+                        return 'vendor-charts';
+                    }
+                    if (id.includes('firebase')) {
+                        return 'vendor-firebase';
+                    }
+                    if (id.includes('@codemirror') || id.includes('/codemirror')) {
+                        return 'vendor-codemirror';
+                    }
+                    // Ecossistema Vue em um único chunk — evita dependência circular vendor-vue ↔ vendor-misc
+                    // (que quebra /criar-admin e outras páginas com "Cannot access before initialization").
+                    if (
+                        id.includes('@inertiajs') ||
+                        id.includes('/vue/') ||
+                        id.includes('\\vue\\') ||
+                        id.includes('@vue/') ||
+                        id.includes('pinia') ||
+                        id.includes('radix-vue') ||
+                        id.includes('lucide-vue') ||
+                        id.includes('@floating-ui')
+                    ) {
+                        return 'vendor-vue';
+                    }
+
+                    return undefined;
+                },
+            },
+        },
+    },
     server: {
+        host: '127.0.0.1',
+        port: 5173,
+        strictPort: true,
+        hmr: {
+            host: '127.0.0.1',
+        },
         watch: {
             ignored: ['**/storage/framework/views/**'],
         },

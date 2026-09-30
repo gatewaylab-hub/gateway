@@ -16,14 +16,15 @@ use App\Events\SubscriptionPastDue;
 use App\Events\SubscriptionRenewed;
 use App\Jobs\DispatchWebhookJob;
 use App\Models\Webhook;
+use App\Services\SellerIntegrationVisibility;
 use App\Models\Order;
 use App\Models\CheckoutSession;
 use App\Models\Subscription;
+use App\Support\WebhookCustomerPayload;
 use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Redis;
 use Illuminate\Support\Facades\URL;
 
 class WebhookEventSubscriber
@@ -79,12 +80,19 @@ class WebhookEventSubscriber
                 'count' => $webhooks->count(),
             ]);
 
-            $payload = $this->serializeEventPayload($event);
+            $payload = $event instanceof CartAbandoned
+                ? $this->buildCartAbandonedPayload($event)
+                : $this->serializeEventPayload($event);
             $payload = $this->enrichPayload($event, $payload);
             $dispatchSync = $this->shouldDispatchSync($eventClass);
 
             foreach ($webhooks as $webhook) {
                 if (! $webhook->listensTo($eventClass) || ! $webhook->shouldFireForProduct($productId)) {
+                    continue;
+                }
+
+                $webhookTenantId = $webhook->tenant_id !== null ? (int) $webhook->tenant_id : null;
+                if (! SellerIntegrationVisibility::effectiveForTenant(SellerIntegrationVisibility::WEBHOOK, $webhookTenantId)) {
                     continue;
                 }
 
@@ -117,6 +125,11 @@ class WebhookEventSubscriber
 
     private function shouldDispatchSync(string $eventClass): bool
     {
+        // Pedido pago: entrega imediata (crítico para CRM/integrações); não depender só da fila webhooks.
+        if ($eventClass === OrderCompleted::class) {
+            return true;
+        }
+
         // Em dev/local, é comum não ter worker configurado corretamente; dispara sync para evitar “silêncio”.
         if (app()->environment('local')) {
             return true;
@@ -141,25 +154,12 @@ class WebhookEventSubscriber
             return true;
         }
 
-        // Critical events (approved payments) should fallback to sync when webhook queue is backed up.
-        if ($eventClass === OrderCompleted::class && $this->isWebhookQueueBackedUp()) {
+        // Carrinho abandonado: volume baixo e integrações CRM dependem de entrega imediata.
+        if ($eventClass === CartAbandoned::class) {
             return true;
         }
 
         return false;
-    }
-
-    private function isWebhookQueueBackedUp(): bool
-    {
-        try {
-            $queueName = (string) config('queue.webhooks_queue', 'webhooks');
-            $connection = (string) config('queue.connections.redis.connection', 'default');
-            $size = (int) Redis::connection($connection)->llen("queues:{$queueName}");
-
-            return $size >= 50;
-        } catch (\Throwable) {
-            return false;
-        }
     }
 
     /**
@@ -257,6 +257,52 @@ class WebhookEventSubscriber
     }
 
     /**
+     * Payload enxuto para integrações (evita checkout_config/member_area_config no product).
+     *
+     * @return array<string, mixed>
+     */
+    private function buildCartAbandonedPayload(CartAbandoned $event): array
+    {
+        $session = $event->checkoutSession;
+        $session->loadMissing('product:id,name,checkout_slug');
+
+        $product = $session->product;
+
+        return [
+            'checkoutSession' => [
+                'id' => $session->id,
+                'tenant_id' => $session->tenant_id,
+                'product_id' => $session->product_id,
+                'product_offer_id' => $session->product_offer_id,
+                'subscription_plan_id' => $session->subscription_plan_id,
+                'checkout_slug' => $session->checkout_slug,
+                'session_token' => $session->session_token,
+                'step' => $session->step,
+                'email' => $session->email,
+                'name' => $session->name,
+                'cpf' => $session->cpf,
+                'phone' => $session->phone,
+                'customer_ip' => $session->customer_ip,
+                'order_id' => $session->order_id,
+                'utm_source' => $session->utm_source,
+                'utm_medium' => $session->utm_medium,
+                'utm_campaign' => $session->utm_campaign,
+                'utm_content' => $session->utm_content,
+                'utm_term' => $session->utm_term,
+                'sck' => $session->sck,
+                'src' => $session->src,
+                'created_at' => $session->created_at?->toIso8601String(),
+                'updated_at' => $session->updated_at?->toIso8601String(),
+                'product' => $product ? [
+                    'id' => $product->id,
+                    'name' => $product->name,
+                    'checkout_slug' => $product->checkout_slug,
+                ] : null,
+            ],
+        ];
+    }
+
+    /**
      * @return array<string, mixed>
      */
     private function serializeEventPayload(object $event): array
@@ -303,12 +349,7 @@ class WebhookEventSubscriber
             || $event instanceof BoletoGenerated) {
             $order = $event->order;
             $order->loadMissing(['user', 'product', 'productOffer', 'subscriptionPlan']);
-            $extra['customer'] = [
-                'name' => $order->user?->name ?? '',
-                'email' => $order->email ?? '',
-                'phone' => $order->phone ?? '',
-                'cpf' => $order->cpf ?? '',
-            ];
+            $extra['customer'] = WebhookCustomerPayload::fromOrder($order);
             $slug = $order->getCheckoutSlug();
             $extra['checkout_link'] = $slug ? URL::route('checkout.show', ['slug' => $slug]) : '';
         }
@@ -324,11 +365,10 @@ class WebhookEventSubscriber
         if ($event instanceof CartAbandoned) {
             $session = $event->checkoutSession;
             $session->loadMissing('product');
-            $extra['customer'] = [
-                'name' => $session->name ?? '',
-                'email' => $session->email ?? '',
-                'phone' => '',
-                'cpf' => '',
+            $extra['customer'] = WebhookCustomerPayload::fromCheckoutSession($session);
+            $extra['product'] = [
+                'id' => $session->product?->id ?? $session->product_id,
+                'name' => $session->product?->name ?? '',
             ];
             $slug = $session->checkout_slug ?? $session->product?->checkout_slug ?? '';
             $extra['checkout_link'] = $slug ? URL::route('checkout.show', ['slug' => $slug]) : '';
@@ -338,13 +378,10 @@ class WebhookEventSubscriber
             || $event instanceof SubscriptionCancelled || $event instanceof SubscriptionPastDue) {
             $subscription = $event->subscription;
             $subscription->loadMissing(['user', 'product', 'subscriptionPlan']);
-            $user = $subscription->user;
-            $extra['customer'] = [
-                'name' => $user?->name ?? '',
-                'email' => $user?->email ?? '',
-                'phone' => '',
-                'cpf' => '',
-            ];
+            $extra['customer'] = WebhookCustomerPayload::fromUser(
+                $subscription->user,
+                $subscription->user?->email
+            );
             $slug = $subscription->subscriptionPlan?->checkout_slug
                 ?? $subscription->product?->checkout_slug
                 ?? '';

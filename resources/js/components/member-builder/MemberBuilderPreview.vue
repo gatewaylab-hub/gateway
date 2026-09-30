@@ -2,6 +2,7 @@
 import { computed } from 'vue';
 import { MessageSquare } from 'lucide-vue-next';
 import { getCommunityPageIconComponent } from '@/utils/communityPageIcons';
+import CertificateCanvas from '@/components/member-area/CertificateCanvas.vue';
 
 const props = defineProps({
     mode: { type: String, default: 'area' },
@@ -17,7 +18,12 @@ const props = defineProps({
     communityPages: { type: Array, default: () => [] },
     certificate_enabled: { type: Boolean, default: false },
     can_issue_certificate: { type: Boolean, default: false },
+    platformAppName: { type: String, default: '' },
+    certificateEditable: { type: Boolean, default: false },
+    certificateSelectedField: { type: String, default: null },
 });
+
+const emit = defineEmits(['update:certificate-layout', 'select-certificate-field', 'update:print-format']);
 
 const theme = computed(() => props.config?.theme ?? {});
 const hero = computed(() => props.config?.hero ?? {});
@@ -33,30 +39,24 @@ const sidebarItems = computed(() => sidebar.value?.items ?? [
 ]);
 
 const cssVars = computed(() => ({
-    '--ma-primary': theme.value.primary || '#8A2BE2',
+    '--ma-primary': theme.value.primary || '#0ea5e9',
     '--ma-bg': theme.value.background || '#18181b',
     '--ma-sidebar-bg': theme.value.sidebar_bg || '#27272a',
     '--ma-text': theme.value.text || '#f8fafc',
 }));
 
-const certificate = computed(() => props.config?.certificate ?? {});
-const certificateTitle = computed(() => certificate.value.title || props.productName || 'Nome do curso');
-const certificatePlatformName = computed(() => certificate.value.platform_name || 'Nome da Plataforma');
-const certPrimary = computed(() => certificate.value.primary_color || theme.value.primary || 'var(--ma-primary)');
-const certBgUrl = computed(() => certificate.value.background_image_url || null);
-const certTextColor = computed(() => certificate.value.text_color || '#262626');
-const certTitleColor = computed(() => certificate.value.title_color || null);
-const certSignatureFont = computed(() => certificate.value.signature_font_family || 'Dancing Script');
-const certSignatureFontUrl = computed(() => {
-    const name = certSignatureFont.value;
-    if (!name) return null;
-    return `https://fonts.googleapis.com/css2?family=${encodeURIComponent(name).replace(/%20/g, '+')}&display=swap`;
-});
-const certOverlayEnabled = computed(() => certBgUrl.value && certificate.value.background_overlay_enabled);
-const certOverlayColor = computed(() => certificate.value.background_overlay_color || '#000000');
-const certOverlayOpacity = computed(() => {
-    const raw = certificate.value.background_overlay_opacity ?? 50;
-    return (raw <= 1 ? raw * 100 : raw) / 100;
+const certificatePreview = computed(() => {
+    const cert = { ...(props.config?.certificate ?? {}) };
+    if (!String(cert.platform_name || '').trim()) {
+        cert.platform_name = String(props.platformAppName || '').trim() || 'Getfy';
+    }
+    if (!String(cert.title || '').trim()) {
+        cert.title = props.productName || 'Nome do curso';
+    }
+    if (cert.primary_color == null || cert.primary_color === '') {
+        cert.primary_color = theme.value.primary || '#0ea5e9';
+    }
+    return cert;
 });
 </script>
 
@@ -155,7 +155,12 @@ const certOverlayOpacity = computed(() => {
                                         class="flex w-64 shrink-0 flex-col rounded-xl overflow-hidden bg-zinc-800/50 transition hover:bg-zinc-800"
                                     >
                                         <div :class="[(section.cover_mode === 'horizontal' ? 'aspect-video' : 'aspect-[2/3]'), 'relative flex w-full items-center justify-center overflow-hidden bg-zinc-700']">
-                                            <img v-if="mod.thumbnail" :src="mod.thumbnail" :alt="mod.title" class="absolute inset-0 h-full w-full object-cover" />
+                                            <img
+                                                v-if="(section.section_type ?? 'courses') === 'products' ? (mod.thumbnail || mod.related_product?.image_url) : mod.thumbnail"
+                                                :src="(section.section_type ?? 'courses') === 'products' ? (mod.thumbnail || mod.related_product?.image_url) : mod.thumbnail"
+                                                :alt="mod.title"
+                                                class="absolute inset-0 h-full w-full object-cover"
+                                            />
                                             <svg v-else class="h-12 w-12 text-zinc-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
                                             <div v-if="mod.show_title_on_cover !== false" class="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/85 to-transparent px-3 pb-3 pt-8">
                                                 <p class="truncate text-base font-medium text-white">{{ mod.title }}</p>
@@ -231,97 +236,60 @@ const certOverlayOpacity = computed(() => {
             </div>
         </template>
 
-        <!-- Certificado — preview do certificado -->
+        <!-- Certificado — preview do certificado (mesma folha A4/A3 paisagem do PDF) -->
         <template v-else-if="mode === 'certificate'">
-            <link v-if="certSignatureFontUrl" rel="stylesheet" :href="certSignatureFontUrl" />
             <div class="flex min-h-[500px] flex-col items-center justify-start overflow-auto p-6">
-                <p class="mb-4 text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Preview do certificado</p>
-                <div
-                    class="relative mx-auto w-full max-w-2xl overflow-hidden rounded-2xl border border-zinc-200 p-8 shadow-md dark:border-zinc-500"
-                    :style="{
-                        fontFamily: certificate.font_family || 'sans-serif',
-                        backgroundColor: certBgUrl ? 'transparent' : '#fff',
-                        backgroundImage: certBgUrl ? `url(${certBgUrl})` : 'none',
-                        backgroundSize: certBgUrl ? 'cover' : undefined,
-                        backgroundPosition: certBgUrl ? 'center' : undefined,
-                        '--cert-primary': certPrimary,
-                        '--cert-text': certBgUrl ? (certificate.text_color || '#171717') : certTextColor,
-                        '--cert-title': certBgUrl && certificate.title_color ? certificate.title_color : certPrimary,
-                    }"
-                >
-                    <!-- Cantos em L decorativos -->
-                    <div class="absolute left-0 top-0 h-16 w-16 border-l-4 border-t-4 rounded-tl-lg" style="border-color: var(--cert-primary)" aria-hidden="true" />
-                    <div class="absolute right-0 top-0 h-16 w-16 border-r-4 border-t-4 rounded-tr-lg" style="border-color: var(--cert-primary)" aria-hidden="true" />
-                    <div class="absolute bottom-0 left-0 h-16 w-16 border-b-4 border-l-4 rounded-bl-lg" style="border-color: var(--cert-primary)" aria-hidden="true" />
-                    <div class="absolute bottom-0 right-0 h-16 w-16 border-b-4 border-r-4 rounded-br-lg" style="border-color: var(--cert-primary)" aria-hidden="true" />
-
-                    <!-- Overlay na imagem de fundo -->
-                    <div
-                        v-if="certOverlayEnabled"
-                        class="pointer-events-none absolute inset-0"
-                        style="z-index: 0"
-                        :style="{ backgroundColor: certOverlayColor, opacity: certOverlayOpacity }"
-                        aria-hidden="true"
-                    />
-
-                    <!-- Marca d'água -->
-                    <div
-                        class="pointer-events-none absolute inset-0 flex items-center justify-center opacity-[0.06]"
-                        style="z-index: 0;"
-                    >
-                        <span
-                            class="text-6xl font-bold whitespace-nowrap"
-                            style="color: var(--cert-primary); transform: rotate(-35deg);"
-                        >
-                            {{ certificatePlatformName }}
+                <div class="mb-3 flex w-full max-w-3xl flex-wrap items-center justify-between gap-2">
+                    <p class="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                        Preview do certificado
+                        <span class="ml-1 font-normal normal-case">
+                            ({{ (certificatePreview.print_format === 'A3' ? 'A3' : 'A4') }} paisagem)
                         </span>
+                    </p>
+                    <div
+                        v-if="certificateEditable"
+                        class="inline-flex rounded-lg border border-zinc-300 bg-white p-0.5 text-xs dark:border-zinc-600 dark:bg-zinc-800"
+                    >
+                        <button
+                            type="button"
+                            class="rounded-md px-2.5 py-1 font-medium transition"
+                            :class="(certificatePreview.print_format || 'A4') !== 'A3'
+                                ? 'bg-sky-500 text-white'
+                                : 'text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-700'"
+                            @click="emit('update:print-format', 'A4')"
+                        >
+                            A4
+                        </button>
+                        <button
+                            type="button"
+                            class="rounded-md px-2.5 py-1 font-medium transition"
+                            :class="certificatePreview.print_format === 'A3'
+                                ? 'bg-sky-500 text-white'
+                                : 'text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-700'"
+                            @click="emit('update:print-format', 'A3')"
+                        >
+                            A3
+                        </button>
                     </div>
-
-                    <div class="relative" style="z-index: 1;">
-                        <!-- Cabeçalho: ícone + CERTIFICADO DE CONCLUSÃO -->
-                        <div class="flex flex-col items-center text-center">
-                            <div class="relative flex h-14 w-14 items-center justify-center rounded-full text-[var(--cert-primary)]">
-                                <div class="absolute inset-0 rounded-full" style="background-color: var(--cert-primary); opacity: 0.15" aria-hidden="true" />
-                                <svg class="relative z-10 h-8 w-8" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4M7.835 4.697a3.42 3.42 0 001.946-.806 3.42 3.42 0 014.438 0 3.42 3.42 0 001.946.806 3.42 3.42 0 013.138 3.138 3.42 3.42 0 00.806 1.946 3.42 3.42 0 010 4.438 3.42 3.42 0 00-.806 1.946 3.42 3.42 0 01-3.138 3.138 3.42 3.42 0 00-1.946.806 3.42 3.42 0 01-4.438 0 3.42 3.42 0 00-1.946-.806 3.42 3.42 0 01-3.138-3.138 3.42 3.42 0 00-.806-1.946 3.42 3.42 0 010-4.438 3.42 3.42 0 00.806-1.946 3.42 3.42 0 013.138-3.138z" />
-                                </svg>
-                            </div>
-                            <p class="mt-3 text-xs font-semibold uppercase tracking-[0.2em]" style="color: var(--cert-text)">
-                                Certificado de conclusão
-                            </p>
-                        </div>
-
-                        <!-- Título do curso -->
-                        <h2 class="mt-6 text-center text-2xl font-bold" style="color: var(--cert-title)">
-                            {{ certificateTitle }}
-                        </h2>
-
-                        <!-- Bloco central -->
-                        <div class="mt-8 text-center" style="color: var(--cert-text)">
-                            <p>Certificamos que</p>
-                            <p class="mt-2">
-                                <span class="inline-block border-b-2 px-1 font-bold" style="border-color: var(--cert-primary); color: var(--cert-text)">Nome do Aluno</span>
-                            </p>
-                            <p class="mt-3">
-                                completou com sucesso o curso em <strong>{{ certificatePlatformName }}</strong>
-                            </p>
-                            <p class="mt-2" style="color: var(--cert-text); opacity: 0.9">
-                                em 24/02/2025 14:30
-                            </p>
-                        </div>
-
-                        <!-- Rodapé em duas colunas -->
-                        <div class="mt-12 grid grid-cols-2 gap-8 border-t pt-8" style="border-color: rgba(0,0,0,0.12); color: var(--cert-text)">
-                            <div>
-                                <p class="text-xs font-medium uppercase tracking-wide" style="opacity: 0.85">Assinatura do Instrutor</p>
-                                <p class="mt-1 font-medium" :style="{ fontFamily: certSignatureFont, color: 'var(--cert-text)' }">{{ certificate.signature_text || 'Instrutor' }}</p>
-                            </div>
-                            <div class="text-right">
-                                <p class="font-semibold">{{ certificatePlatformName }}</p>
-                                <p class="text-sm" style="opacity: 0.85">Plataforma de Cursos</p>
-                            </div>
-                        </div>
-                    </div>
+                </div>
+                <p
+                    v-if="certificateEditable && certificatePreview.layout?.custom_positions"
+                    class="mb-3 text-center text-xs text-zinc-500 dark:text-zinc-400"
+                >
+                    Arraste os campos no certificado ou use os controles à esquerda.
+                </p>
+                <div class="w-full max-w-3xl">
+                    <CertificateCanvas
+                        mode="preview"
+                        :certificate="certificatePreview"
+                        recipient-name="Nome do Aluno"
+                        :product-name="productName"
+                        :print-format="certificatePreview.print_format === 'A3' ? 'A3' : 'A4'"
+                        :editable="certificateEditable && !!certificatePreview.layout?.custom_positions"
+                        :selected-field="certificateSelectedField"
+                        @update:layout="emit('update:certificate-layout', $event)"
+                        @select-field="emit('select-certificate-field', $event)"
+                    />
                 </div>
             </div>
         </template>
@@ -331,7 +299,7 @@ const certOverlayOpacity = computed(() => {
             <div
                 class="relative flex min-h-full h-full w-full flex-col items-center justify-center bg-cover bg-center px-4 py-12"
                 :style="{
-                    '--ma-primary': login.primary_color || '#8A2BE2',
+                    '--ma-primary': login.primary_color || '#0ea5e9',
                     backgroundColor: login.background_color || '#18181b',
                     backgroundImage: login.background_image ? `url(${login.background_image})` : 'none',
                 }"
@@ -372,7 +340,7 @@ const certOverlayOpacity = computed(() => {
                             type="button"
                             disabled
                             class="flex h-12 w-full items-center justify-center rounded-xl font-semibold text-white"
-                            :style="{ backgroundColor: login.primary_color || '#8A2BE2' }"
+                            :style="{ backgroundColor: login.primary_color || '#0ea5e9' }"
                         >
                             Entrar
                         </button>

@@ -6,6 +6,11 @@ cd /var/www/html
 mkdir -p storage/framework/cache/data storage/framework/sessions storage/framework/views bootstrap/cache .docker
 chmod -R 777 storage bootstrap/cache .docker 2>/dev/null || true
 
+# Caddy (compose.caddy) importa este arquivo; vazio quebra o import — placeholder até docker-setup.
+if [ ! -s .docker/Caddyfile.domains ] 2>/dev/null; then
+  printf '%s\n' '# Blocos de domínio HTTPS são gravados pelo /docker-setup.' > .docker/Caddyfile.domains
+fi
+
 if [ ! -f .docker/app.key ]; then
   php -r 'echo "base64:".base64_encode(random_bytes(32));' > .docker/app.key
 fi
@@ -13,13 +18,6 @@ fi
 if [ ! -f .env ]; then
   cp .env.example .env
 fi
-
-# .env precisa ser persistente no Docker (containers são efêmeros). O volume .docker é persistente.
-# Se existir um arquivo persistido, sincroniza para o .env atual e garante permissões de escrita para o PHP-FPM.
-if [ -f .docker/app.env ]; then
-  cp .docker/app.env .env
-fi
-chmod 666 .env 2>/dev/null || true
 
 rm -f public/hot 2>/dev/null || true
 
@@ -65,6 +63,78 @@ fi
 # Se houver cache de config, pode "prender" env antigo. Limpa de forma segura (sem falhar o boot).
 rm -f bootstrap/cache/config.php 2>/dev/null || true
 
+# vendor/ pode estar ausente no volume nomeado de dev (getfy_dev_vendor) ou em workers
+# que sobem em paralelo com o app. Lock em .docker (bind mount compartilhado).
+ensure_vendor() {
+  if [ -f vendor/autoload.php ]; then
+    return 0
+  fi
+
+  mkdir -p .docker
+  waited=0
+  while [ -f .docker/composer.installing ] && [ "$waited" -lt 180 ]; do
+    sleep 1
+    waited=$((waited + 1))
+    if [ -f vendor/autoload.php ]; then
+      return 0
+    fi
+  done
+
+  if [ -f vendor/autoload.php ]; then
+    return 0
+  fi
+
+  echo "vendor/ ausente — instalando dependências Composer..."
+  printf '%s' "$$" > .docker/composer.installing
+  # shellcheck disable=SC2064
+  trap 'rm -f .docker/composer.installing' EXIT INT TERM
+  git config --global --add safe.directory /var/www/html 2>/dev/null || true
+
+  composer_ok=0
+  if [ "${APP_ENV:-production}" = "local" ]; then
+    if composer install --no-interaction --prefer-dist --optimize-autoloader --no-scripts; then
+      composer_ok=1
+    fi
+  else
+    if composer install --no-dev --no-interaction --prefer-dist --optimize-autoloader --no-scripts; then
+      composer_ok=1
+    fi
+  fi
+  rm -f .docker/composer.installing
+  trap - EXIT INT TERM
+
+  if [ "$composer_ok" -ne 1 ]; then
+    echo "composer install falhou. A imagem Docker deve usar PHP 8.3+ (rebuild: docker compose build --no-cache app)." >&2
+    return 1
+  fi
+
+  php artisan package:discover --ansi 2>/dev/null || true
+  return 0
+}
+
+ensure_vendor || exit 1
+
+# Worker/scheduler: .env NÃO é volume compartilhado (só storage + .docker). Sem sync do
+# APP_KEY, decrypt de GatewayCredential falha e reconciliação/webhooks inbound viram no-op
+# silencioso — enquanto "Reconciliar agora" no container app continua funcionando.
+# Não rodar o setup completo aqui (regravar .env do app reinicia php artisan serve).
+if [ "${GETFY_RUN_SETUP:-true}" != "true" ]; then
+  if [ -f .docker/app.key ]; then
+    KEY="$(tr -d '\n\r' < .docker/app.key)"
+    if [ -n "$KEY" ]; then
+      export APP_KEY="$KEY"
+      if [ -f .env ]; then
+        if grep -qE '^APP_KEY=' .env 2>/dev/null; then
+          sed -i "s|^APP_KEY=.*|APP_KEY=$KEY|" .env
+        else
+          echo "APP_KEY=$KEY" >> .env
+        fi
+      fi
+    fi
+  fi
+  exec "$@"
+fi
+
 php -r '
 $envFile = ".env";
 $content = file_exists($envFile) ? (string) file_get_contents($envFile) : "";
@@ -107,7 +177,7 @@ $scheme = strtolower((string) ($parts["scheme"] ?? ""));
 $sessionSecure = $setupDone && ($scheme === "https");
 $vars = [
     "APP_NAME" => getenv("APP_NAME") ?: "Getfy",
-    "APP_ENV" => getenv("APP_ENV") ?: "local",
+    "APP_ENV" => getenv("APP_ENV") ?: "production",
     "APP_DEBUG" => getenv("APP_DEBUG") ?: "false",
     "APP_URL" => $appUrl ?: null,
     "APP_KEY" => getenv("APP_KEY") ?: (trim((string) @file_get_contents(".docker/app.key")) ?: ""),
@@ -130,7 +200,15 @@ $vars = [
     "REDIS_HOST" => getenv("REDIS_HOST") ?: "redis",
     "REDIS_PORT" => getenv("REDIS_PORT") ?: "6379",
     "REDIS_PASSWORD" => getenv("REDIS_PASSWORD") ?: "null",
+    "TRUSTED_PROXIES" => getenv("TRUSTED_PROXIES") ?: ($setupDone ? "*" : null),
 ];
+// Entre containers: postgres escuta em 5432 (5433 é só publish no host).
+if (($vars["DB_HOST"] ?? "") === "postgres" && (string) ($vars["DB_PORT"] ?? "") !== "5432") {
+    $vars["DB_PORT"] = "5432";
+}
+if (in_array(($vars["DB_HOST"] ?? ""), ["mysql", "mariadb"], true) && (string) ($vars["DB_PORT"] ?? "") !== "3306") {
+    $vars["DB_PORT"] = "3306";
+}
 foreach ($vars as $key => $value) {
     if ($value === null) {
         continue;
@@ -153,6 +231,20 @@ foreach ($vars as $key => $value) {
 file_put_contents($envFile, $content);
 '
 
+if ! grep -qE '^APP_KEY=base64:' .env 2>/dev/null; then
+  if [ ! -f .docker/app.key ]; then
+    php -r 'echo "base64:".base64_encode(random_bytes(32));' > .docker/app.key
+  fi
+  KEY="$(tr -d '\n\r' < .docker/app.key)"
+  if [ -n "$KEY" ]; then
+    if grep -qE '^APP_KEY=' .env 2>/dev/null; then
+      sed -i "s|^APP_KEY=.*|APP_KEY=$KEY|" .env
+    else
+      echo "APP_KEY=$KEY" >> .env
+    fi
+  fi
+fi
+
 DB_CONNECTION="${DB_CONNECTION:-pgsql}"
 DB_DATABASE="${DB_DATABASE:-getfy}"
 DB_USERNAME="${DB_USERNAME:-getfy}"
@@ -161,9 +253,20 @@ DB_PASSWORD="${DB_PASSWORD:-getfy}"
 if [ "$DB_CONNECTION" = "pgsql" ]; then
   DB_HOST="${DB_HOST:-postgres}"
   DB_PORT="${DB_PORT:-5432}"
+  # Porta publicada no host (ex. 5433) não funciona entre containers.
+  if [ "$DB_HOST" = "postgres" ] && [ "$DB_PORT" != "5432" ]; then
+    echo "Aviso: DB_HOST=postgres com DB_PORT=${DB_PORT} → forçando DB_PORT=5432 (porta interna Docker)."
+    DB_PORT="5432"
+    export DB_PORT
+  fi
 else
   DB_HOST="${DB_HOST:-mysql}"
   DB_PORT="${DB_PORT:-3306}"
+  if { [ "$DB_HOST" = "mysql" ] || [ "$DB_HOST" = "mariadb" ]; } && [ "$DB_PORT" != "3306" ]; then
+    echo "Aviso: DB_HOST=${DB_HOST} com DB_PORT=${DB_PORT} → forçando DB_PORT=3306 (porta interna Docker)."
+    DB_PORT="3306"
+    export DB_PORT
+  fi
 fi
 
 DB_OK=0
@@ -190,7 +293,11 @@ fi
 # na camada efêmera dele e o worker reiniciaria em loop (vendor ausente).
 GETFY_VENDOR_JUST_INSTALLED=0
 if [ ! -f vendor/autoload.php ]; then
-  composer install --no-dev --no-interaction --prefer-dist --optimize-autoloader --no-scripts
+  git config --global --add safe.directory /var/www/html 2>/dev/null || true
+  if ! composer install --no-dev --no-interaction --prefer-dist --optimize-autoloader --no-scripts; then
+    echo "composer install falhou. A imagem Docker deve usar PHP 8.3+ (rebuild: docker compose build --no-cache app)." >&2
+    exit 1
+  fi
   GETFY_VENDOR_JUST_INSTALLED=1
 fi
 
@@ -199,6 +306,7 @@ if [ "${GETFY_RUN_SETUP:-true}" = "true" ]; then
   php artisan migrate --force
   if ! php -r '
 require "vendor/autoload.php";
+$valid = false;
 $c = (string) @file_get_contents(".env");
 $c = str_replace("\r\n", "\n", $c);
 $val = static function (string $c, string $k): ?string {
@@ -208,12 +316,39 @@ $val = static function (string $c, string $k): ?string {
 };
 $pub = $val($c, "PWA_VAPID_PUBLIC");
 $priv = $val($c, "PWA_VAPID_PRIVATE");
-exit(\App\Support\VapidEnvKeys::normalizedPairLooksValid($pub, $priv) ? 0 : 1);
+if (\App\Support\VapidEnvKeys::normalizedPairLooksValid($pub, $priv)) {
+  $valid = true;
+}
+if (! $valid) {
+  try {
+    $boot = require "bootstrap/app.php";
+    $boot->make(\Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+    $row = \App\Models\BrandingSetting::query()->whereNull("tenant_id")->first();
+    $data = is_array($row?->data) ? $row->data : [];
+    $merged = \App\Support\PanelPushSettings::mergeWithEnvFallback($data);
+    if (\App\Support\VapidEnvKeys::normalizedPairLooksValid($merged["pwa_vapid_public"] ?? null, $merged["pwa_vapid_private"] ?? null)) {
+      $valid = true;
+    }
+    if (($merged["push_provider"] ?? "vapid") === "fcm"
+        && ! empty($merged["firebase_service_account"])
+        && ! empty($merged["firebase_api_key"])
+        && ! empty($merged["firebase_project_id"])) {
+      $valid = true;
+    }
+  } catch (\Throwable $e) {
+    // schema ainda não pronto
+  }
+}
+exit($valid ? 0 : 1);
 ' >/dev/null 2>&1; then
-    php artisan pwa:vapid || true
+    php artisan pwa:ensure-vapid || true
   fi
 elif [ "$GETFY_VENDOR_JUST_INSTALLED" = "1" ]; then
   php artisan package:discover --ansi
+fi
+
+if [ ! -L public/storage ] && [ ! -d public/storage ]; then
+  php artisan storage:link 2>/dev/null || true
 fi
 
 # Persiste VAPID em arquivo compartilhado no volume .docker para que "queue" e "app" usem as mesmas chaves.

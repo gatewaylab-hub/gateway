@@ -1,5 +1,5 @@
 <script setup>
-import { ref, reactive, computed, watch, onMounted, nextTick, toRaw } from 'vue';
+import { ref, reactive, computed, watch, onMounted, onUnmounted, nextTick, toRaw } from 'vue';
 import { useForm, Link } from '@inertiajs/vue3';
 import LayoutInfoprodutor from '@/Layouts/LayoutInfoprodutor.vue';
 import { useSidebar } from '@/composables/useSidebar';
@@ -48,7 +48,6 @@ const sectionsOpen = ref({
     redirect: true,
     seo: true,
     support_button: true,
-    footer: true,
     exit_popup: true,
 });
 
@@ -64,7 +63,7 @@ const configForm = reactive({
     },
     appearance: {
         background_color: props.config?.appearance?.background_color ?? '#E3E3E3',
-        primary_color: props.config?.appearance?.primary_color ?? '#8A2BE2',
+        primary_color: props.config?.appearance?.primary_color ?? '#0ea5e9',
         order_bump_color: props.config?.appearance?.order_bump_color ?? '#F59E0B',
         banners: Array.isArray(props.config?.appearance?.banners)
             ? [...props.config.appearance.banners]
@@ -160,6 +159,13 @@ const form = useForm({
 
 function submit() {
     const config = JSON.parse(JSON.stringify(configForm));
+    // Rodapé personalizado desativado: infoprodutor não edita; logo da plataforma é fixa no checkout
+    config.footer = {
+        enabled: false,
+        logo_url: '',
+        support_email: '',
+        text: '',
+    };
     // Preservar upsell/downsell (configurados na aba do produto, não no Builder)
     if (props.config?.upsell) config.upsell = props.config.upsell;
     if (props.config?.downsell) config.downsell = props.config.downsell;
@@ -224,20 +230,74 @@ const previewIframeUrl = computed(() => {
 });
 
 const PREVIEW_MESSAGE_TYPE = 'checkout-builder-preview-config';
+const PREVIEW_READY_TYPE = 'checkout-builder-preview-ready';
+const PREVIEW_STORAGE_KEY = 'checkout-builder-live-preview-v1';
 const previewIframeRef = ref(null);
-const previewDebounceMs = 200;
+const previewDebounceMs = 80;
+
+function clonePreviewConfig() {
+    const config = JSON.parse(JSON.stringify(toRaw(configForm)));
+    if (props.config?.upsell) config.upsell = props.config.upsell;
+    if (props.config?.downsell) config.downsell = props.config.downsell;
+    return config;
+}
+
+function persistPreviewConfig(config) {
+    try {
+        localStorage.setItem(
+            PREVIEW_STORAGE_KEY,
+            JSON.stringify({ t: Date.now(), config })
+        );
+    } catch (_) {}
+}
+
+function applyPreviewToIframeWindow(win, config) {
+    if (!win) return false;
+    let applied = false;
+
+    try {
+        if (typeof win.__applyCheckoutBuilderPreview === 'function') {
+            win.__applyCheckoutBuilderPreview(config);
+            applied = true;
+        }
+    } catch (_) {}
+
+    try {
+        win.postMessage({ type: PREVIEW_MESSAGE_TYPE, config }, '*');
+        applied = true;
+    } catch (_) {}
+
+    /** Fallback visual imediato (mesma origem): força bg/primary no DOM do iframe. */
+    try {
+        const doc = win.document;
+        const root = doc?.getElementById('getfy-checkout-root');
+        const appearance = config?.appearance || {};
+        if (root && appearance.background_color) {
+            root.style.backgroundColor = appearance.background_color;
+            applied = true;
+        }
+        if (doc && appearance.primary_color) {
+            doc.documentElement.style.setProperty('--checkout-preview-primary', appearance.primary_color);
+            const buttons = doc.querySelectorAll('[data-checkout="form"] button[type="submit"], [style*="background"]');
+            buttons.forEach((el) => {
+                if (el instanceof HTMLElement && el.tagName === 'BUTTON' && el.type === 'submit') {
+                    el.style.backgroundColor = appearance.primary_color;
+                }
+            });
+        }
+    } catch (_) {}
+
+    return applied;
+}
 
 function sendPreviewConfig() {
-    const win = previewIframeRef.value?.contentWindow;
-    if (!win || !previewIframeUrl.value) return;
-    try {
-        const config = JSON.parse(JSON.stringify(toRaw(configForm)));
-        if (props.config?.upsell) config.upsell = props.config.upsell;
-        if (props.config?.downsell) config.downsell = props.config.downsell;
-        const payload = { type: PREVIEW_MESSAGE_TYPE, config };
-        /** `*` evita falha quando a origem efetiva do iframe difere da URL do src (redirect, www, etc.). O iframe valida `event.origin`. */
-        win.postMessage(payload, '*');
-    } catch (_) {}
+    const iframeEl = previewIframeRef.value;
+    const win = iframeEl?.contentWindow;
+    if (!previewIframeUrl.value) return;
+    const config = clonePreviewConfig();
+    persistPreviewConfig(config);
+    if (!win) return;
+    applyPreviewToIframeWindow(win, config);
 }
 
 let previewDebounceTimer = null;
@@ -249,24 +309,38 @@ function schedulePreviewUpdate() {
     }, previewDebounceMs);
 }
 
-/** Snapshot estável: `watch` em `reactive()` nem sempre dispara em todas as mutações aninhadas; stringify garante o disparo. */
 watch(
-    () => JSON.stringify(toRaw(configForm)),
+    () => JSON.stringify(configForm),
     () => schedulePreviewUpdate()
 );
+
+function onPreviewBridgeMessage(event) {
+    if (event?.data?.type !== PREVIEW_READY_TYPE) return;
+    if (event.source !== previewIframeRef.value?.contentWindow) return;
+    sendPreviewConfig();
+    [40, 160, 400].forEach((ms) => setTimeout(() => sendPreviewConfig(), ms));
+}
 
 const { setExpanded } = useSidebar();
 const { t } = useI18n();
 function onPreviewIframeLoad() {
     sendPreviewConfig();
-    /** Reenvios: o listener no checkout pode registrar depois do primeiro postMessage no evento load. */
-    [30, 120, 400].forEach((ms) => setTimeout(() => sendPreviewConfig(), ms));
+    [30, 120, 400, 1000, 2000].forEach((ms) => setTimeout(() => sendPreviewConfig(), ms));
 }
 
 onMounted(() => {
     setExpanded(false);
+    window.addEventListener('message', onPreviewBridgeMessage);
     schedulePreviewUpdate();
     nextTick(() => sendPreviewConfig());
+});
+
+onUnmounted(() => {
+    window.removeEventListener('message', onPreviewBridgeMessage);
+    if (previewDebounceTimer) clearTimeout(previewDebounceTimer);
+    try {
+        localStorage.removeItem(PREVIEW_STORAGE_KEY);
+    } catch (_) {}
 });
 
 const previewViewMode = ref('desktop');
@@ -282,7 +356,7 @@ const inputClass =
 </script>
 
 <template>
-    <div class="flex h-[calc(100vh-4.5rem)] min-h-0 flex-col gap-6">
+    <div class="flex min-h-0 flex-col gap-6 max-lg:h-[calc(100dvh-11rem)] lg:h-[calc(100dvh-4.5rem)]">
         <div class="shrink-0">
             <nav class="text-sm text-zinc-500 dark:text-zinc-400" aria-label="Breadcrumb">
                 <Link href="/produtos" class="hover:text-zinc-700 dark:hover:text-zinc-300">Produtos</Link>
@@ -297,7 +371,12 @@ const inputClass =
 
         <div class="flex min-h-0 flex-1 flex-col gap-6 lg:flex-row">
             <!-- Sidebar esquerda: rolagem apenas aqui -->
-            <div class="w-full shrink-0 space-y-4 overflow-y-auto lg:w-[380px]">
+            <div
+                class="min-h-0 w-full flex-1 space-y-4 overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch] lg:flex-none lg:shrink-0 lg:w-[380px]"
+                @input="schedulePreviewUpdate"
+                @change="schedulePreviewUpdate"
+                @click="schedulePreviewUpdate"
+            >
                 <!-- Tabs -->
                 <div
                     class="flex flex-wrap gap-1 rounded-xl border border-zinc-200 bg-white p-1 dark:border-zinc-700 dark:bg-zinc-800"
@@ -761,41 +840,6 @@ const inputClass =
                             </div>
                         </div>
                     </div>
-                    <!-- Rodapé do checkout -->
-                    <div class="rounded-2xl border border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-800">
-                        <button
-                            type="button"
-                            class="flex w-full items-center justify-between gap-2 px-4 py-3 text-left font-semibold text-zinc-900 dark:text-white"
-                            @click="toggleSection('footer')"
-                        >
-                            <span class="flex items-center gap-2">Rodapé do checkout</span>
-                            <ChevronDown v-if="sectionsOpen.footer" class="h-5 w-5 shrink-0" />
-                            <ChevronRight v-else class="h-5 w-5 shrink-0" />
-                        </button>
-                        <div v-show="sectionsOpen.footer" class="border-t border-zinc-200 px-4 py-4 dark:border-zinc-700">
-                            <div class="space-y-4">
-                                <Toggle v-model="configForm.footer.enabled" label="Ativar rodapé personalizado" />
-                                <template v-if="configForm.footer.enabled">
-                                    <div>
-                                        <ImageUpload
-                                            v-model="configForm.footer.logo_url"
-                                            :upload-url="uploadUrl"
-                                            label="Logo do rodapé (opcional)"
-                                            recommended-size="240×80 px (horizontal)"
-                                        />
-                                    </div>
-                                    <div>
-                                        <label class="mb-1.5 block text-sm font-medium text-zinc-700 dark:text-zinc-300">Nome/Texto</label>
-                                        <input v-model="configForm.footer.text" type="text" :class="inputClass" placeholder="Ex.: Minha Empresa" />
-                                    </div>
-                                    <div>
-                                        <label class="mb-1.5 block text-sm font-medium text-zinc-700 dark:text-zinc-300">E-mail de suporte</label>
-                                        <input v-model="configForm.footer.support_email" type="email" :class="inputClass" placeholder="suporte@exemplo.com" />
-                                    </div>
-                                </template>
-                            </div>
-                        </div>
-                    </div>
                     <!-- Botão de suporte -->
                     <div class="rounded-2xl border border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-800">
                         <button
@@ -1040,8 +1084,8 @@ const inputClass =
                 </Button>
             </div>
 
-            <!-- Área direita: preview fixo (sem rolagem) -->
-            <div class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-zinc-200 bg-zinc-50/50 dark:border-zinc-700 dark:bg-zinc-800/50">
+            <!-- Área direita: preview (oculto no mobile para liberar rolagem do painel de configuração) -->
+            <div class="hidden min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-zinc-200 bg-zinc-50/50 dark:border-zinc-700 dark:bg-zinc-800/50 lg:flex">
                 <div class="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-zinc-200 px-4 py-2 dark:border-zinc-700">
                     <div>
                         <p class="text-sm font-medium text-zinc-700 dark:text-zinc-300">Preview em tempo real</p>

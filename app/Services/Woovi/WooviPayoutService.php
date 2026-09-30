@@ -9,6 +9,8 @@ use App\Models\Withdrawal;
 use App\Services\EffectiveMerchantFees;
 use App\Services\Payout\GatewayPayoutEconomics;
 use App\Services\Payout\PayoutUserSettings;
+use App\Services\Payout\WithdrawalPayoutDestination;
+use App\Services\Withdrawal\WithdrawalMinimumService;
 
 class WooviPayoutService
 {
@@ -44,7 +46,7 @@ class WooviPayoutService
         }
 
         $economics = GatewayPayoutEconomics::fromCredentialsArray('woovi', $credentials);
-        $requiredNet = $economics['required_min_net'];
+        $requiredNet = WithdrawalMinimumService::effectiveRequiredMinNet($economics);
         $minCents = (int) max(1, (int) round($requiredNet * 100));
         $apiAmount = GatewayPayoutEconomics::transferAmountBrlForApi($net, $economics['admin_fee_payout_brl']);
         $amountCents = (int) round($net * 100);
@@ -60,7 +62,8 @@ class WooviPayoutService
         }
 
         $settings = is_array($owner->payout_settings) ? $owner->payout_settings : [];
-        $pixKey = PayoutUserSettings::pixKey($settings);
+        $fromWithdrawal = WithdrawalPayoutDestination::fromWithdrawal($withdrawal);
+        $pixKey = $fromWithdrawal['pix_key'] ?? PayoutUserSettings::pixKey($settings);
         if ($pixKey === '') {
             return ['ok' => false, 'error' => 'Cadastre a chave PIX de destino no Financeiro antes de solicitar o saque.'];
         }

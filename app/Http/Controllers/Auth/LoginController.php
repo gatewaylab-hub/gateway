@@ -2,19 +2,30 @@
 
 namespace App\Http\Controllers\Auth;
 
+use App\Http\Controllers\Concerns\ClearsAuthSessionCookies;
+use App\Http\Controllers\Concerns\HandlesLoginTotpChallenge;
+use App\Http\Controllers\Concerns\ValidatesAuthTurnstile;
 use App\Http\Controllers\Controller;
 use App\Models\User;
 use App\Models\TeamAuditLog;
 use App\Services\MemberAreaResolver;
+use App\Services\SellerActivityLogService;
+use App\Services\Platform\PlatformTotpService;
 use App\Support\DockerSetupState;
+use App\Support\LoginTurnstileSettings;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Inertia\Inertia;
 use Inertia\Response;
+use Symfony\Component\HttpFoundation\Response as HttpResponse;
 
 class LoginController extends Controller
 {
+    use ClearsAuthSessionCookies;
+    use HandlesLoginTotpChallenge;
+    use ValidatesAuthTurnstile;
+
     /**
      * Exibe o login da plataforma ou, se o host for de área de membros (subdomínio/domínio próprio),
      * delega para o login da área de membros do produto.
@@ -41,10 +52,22 @@ class LoginController extends Controller
             ]);
         }
 
-        return Inertia::render('Auth/Login');
+        // Evita redirecionar para URL antiga (ex.: /produtos/.../edit) após login via Inertia.
+        // Mantém intended se for checkout (/c/...) para voltar após entrar.
+        $intended = $request->session()->get('url.intended');
+        $redirect = $request->query('redirect');
+        if (is_string($redirect) && str_starts_with($redirect, '/c/')) {
+            $request->session()->put('url.intended', $redirect);
+        } elseif (! is_string($intended) || ! str_starts_with($intended, '/c/')) {
+            $request->session()->forget('url.intended');
+        }
+
+        return Inertia::render('Marketplace/Auth/Login', [
+            'login_turnstile' => LoginTurnstileSettings::publicConfig(),
+        ]);
     }
 
-    public function login(Request $request): RedirectResponse
+    public function login(Request $request): RedirectResponse|HttpResponse
     {
         if (DockerSetupState::isDocker() && ! DockerSetupState::isSetupDone()) {
             return redirect('/docker-setup');
@@ -65,11 +88,17 @@ class LoginController extends Controller
         $credentials = $request->validate([
             'email' => ['required', 'email'],
             'password' => ['required'],
+            'turnstile_token' => ['nullable', 'string', 'max:2048'],
         ]);
 
-        if (Auth::attempt($credentials, (bool) $request->boolean('remember'))) {
-            $request->session()->regenerate();
+        if ($turnstileError = $this->validateLoginTurnstile($request)) {
+            return $turnstileError;
+        }
+
+        if (Auth::attempt($request->only('email', 'password'), (bool) $request->boolean('remember'))) {
             $user = Auth::user();
+            // Contas do painel operador não entram por /login — resposta idêntica a senha errada
+            // (não revelar existência de conta de operador nem o path /plataforma/login).
             if ($user && $user->canAccessPlatformPanel()) {
                 Auth::logout();
                 $request->session()->invalidate();
@@ -79,6 +108,27 @@ class LoginController extends Controller
                     'email' => 'Credenciais inválidas.',
                 ])->onlyInput('email');
             }
+            if ($user && $user->canAccessSellerPanel() && $user->sellerAccountAccessBlocked()) {
+                Auth::logout();
+                $request->session()->invalidate();
+                $request->session()->regenerateToken();
+
+                return back()->withErrors([
+                    'email' => 'Conta suspensa ou bloqueada. Contate o suporte.',
+                ])->onlyInput('email');
+            }
+            if ($user instanceof User && PlatformTotpService::requiresLoginChallenge($user)) {
+                return $this->redirectToLoginTotpChallenge(
+                    $request,
+                    $user,
+                    (bool) $request->boolean('remember'),
+                    'seller',
+                    'login.two-factor',
+                    $user->canAccessSellerPanel() ? '/dashboard' : '/painel-cliente',
+                );
+            }
+
+            $request->session()->regenerate();
             if ($user && $user->tenant_id && $user->canAccessSellerPanel()) {
                 TeamAuditLog::create([
                     'tenant_id' => $user->tenant_id,
@@ -91,31 +141,29 @@ class LoginController extends Controller
                     'ip' => $request->ip(),
                     'user_agent' => (string) $request->userAgent(),
                 ]);
+                SellerActivityLogService::record(
+                    actor: $user,
+                    action: SellerActivityLogService::AUTH_LOGIN,
+                    request: $request,
+                );
             }
             if ($user->canAccessSellerPanel()) {
-                if ($user->sellerAccountAccessBlocked()) {
-                    Auth::logout();
-                    $request->session()->invalidate();
-                    $request->session()->regenerateToken();
-
-                    return back()->withErrors([
-                        'email' => 'Conta suspensa ou bloqueada. Contate o suporte.',
-                    ])->onlyInput('email');
-                }
-
                 $request->session()->put('panel_context', 'seller');
 
-                return redirect()->intended('/dashboard');
+                return $this->inertiaOrRedirectAfterLogin($request, '/dashboard');
             }
 
             if ($user->canAccessCustomerPanel()) {
                 $request->session()->put('panel_context', 'customer');
-                $this->forgetAreaMembrosHomeIntended($request);
+                $intended = $request->session()->get('url.intended');
+                if (is_string($intended) && str_starts_with($intended, '/c/')) {
+                    return $this->inertiaOrRedirectAfterLogin($request, $intended);
+                }
 
-                return redirect()->intended('/painel-cliente');
+                return $this->inertiaOrRedirectAfterLogin($request, '/painel-cliente');
             }
 
-            return redirect()->intended('/area-membros');
+            return $this->inertiaOrRedirectAfterLogin($request, '/painel-cliente');
         }
 
         return back()->withErrors([
@@ -138,10 +186,16 @@ class LoginController extends Controller
                 'ip' => $request->ip(),
                 'user_agent' => (string) $request->userAgent(),
             ]);
+            SellerActivityLogService::record(
+                actor: $user,
+                action: SellerActivityLogService::AUTH_LOGOUT,
+                request: $request,
+            );
         }
         Auth::logout();
         $request->session()->invalidate();
         $request->session()->regenerateToken();
+        $this->clearAuthSessionCookies();
 
         $to = $request->query('redirect');
         if (is_string($to) && $this->isSafeMemberAreaLoginRedirect($to)) {

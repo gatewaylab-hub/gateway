@@ -5,6 +5,10 @@ import axios from 'axios';
 import { Copy, FileText, Check } from 'lucide-vue-next';
 import confetti from 'canvas-confetti';
 import ConversionPixels from '@/components/checkout/ConversionPixels.vue';
+import { trackCheckoutPurchase, trackCheckoutPurchaseBeacon } from '@/composables/useCheckoutPurchaseTracking';
+import { navigateAfterCheckout } from '@/lib/checkoutRedirect.js';
+
+const POLL_INTERVAL_MS = 2500;
 
 defineOptions({ layout: null });
 
@@ -13,6 +17,7 @@ const conversionPixelsRef = ref(null);
 const props = defineProps({
     token: { type: String, required: true },
     order_id: { type: Number, required: true },
+    checkout_session_token: { type: String, default: '' },
     amount_formatted: { type: String, default: 'R$ 0,00' },
     expire_at: { type: String, default: null },
     barcode: { type: String, default: '' },
@@ -24,11 +29,13 @@ const props = defineProps({
     customer_email: { type: String, default: null },
     customer_phone: { type: String, default: null },
     conversion_pixels: { type: Object, default: () => ({}) },
+    amount: { type: Number, default: 0 },
 });
 
 const copyButtonText = ref('Copiar código');
 const status = ref('pending');
 let pollInterval = null;
+let purchaseTracked = false;
 
 const expireAtFormatted = computed(() => {
     const raw = props.expire_at;
@@ -45,9 +52,45 @@ const hasCustomerInfo = computed(
 );
 
 const boletoAmount = computed(() => {
+    const fromProp = Number(props.amount);
+    if (Number.isFinite(fromProp) && fromProp > 0) {
+        return fromProp;
+    }
     const normalized = Number(String(props.amount_formatted ?? '').replace(/[^\d,.-]/g, '').replace(/\./g, '').replace(',', '.'));
     return Number.isFinite(normalized) ? normalized : 0;
 });
+
+async function onPaymentCompleted(redirectUrl) {
+    if (!purchaseTracked) {
+        purchaseTracked = true;
+        await trackCheckoutPurchase({
+            orderId: props.order_id,
+            checkoutSessionToken: props.checkout_session_token || '',
+            token: props.token,
+            triggerType: 'boleto',
+            value: boletoAmount.value,
+            currency: 'BRL',
+            pixels: props.conversion_pixels || {},
+            conversionPixelsApi: conversionPixelsRef.value,
+            settleDelayMs: 500,
+        });
+    }
+    const url = redirectUrl || props.redirect_after_purchase || '/area-membros';
+    navigateAfterCheckout(url);
+}
+
+function onPageHideBeacon() {
+    if (status.value !== 'completed' || purchaseTracked) return;
+    purchaseTracked = true;
+    trackCheckoutPurchaseBeacon({
+        orderId: props.order_id,
+        checkoutSessionToken: props.checkout_session_token || '',
+        token: props.token,
+        triggerType: 'boleto',
+        value: boletoAmount.value,
+        currency: 'BRL',
+    });
+}
 
 async function checkOrderStatus() {
     try {
@@ -58,15 +101,7 @@ async function checkOrderStatus() {
                 clearInterval(pollInterval);
                 pollInterval = null;
             }
-            if (conversionPixelsRef.value?.firePurchase) {
-                await conversionPixelsRef.value.firePurchaseReliable?.(boletoAmount.value, 'BRL', String(props.order_id), false, 'boleto', 500);
-            }
-            const url = data.redirect_url || props.redirect_after_purchase || '/area-membros';
-            if (url.startsWith('http') || url.startsWith('//')) {
-                window.location.href = url;
-            } else {
-                router.visit(url);
-            }
+            await onPaymentCompleted(data.redirect_url);
         }
         return data;
     } catch {
@@ -106,11 +141,17 @@ onMounted(() => {
     pollInterval = setInterval(() => {
         if (status.value === 'completed') return;
         checkOrderStatus();
-    }, 15000);
+    }, POLL_INTERVAL_MS);
+    if (typeof window !== 'undefined') {
+        window.addEventListener('pagehide', onPageHideBeacon);
+    }
 });
 
 onUnmounted(() => {
     if (pollInterval) clearInterval(pollInterval);
+    if (typeof window !== 'undefined') {
+        window.removeEventListener('pagehide', onPageHideBeacon);
+    }
 });
 </script>
 

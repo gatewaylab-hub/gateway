@@ -19,7 +19,7 @@ const props = defineProps({
     conversion_pixels: { type: Object, default: () => ({}) },
 });
 
-const primaryColor = computed(() => props.appearance.primary_color || '#8A2BE2');
+const primaryColor = computed(() => props.appearance.primary_color || '#0ea5e9');
 const title = computed(() => props.page?.headline || props.appearance.title || 'Quer levar isso também?');
 const subtitle = computed(() => props.page?.subheadline || props.appearance.subtitle || 'Uma oferta exclusiva preparada para você');
 const buttonAccept = computed(() => props.appearance.button_accept || 'Sim, quero aproveitar');

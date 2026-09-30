@@ -5,12 +5,30 @@ namespace App\Http\Middleware;
 use App\Models\User;
 use App\Models\MemberNotification;
 use App\Models\MemberPushSubscription;
-use App\Models\PanelNotification;
-use App\Plugins\PluginRegistry;
-use App\Services\SalesAchievementsService;
+use App\Models\Product;
+use App\Services\InertiaSharedPropsCache;
 use App\Services\StorageService;
 use App\Services\TeamAccessService;
 use App\Services\PlatformI18nService;
+use App\Services\Platform\PlatformTotpService;
+use App\Services\ApiPixAccess;
+use App\Services\MinimumChargeService;
+use App\Services\MemberProgressService;
+use App\Services\MemberAreaResolver;
+use App\Services\PhysicalProductAccess;
+use App\Services\SellerIntegrationVisibility;
+use App\Support\BrandingAssetUrls;
+use App\Support\DemoMode;
+use App\Support\InfoproducerRegistrationSettings;
+use App\Support\LoginTemplate;
+use App\Support\PanelColorScheme;
+use App\Support\PublicAppUrl;
+use App\Support\SellerDashboardTemplate;
+use App\Support\SellerPanelSupportSettings;
+use App\Support\ReferralProgramSettings;
+use App\Support\ProductApprovalSettings;
+use App\Services\ProductApprovalService;
+use App\Support\MemberAreaAdminPreview;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Schema;
 use Inertia\Middleware;
@@ -45,6 +63,49 @@ class HandleInertiaRequests extends Middleware
      */
     public function share(Request $request): array
     {
+        if ($this->isStorageApiRequest($request)) {
+            return parent::share($request);
+        }
+
+        try {
+            return $this->buildSharedData($request);
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('inertia.share_failed', [
+                'path' => $request->path(),
+                'message' => $e->getMessage(),
+            ]);
+
+            return array_merge(parent::share($request), [
+                'csrf_token' => $request->hasSession() ? $request->session()->token() : '',
+                'app_url' => rtrim(PublicAppUrl::base(), '/'),
+                'demo_mode' => DemoMode::publicConfig(),
+                'allow_new_infoproducers' => InfoproducerRegistrationSettings::isAllowed(),
+                'flash' => ['success' => null, 'error' => null, 'info' => null, 'status' => null],
+                'platform' => null,
+            ]);
+        }
+    }
+
+    private function isStorageApiRequest(Request $request): bool
+    {
+        $path = $request->path();
+
+        return str_ends_with($path, 'configuracoes/storage/ping')
+            || str_ends_with($path, 'configuracoes/storage/test')
+            || str_ends_with($path, 'configuracoes/storage/migrate');
+    }
+
+    private function marketplaceTheme(): ?array
+    {
+        try {
+            return \App\Support\MarketplaceHomeContent::publicTheme();
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    private function buildSharedData(Request $request): array
+    {
         $user = $request->user();
         $tenantId = $user?->tenant_id;
 
@@ -55,7 +116,8 @@ class HandleInertiaRequests extends Middleware
             'app_logo_dark' => config('getfy.app_logo_dark'),
             'app_logo_icon' => config('getfy.app_logo_icon'),
             'app_logo_icon_dark' => config('getfy.app_logo_icon_dark'),
-            'pwa_icon_192' => config('getfy.pwa_icon_192'),
+            'pwa_nav_logo' => config('getfy.pwa_nav_logo'),
+            'pwa_nav_logo_dark' => config('getfy.pwa_nav_logo_dark'),
         ] : null;
 
         $publicBranding = $this->buildPublicBranding();
@@ -66,31 +128,52 @@ class HandleInertiaRequests extends Middleware
         $plugins = [];
         $achievementsProgress = null;
         $pushEnabled = false;
+        $pushProvider = null;
         $vapidPublic = null;
+        $firebaseClientConfig = null;
         $settingsPluginTabs = [];
-        $pwaPluginEnabled = PluginRegistry::isEnabled('pwa');
+        $sharedCache = app(InertiaSharedPropsCache::class);
         if ($user && ($user->canAccessSellerPanel() || $user->canAccessPlatformPanel())) {
-            $settingsPluginTabs = PluginRegistry::getSettingsTabs();
-            $pluginNavItems = PluginRegistry::getMenuItems();
-            if ($pwaPluginEnabled) {
-                $vapidPublic = config('getfy.pwa.vapid_public');
-                $pushEnabled = ! empty($vapidPublic) && ! empty(config('getfy.pwa.vapid_private'));
+            $pluginData = $sharedCache->pluginPanelData();
+            $settingsPluginTabs = $pluginData['settings_plugin_tabs'];
+            $pluginNavItems = $pluginData['pluginNavItems'];
+            // Itens de menu de plugins podem apontar para rotas da plataforma (/plataforma/*).
+            // Esses links não devem aparecer no painel do infoprodutor/equipe.
+            if ($user->canAccessSellerPanel() && ! $user->canAccessPlatformPanel()) {
+                $pluginNavItems = array_values(array_filter($pluginNavItems, function ($item) {
+                    $href = is_array($item) ? (string) ($item['href'] ?? '') : '';
+                    return $href === '' || ! str_starts_with($href, '/plataforma/');
+                }));
             }
-            $installed = PluginRegistry::installed();
-            $plugins = array_map(fn ($p) => [
-                'slug' => $p['slug'],
-                'name' => $p['name'],
-                'version' => $p['version'],
-                'is_enabled' => $p['is_enabled'],
-            ], $installed);
+            $pushClient = \App\Support\PanelPushSettings::publicClientConfig();
+            $pushEnabled = \App\Support\PanelPushSettings::isPushEnabled();
+            $pushProvider = $pushClient['push_provider'] ?? 'vapid';
+            $vapidPublic = ($pushProvider === 'vapid' && $pushEnabled) ? ($pushClient['vapid_public'] ?? null) : null;
+            $firebaseClientConfig = ($pushProvider === 'fcm' && $pushEnabled) ? [
+                'firebase' => $pushClient['firebase'] ?? null,
+                'firebase_web_vapid_key' => $pushClient['firebase_web_vapid_key'] ?? null,
+            ] : null;
+            $plugins = $pluginData['plugins'];
         }
         if ($user && $user->canAccessSellerPanel()) {
-            $achievementsProgress = app(SalesAchievementsService::class)->getProgressForTenant($user->tenant_id);
+            $achievementsProgress = $sharedCache->achievementsProgress(
+                $user->tenant_id !== null ? (int) $user->tenant_id : null
+            );
         }
 
         $notificationsUnreadCount = 0;
+        $medOpenCount = 0;
+        $platformAdminSidebarBadges = [];
         if ($user && $user->canAccessSellerPanel()) {
-            $notificationsUnreadCount = PanelNotification::forUser($user->id)->unread()->count();
+            $headerCounts = $sharedCache->headerCounts(
+                (int) $user->id,
+                $user->tenant_id !== null ? (int) $user->tenant_id : null
+            );
+            $notificationsUnreadCount = $headerCounts['notifications_unread_count'];
+            $medOpenCount = $headerCounts['med_open_count'];
+        }
+        if ($user && $user->canAccessPlatformPanel()) {
+            $platformAdminSidebarBadges = $sharedCache->platformAdminSidebarBadges();
         }
 
         $path = $request->path();
@@ -100,9 +183,21 @@ class HandleInertiaRequests extends Middleware
 
         $memberNotificationsUnreadCount = 0;
         $memberPushSubscribed = false;
+        $memberCertificate = ['enabled' => false];
+        $memberAreaAdminPreview = null;
         if ($user && $isMemberArea) {
             $product = $request->route('product') ?? $request->attributes->get('member_area_product');
-            if ($product) {
+            // HandleInertiaRequests roda antes dos middlewares member.area.*; resolve pelo slug/host.
+            if (! $product instanceof Product) {
+                try {
+                    $resolved = app(MemberAreaResolver::class)->resolve($request);
+                    $product = $resolved['product'] ?? null;
+                } catch (\Throwable) {
+                    $product = null;
+                }
+            }
+            if ($product instanceof Product) {
+                $memberAreaAdminPreview = MemberAreaAdminPreview::inertiaPayload($request, $product);
                 $memberNotificationsUnreadCount = MemberNotification::forUser($user->id)
                     ->forProduct($product->id)
                     ->unread()
@@ -110,13 +205,35 @@ class HandleInertiaRequests extends Middleware
                 $memberPushSubscribed = MemberPushSubscription::where('user_id', $user->id)
                     ->where('product_id', $product->id)
                     ->exists();
+
+                if (! MemberAreaAdminPreview::isActive($request, $product)) {
+                    $eligibility = app(MemberProgressService::class)->certificateEligibility($product, $user);
+                    if ($eligibility['enabled']) {
+                        $memberCertificate = [
+                            'enabled' => true,
+                            'ready' => $eligibility['eligible'],
+                            'issued' => $eligibility['already_issued'],
+                            'progress_percent' => $eligibility['progress_percent'],
+                            'required_percent' => $eligibility['required_percent'],
+                            'release' => [
+                                'mode' => $eligibility['release_mode'],
+                                'required_percent' => $eligibility['required_percent'],
+                                'percent_met' => $eligibility['percent_met'],
+                                'days_after_access' => $eligibility['days_after_access'],
+                                'days_elapsed' => $eligibility['days_elapsed'],
+                                'days_remaining' => $eligibility['days_remaining'],
+                                'days_met' => $eligibility['days_met'],
+                                'unlocks_at' => $eligibility['unlocks_at'],
+                            ],
+                        ];
+                    }
+                }
             }
         }
 
         $kycSubject = null;
         if ($user && $user->canAccessSellerPanel() && Schema::hasColumn('users', 'kyc_status')) {
             $kycSubject = $user->kycSubjectUser();
-            $kycSubject->refresh();
         }
 
         // UI do “painel aluno” só nas URLs de comprador; não misturar com sessão panel_context
@@ -127,13 +244,14 @@ class HandleInertiaRequests extends Middleware
             $customerPanel = $path === 'painel-cliente'
                 || str_starts_with($path, 'painel-cliente/')
                 || $path === 'area-membros'
-                || str_starts_with($path, 'area-membros/');
+                || str_starts_with($path, 'area-membros/')
+                || ($user->isCliente() && ($path === 'chat' || str_starts_with($path, 'chat/')));
         }
 
         $shared = [
             ...parent::share($request),
             'csrf_token' => $request->session()->token(),
-            'app_url' => rtrim(config('app.url'), '/'),
+            'app_url' => rtrim(PublicAppUrl::base(), '/'),
             'pageTitle' => $pageTitle,
             'auth' => [
                 'user' => $user ? [
@@ -142,14 +260,25 @@ class HandleInertiaRequests extends Middleware
                     'email' => $user->email,
                     'username' => $user->username,
                     'role' => $user->role,
-                    'avatar_url' => $user->avatar ? app(StorageService::class)->url($user->avatar) : null,
+                    'avatar_url' => $this->resolveAvatarUrl($user),
                     'kyc_status' => $kycSubject?->kyc_status,
+                    'is_merchant_operationally_approved' => $kycSubject !== null
+                        && $user->isMerchantOperationallyApproved(),
                     'needs_kyc_attention' => $kycSubject !== null
-                        && ($kycSubject->kyc_status ?? null) !== User::KYC_APPROVED,
+                        && ! $user->isMerchantOperationallyApproved(),
+                    'kyc_onboarding_state' => $kycSubject === null
+                        ? null
+                        : ($user->mustCompleteKycOnboarding()
+                            ? 'needs_upload'
+                            : ($user->isAwaitingKycReview()
+                                ? 'awaiting_review'
+                                : (! $user->isMerchantOperationallyApproved() ? 'pending_account' : null))),
                     'panel_switch' => [
                         'customer' => $user->canAccessCustomerPanel(),
                         'seller' => $user->canSwitchToSellerPanel() || $user->needsOnboardingAsSeller(),
                     ],
+                    'totp_enabled' => PlatformTotpService::isEnabledFor($user),
+                    'show_totp_prompt' => $user->canAccessPlatformPanel() || $user->canAccessSellerPanel(),
                 ] : null,
                 'permissions' => ($user && $user->canAccessSellerPanel())
                     ? app(TeamAccessService::class)->permissionsFor($user)
@@ -169,21 +298,67 @@ class HandleInertiaRequests extends Middleware
             ],
             'platform' => null,
             'cloud_mode' => (bool) config('getfy.cloud_mode', false),
+            'demo_mode' => DemoMode::publicConfig(),
+            'allow_new_infoproducers' => InfoproducerRegistrationSettings::isAllowed(),
             'cloud_billing_renew_window_days' => (int) config('getfy.cloud.billing_renew_window_days', 7),
             'appSettings' => $appSettings,
             'public_branding' => $publicBranding,
+            'marketplaceTheme' => fn () => $this->marketplaceTheme(),
             'settings_plugin_tabs' => $settingsPluginTabs,
             'pluginNavItems' => $pluginNavItems,
             'plugins' => $plugins,
             'achievementsProgress' => $achievementsProgress,
             'push_enabled' => $pushEnabled,
-            'vapid_public' => $pushEnabled ? $vapidPublic : null,
-            'pwa_plugin_enabled' => $pwaPluginEnabled,
+            'push_provider' => $pushEnabled ? ($pushProvider ?? 'vapid') : null,
+            'vapid_public' => $vapidPublic,
+            'firebase_client_config' => $firebaseClientConfig ?? null,
             'notifications_unread_count' => $notificationsUnreadCount,
+            'med_open_count' => $medOpenCount,
+            'platform_admin_sidebar_badges' => $platformAdminSidebarBadges,
             'member_notifications_unread_count' => $memberNotificationsUnreadCount,
             'member_push_subscribed' => $memberPushSubscribed,
+            'member_certificate' => $memberCertificate,
+            'member_area_admin_preview' => $memberAreaAdminPreview,
             'customer_panel' => $customerPanel,
-            'demo_mode' => (bool) config('getfy.demo_mode', false),
+            'seller_dashboard_template' => ($user && $user->canAccessSellerPanel() && ! $customerPanel)
+                ? SellerDashboardTemplate::current()
+                : SellerDashboardTemplate::DEFAULT,
+            'api_pix_enabled_effective' => $user && $user->canAccessSellerPanel()
+                ? ApiPixAccess::effectiveForTenant($tenantId)
+                : false,
+            'platform_minimum_charge_brl' => $user && $user->canAccessSellerPanel()
+                ? app(MinimumChargeService::class)->platformMinimumBrlForTenant($tenantId)
+                : 0,
+            'platform_card_installments' => $user && $user->canAccessSellerPanel()
+                ? \App\Services\PlatformCardInstallments::publicConfig()
+                : ['enabled' => false, 'max' => 12],
+            'physical_products_enabled_effective' => $user && $user->canAccessSellerPanel()
+                ? PhysicalProductAccess::globalEnabled()
+                : false,
+            'seller_integrations_any_visible' => $user && $user->canAccessSellerPanel()
+                ? SellerIntegrationVisibility::anyVisibleForTenant($tenantId !== null ? (int) $tenantId : null)
+                : false,
+            'product_approval_required' => $user && $user->canAccessSellerPanel()
+                ? (ProductApprovalService::columnsReady() && ! ProductApprovalSettings::autoApproveEnabled())
+                : false,
+            'seller_panel_support' => $user && $user->canAccessSellerPanel()
+                ? SellerPanelSupportSettings::publicConfig()
+                : null,
+            'account_manager' => ($user && $user->canAccessSellerPanel() && ! $customerPanel)
+                ? $sharedCache->accountManagerCard(
+                    (int) ($user->isTeam() && $user->tenant_id ? $user->tenant_id : $user->id)
+                )
+                : null,
+            'referral_program' => $user && $user->canAccessSellerPanel()
+                ? ReferralProgramSettings::publicConfig()
+                : ['enabled' => false],
+            'pixgo_enabled_effective' => $user && $user->canAccessSellerPanel()
+                ? \App\Services\PixGoAccess::globalEnabled()
+                : false,
+            'pixgo_sidebar_label' => $user && $user->canAccessSellerPanel()
+                ? \App\Services\PixGoAccess::sidebarLabel()
+                : \App\Services\PixGoAccess::DEFAULT_SIDEBAR_LABEL,
+            'legal' => $sharedCache->legalPublicLinks(),
         ];
 
         if ($user && ($user->canAccessSellerPanel() || $user->canAccessPlatformPanel())) {
@@ -192,13 +367,14 @@ class HandleInertiaRequests extends Middleware
             $shared['i18n'] = [
                 'locale' => $locale,
                 'available_languages' => $i18n->activeLanguages(),
-                'messages' => $i18n->messagesFor($locale, 'seller'),
+                'messages' => $sharedCache->i18nMessages($locale, 'seller'),
             ];
         }
 
-        if (! $skipPanelPwa && $pwaPluginEnabled) {
+        if (! $skipPanelPwa) {
             $shared['pwa_manifest_url'] = url('/manifest.json');
             $shared['pwa_sw_url'] = url('/painel-sw.js');
+            $shared['pwa_sw_version'] = \App\Support\PanelPushSettings::swCacheVersion();
         }
 
         return $shared;
@@ -209,21 +385,39 @@ class HandleInertiaRequests extends Middleware
         return null;
     }
 
+    private function resolveAvatarUrl(?User $user): ?string
+    {
+        if ($user === null || ! $user->avatar) {
+            return null;
+        }
+
+        try {
+            return app(StorageService::class)->url($user->avatar);
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
     /**
      * @return array<string, mixed>
      */
     private function buildPublicBranding(): array
     {
-        $themePrimary = (string) config('getfy.theme_primary', '#8A2BE2');
+        $themePrimary = (string) config('getfy.theme_primary', '#0050fc');
+        if ($themePrimary === '') {
+            $themePrimary = '#0050fc';
+        }
         $pwaTheme = config('getfy.pwa_theme_color');
         $pwaTheme = ($pwaTheme !== null && $pwaTheme !== '') ? (string) $pwaTheme : $themePrimary;
         $favicon = config('getfy.favicon_url');
-        $favicon = ($favicon !== null && $favicon !== '') ? (string) $favicon : asset('icons/favicon.png');
+        $favicon = ($favicon !== null && $favicon !== '') ? BrandingAssetUrls::resolve((string) $favicon) : '/images/favicon.png';
         $loginHero = config('getfy.login_hero_image');
-        $loginHero = ($loginHero !== null && $loginHero !== '') ? (string) $loginHero : '';
+        $loginHero = ($loginHero !== null && $loginHero !== '') ? BrandingAssetUrls::resolve((string) $loginHero) : 'https://cdn.getfy.cloud/login.webp';
+        $loginHeroTagline = (string) config('getfy.login_hero_tagline', 'Sua plataforma para vender mais.');
+        $loginHeroSubtagline = (string) config('getfy.login_hero_subtagline', 'Feita para quem escala de verdade.');
 
-        return [
-            'app_name' => (string) config('getfy.app_name', 'gatewayLab'),
+        return BrandingAssetUrls::resolveData([
+            'app_name' => (string) config('getfy.app_name', 'Stacker'),
             'theme_primary' => $themePrimary,
             'pwa_theme_color' => $pwaTheme,
             'app_logo' => (string) config('getfy.app_logo'),
@@ -231,9 +425,13 @@ class HandleInertiaRequests extends Middleware
             'app_logo_icon' => (string) config('getfy.app_logo_icon'),
             'app_logo_icon_dark' => (string) config('getfy.app_logo_icon_dark'),
             'login_hero_image' => $loginHero,
+            'login_hero_tagline' => $loginHeroTagline,
+            'login_hero_subtagline' => $loginHeroSubtagline,
             'favicon_url' => $favicon,
             'pwa_icon_192' => config('getfy.pwa_icon_192'),
             'pwa_icon_512' => config('getfy.pwa_icon_512'),
-        ];
+            'panel_color_scheme' => PanelColorScheme::current(),
+            'login_template' => LoginTemplate::current(),
+        ]);
     }
 }

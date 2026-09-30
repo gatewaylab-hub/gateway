@@ -4,28 +4,31 @@ namespace App\Services\Payout;
 
 use App\Models\GatewayCredential;
 use App\Models\Setting;
+use App\Services\CajuPay\CajuPayAccountResolver;
 
 /**
  * Provedor de payout da plataforma (saque automático PIX).
  *
- * Gateways com API de cashout: CajuPay, Spacepag e Woovi.
- * Preferência configurável em {@see Setting} `platform_payout_gateway` (`auto`, `cajupay`, `spacepag`, `woovi`).
- * Em `auto`, a ordem fixa é CajuPay → Spacepag → Woovi — o primeiro globalmente conectado vence.
+ * Gateways com API de cashout: CajuPay, Woovi, BSPay, Versell, Xflow, Okto e OnlyUp (plugin).
+ * Preferência configurável em {@see Setting} `platform_payout_gateway`
+ * (`auto`, `cajupay`, `woovi`, `bspay`, `versell`, `xflow`, `okto`, `onlyup`).
+ * Em `auto`, a ordem fixa é CajuPay → Woovi → BSPay → Versell → Xflow → Okto → OnlyUp — o primeiro globalmente conectado vence.
+ * Spacepag permanece no código de payout legado, mas está fora da UI e da ordem automática.
  */
 class PlatformPayoutGateway
 {
     /** @var list<string> */
-    public const PAYOUT_ORDER = ['cajupay', 'spacepag', 'woovi'];
+    public const PAYOUT_ORDER = ['cajupay', /* 'spacepag', */ 'woovi', 'bspay', 'versell', 'xflow', 'okto', 'onlyup'];
 
     /**
-     * Preferência salva no painel: automático ou forçar um dos três.
+     * Preferência salva no painel: automático ou forçar um dos gateways.
      *
-     * @return 'auto'|'cajupay'|'spacepag'|'woovi'
+     * @return 'auto'|'cajupay'|'woovi'|'bspay'|'versell'|'xflow'|'okto'|'onlyup'
      */
     public static function preference(): string
     {
         $v = Setting::get('platform_payout_gateway', null, null);
-        if (in_array($v, ['cajupay', 'spacepag', 'woovi'], true)) {
+        if (in_array($v, ['cajupay', /* 'spacepag', */ 'woovi', 'bspay', 'versell', 'xflow', 'okto', 'onlyup'], true)) {
             return $v;
         }
 
@@ -36,10 +39,23 @@ class PlatformPayoutGateway
     {
         $connected = [];
         foreach (self::PAYOUT_ORDER as $slug) {
-            $cred = GatewayCredential::resolveForPayment(null, $slug);
-            if ($cred !== null && $cred->is_connected) {
-                $connected[$slug] = true;
+            if ($slug === 'cajupay') {
+                if (app(CajuPayAccountResolver::class)->anyConnectedForPayout()) {
+                    $connected[$slug] = true;
+                }
+                continue;
             }
+            $cred = GatewayCredential::resolveForPayment(null, $slug);
+            if ($cred === null || ! $cred->is_connected) {
+                continue;
+            }
+            if ($slug === 'versell') {
+                $creds = $cred->getDecryptedCredentials();
+                if (! \App\Gateways\Versell\VersellCredentials::isCashOutReady($creds)) {
+                    continue;
+                }
+            }
+            $connected[$slug] = true;
         }
 
         if ($connected === []) {

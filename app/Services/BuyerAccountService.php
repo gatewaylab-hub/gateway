@@ -17,6 +17,8 @@ class BuyerAccountService
         string $name,
         string $passwordHash,
         bool $isMemberAreaProduct,
+        ?string $phone = null,
+        ?string $document = null,
     ): array {
         $user = User::firstOrCreate(
             ['email' => $email],
@@ -25,16 +27,30 @@ class BuyerAccountService
                 'password' => $passwordHash,
                 'role' => User::ROLE_CLIENTE,
                 'tenant_id' => null,
+                'phone' => $phone,
+                'document' => $document,
+                'person_type' => $document ? 'pf' : null,
             ]
         );
 
         $wasRecentlyCreated = $user->wasRecentlyCreated;
 
         if ($user->isCliente()) {
-            $user->update(['tenant_id' => null]);
-            if ($isMemberAreaProduct && ! $wasRecentlyCreated) {
-                $user->update(['password' => $passwordHash]);
+            $updates = ['tenant_id' => null];
+            if ($name !== '' && $user->name !== $name) {
+                $updates['name'] = $name;
             }
+            if ($phone && blank($user->phone)) {
+                $updates['phone'] = $phone;
+            }
+            if ($document && blank($user->document)) {
+                $updates['document'] = $document;
+                $updates['person_type'] = 'pf';
+            }
+            if ($isMemberAreaProduct && ! $wasRecentlyCreated) {
+                $updates['password'] = $passwordHash;
+            }
+            $user->update($updates);
         }
 
         return ['user' => $user->fresh(), 'was_recently_created' => $wasRecentlyCreated];

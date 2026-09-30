@@ -1,24 +1,24 @@
 <script setup>
-import { ref, computed, watch, watchEffect, onMounted } from 'vue';
+import { ref, computed, watch, watchEffect, onMounted, nextTick } from 'vue';
 import { useForm, Link, usePage } from '@inertiajs/vue3';
 import { User, Building2, ChevronLeft } from 'lucide-vue-next';
 import Button from '@/components/ui/Button.vue';
+import AuthTurnstileField from '@/components/auth/AuthTurnstileField.vue';
+import AuthPageShell from '@/components/auth/AuthPageShell.vue';
+import LegalFooterLinks from '@/components/legal/LegalFooterLinks.vue';
+import { useAuthBranding } from '@/composables/useAuthBranding';
+import { useLoginTemplate } from '@/composables/useLoginTemplate';
 
 const page = usePage();
-const branding = computed(() => page.props.public_branding ?? {});
-const primary = computed(() => branding.value.theme_primary || '#8A2BE2');
-const appName = computed(() => branding.value.app_name || 'gatewayLab');
-const logoLight = computed(() => branding.value.app_logo || '/icons/logo.png');
-const logoDark = computed(() => branding.value.app_logo_dark || logoLight.value);
-const heroImage = computed(() => {
-    const h = branding.value.login_hero_image;
-    return typeof h === 'string' && h.trim() !== '' ? h.trim() : null;
-});
+const { primary, appName } = useAuthBranding();
+const { isSpotlight, isImmersive, isModernLogin } = useLoginTemplate();
 
 const props = defineProps({
     revenue_ranges: { type: Array, default: () => [] },
     coproducer_invite: { type: String, default: '' },
+    referral_ref: { type: String, default: '' },
     upgrade_from_customer: { type: Boolean, default: false },
+    registration_turnstile: { type: Object, default: () => ({ enabled: false, site_key: '' }) },
 });
 
 const step = ref(1);
@@ -31,6 +31,53 @@ let cepFetchTimer = null;
 let cepAbortController = null;
 /** Erro de validação apenas do passo atual (avanço Continuar / Enter). */
 const wizardStepError = ref('');
+
+const errorStepByField = {
+    name: 1,
+    email: 1,
+    phone: 1,
+    birth_date: 1,
+    document: 2,
+    company_name: 2,
+    legal_representative_cpf: 2,
+    address_zip: 3,
+    address_street: 3,
+    address_number: 3,
+    address_complement: 3,
+    address_neighborhood: 3,
+    address_city: 3,
+    address_state: 3,
+    monthly_revenue_range: 4,
+    password: 5,
+    password_confirmation: 5,
+    accept_terms_privacy: 5,
+    turnstile_token: 5,
+};
+
+function firstServerErrorMessage(errors) {
+    const value = Object.values(errors || {}).find((msg) => String(msg || '').trim() !== '');
+    return value ? String(value) : '';
+}
+
+function revealServerErrors(errors) {
+    const keys = Object.keys(errors || {});
+    const stepForError = keys.map((key) => errorStepByField[key]).find((n) => n);
+    if (stepForError) {
+        step.value = stepForError;
+    }
+    const message = firstServerErrorMessage(errors);
+    if (message) {
+        nextTick(() => {
+            wizardStepError.value = message;
+        });
+    }
+}
+
+const cnpjLookupLoading = ref(false);
+const cnpjSituacaoWarning = ref('');
+const cnpjOfficialRazaoHint = ref('');
+let cnpjLookupTimer = null;
+let cnpjLookupSeq = 0;
 
 function digitsOnly(s) {
     return String(s || '').replace(/\D/g, '');
@@ -116,6 +163,11 @@ async function validateCurrentStep() {
         }
         if (!isValidEmailFormat(form.email)) {
             wizardStepError.value = 'Informe um e-mail válido.';
+            return false;
+        }
+        const phoneDigits = digitsOnly(form.phone);
+        if (phoneDigits.length < 10 || phoneDigits.length > 11) {
+            wizardStepError.value = 'Informe um WhatsApp válido com DDD.';
             return false;
         }
         if (!form.birth_date) {
@@ -234,6 +286,10 @@ async function validateCurrentStep() {
             wizardStepError.value = 'A confirmação da senha não confere.';
             return false;
         }
+        if (!form.accept_terms_privacy) {
+            wizardStepError.value = 'Você precisa aceitar os Termos de Uso e a Política de Privacidade.';
+            return false;
+        }
         return true;
     }
 
@@ -244,15 +300,20 @@ watch(step, () => {
     wizardStepError.value = '';
 });
 
+const turnstileToken = ref('');
+
 const form = useForm({
     person_type: 'pf',
     name: '',
     email: '',
+    phone: '',
     coproducer_invite: props.coproducer_invite || '',
+    ref: props.referral_ref || '',
     birth_date: '',
     document: '',
     company_name: '',
     legal_representative_cpf: '',
+    cnpj_suggested_razao_social: '',
     address_zip: '',
     address_street: '',
     address_number: '',
@@ -263,7 +324,19 @@ const form = useForm({
     monthly_revenue_range: '',
     password: '',
     password_confirmation: '',
+    accept_terms_privacy: false,
+    turnstile_token: '',
+    website: '',
 });
+
+const flashError = computed(() => String(page.props.flash?.error || '').trim());
+
+const firstFormError = computed(() => firstServerErrorMessage(form.errors));
+
+/** Aviso sempre visível na etapa atual: validação local, erro de campo ou flash (ex.: rate limit). */
+const registrationAlert = computed(
+    () => wizardStepError.value || firstFormError.value || flashError.value
+);
 
 onMounted(() => {
     if (!props.upgrade_from_customer) return;
@@ -304,11 +377,78 @@ async function checkEmailBlur() {
         const res = await window.axios.post('/cadastro/validar-email', { email });
         emailCheckMsg.value = res.data?.available
             ? ''
-            : 'Este e-mail já está em uso.';
+            : (res.data?.message || 'Este e-mail já está em uso.');
     } catch {
         emailCheckMsg.value = '';
     }
 }
+
+function resetCnpjLookupUi() {
+    cnpjLookupLoading.value = false;
+    cnpjSituacaoWarning.value = '';
+    cnpjOfficialRazaoHint.value = '';
+    form.cnpj_suggested_razao_social = '';
+}
+
+async function lookupCnpjFromWizard(cnpj) {
+    const seq = ++cnpjLookupSeq;
+    cnpjLookupLoading.value = true;
+    cnpjSituacaoWarning.value = '';
+    cnpjOfficialRazaoHint.value = '';
+    try {
+        const res = await window.axios.post('/cadastro/consultar-cnpj', { document: cnpj });
+        if (seq !== cnpjLookupSeq) {
+            return;
+        }
+        if (!res.data?.ok) {
+            form.cnpj_suggested_razao_social = '';
+            return;
+        }
+        const razao = String(res.data.razao_social || '').trim();
+        form.cnpj_suggested_razao_social = razao;
+        if (razao && !String(form.company_name || '').trim()) {
+            form.company_name = razao;
+        } else if (razao && String(form.company_name || '').trim() && String(form.company_name).trim() !== razao) {
+            cnpjOfficialRazaoHint.value = `Na Receita: ${razao}`;
+        }
+        if (res.data.situacao_irregular && res.data.situacao_message) {
+            cnpjSituacaoWarning.value = res.data.situacao_message;
+        }
+    } catch (e) {
+        if (seq !== cnpjLookupSeq) {
+            return;
+        }
+        if (e.response?.status === 422) {
+            return;
+        }
+        form.cnpj_suggested_razao_social = '';
+    } finally {
+        if (seq === cnpjLookupSeq) {
+            cnpjLookupLoading.value = false;
+        }
+    }
+}
+
+watch(
+    () => [form.person_type, digitsOnly(form.document)],
+    ([type, doc]) => {
+        if (cnpjLookupTimer) {
+            clearTimeout(cnpjLookupTimer);
+            cnpjLookupTimer = null;
+        }
+        if (type !== 'pj') {
+            resetCnpjLookupUi();
+            return;
+        }
+        if (!isValidCnpjJs(doc)) {
+            resetCnpjLookupUi();
+            return;
+        }
+        cnpjLookupTimer = setTimeout(() => {
+            lookupCnpjFromWizard(doc);
+        }, 400);
+    }
+);
 
 async function fetchCep() {
     const raw = digitsOnly(form.address_zip);
@@ -405,6 +545,14 @@ function maskCep(v) {
     return d.length > 5 ? `${d.slice(0, 5)}-${d.slice(5)}` : d;
 }
 
+function maskPhone(v) {
+    const d = digitsOnly(v).slice(0, 11);
+    if (d.length <= 2) return d;
+    if (d.length <= 6) return `(${d.slice(0, 2)}) ${d.slice(2)}`;
+    if (d.length <= 10) return `(${d.slice(0, 2)}) ${d.slice(2, 6)}-${d.slice(6)}`;
+    return `(${d.slice(0, 2)}) ${d.slice(2, 7)}-${d.slice(7)}`;
+}
+
 function prevStep() {
     if (step.value > 1) step.value -= 1;
 }
@@ -459,32 +607,52 @@ async function onWizardKeydownEnter(e) {
 }
 
 function submitRegistration() {
+    wizardStepError.value = '';
+    form.turnstile_token = turnstileToken.value;
     form
         .transform((data) => ({
             ...data,
+            turnstile_token: turnstileToken.value || data.turnstile_token || '',
             coproducer_invite: data.coproducer_invite || null,
+            ref: data.ref || null,
             document: String(data.document || '').replace(/\D/g, ''),
             legal_representative_cpf: data.person_type === 'pj' ? String(data.legal_representative_cpf || '').replace(/\D/g, '') : null,
+            cnpj_suggested_razao_social: data.person_type === 'pj' ? (data.cnpj_suggested_razao_social || null) : null,
             address_zip: String(data.address_zip || '').replace(/\D/g, ''),
             address_state: String(data.address_state || '').toUpperCase().slice(0, 2),
         }))
-        .post('/cadastro', { preserveScroll: true });
+        .post('/cadastro', {
+            preserveScroll: true,
+            onError: (errors) => {
+                revealServerErrors(errors);
+            },
+            onFinish: () => {
+                const msg = String(page.props.flash?.error || '').trim();
+                if (msg && !wizardStepError.value && !firstServerErrorMessage(form.errors)) {
+                    wizardStepError.value = msg;
+                }
+            },
+        });
 }
 </script>
 
 <template>
-    <div class="wl-root flex min-h-screen">
-        <div
-            class="flex w-full flex-col justify-center px-8 py-12 lg:min-w-[380px]"
-            :class="heroImage ? 'lg:w-[32%]' : 'lg:mx-auto lg:w-full lg:max-w-xl'"
-        >
-            <div class="text-center">
-                <img :src="logoLight" :alt="appName" class="mx-auto mb-8 h-12 w-auto object-contain dark:hidden" />
-                <img :src="logoDark" :alt="appName" class="mx-auto mb-8 hidden h-12 w-auto object-contain dark:block" />
-                <p class="text-sm font-medium text-teal-600 dark:text-teal-400">{{ tagline }}</p>
-            </div>
+    <AuthPageShell
+        :title="isModernLogin ? 'Criar conta' : ''"
+        :subtitle="isModernLogin ? tagline : ''"
+        variant="seller"
+        wide
+    >
+        <p v-if="!isModernLogin" class="text-center text-sm font-medium text-teal-600 dark:text-teal-400">{{ tagline }}</p>
 
-            <div class="mt-8 rounded-2xl border border-zinc-200 bg-zinc-50/80 p-6 shadow-sm dark:border-zinc-700 dark:bg-zinc-900/60">
+        <div
+            class="mt-8 rounded-2xl border p-6 shadow-sm"
+            :class="isImmersive
+                ? 'border-zinc-200/90 bg-white/80 backdrop-blur-sm dark:border-white/15 dark:bg-white/5'
+                : isSpotlight
+                    ? 'border-zinc-200 bg-white/90 dark:border-zinc-700/80 dark:bg-zinc-900/50'
+                    : 'border-zinc-200 bg-zinc-50/80 dark:border-zinc-700 dark:bg-zinc-900/60'"
+        >
                 <div class="flex items-start justify-between gap-2 text-xs font-medium uppercase tracking-wide text-zinc-500">
                     <span>Etapa {{ step }} de {{ totalSteps }}</span>
                     <span class="text-[var(--color-primary)]">{{ stepTitle }}</span>
@@ -506,6 +674,17 @@ function submitRegistration() {
                 </div>
 
                 <form class="mt-8 space-y-4" novalidate @submit.prevent="onWizardSubmit" @keydown.enter="onWizardKeydownEnter">
+                    <div class="absolute -left-[9999px] h-0 w-0 overflow-hidden opacity-0" aria-hidden="true">
+                        <label for="registration-website">Website</label>
+                        <input
+                            id="registration-website"
+                            v-model="form.website"
+                            type="text"
+                            name="website"
+                            tabindex="-1"
+                            autocomplete="off"
+                        />
+                    </div>
                     <!-- Step 1 -->
                     <div v-show="step === 1" class="space-y-4">
                         <p class="text-xs font-semibold uppercase tracking-wide text-zinc-500">Tipo de conta</p>
@@ -555,6 +734,21 @@ function submitRegistration() {
                             <p v-if="form.errors.email" class="mt-1 text-sm text-red-600">{{ form.errors.email }}</p>
                         </div>
                         <div>
+                            <label class="block text-xs font-semibold uppercase text-zinc-500">WhatsApp</label>
+                            <input
+                                :value="form.phone"
+                                type="tel"
+                                inputmode="tel"
+                                required
+                                autocomplete="tel"
+                                placeholder="(11) 99999-9999"
+                                class="wl-input mt-1 w-full rounded-xl border border-zinc-300 bg-white px-4 py-3 dark:border-zinc-600 dark:bg-zinc-950 dark:text-white"
+                                @input="form.phone = maskPhone($event.target.value)"
+                            />
+                            <p class="mt-1 text-xs text-zinc-500">Usado para contato da plataforma com você.</p>
+                            <p v-if="form.errors.phone" class="mt-1 text-sm text-red-600">{{ form.errors.phone }}</p>
+                        </div>
+                        <div>
                             <label class="block text-xs font-semibold uppercase text-zinc-500">Data de nascimento</label>
                             <input v-model="form.birth_date" type="date" required class="wl-input mt-1 w-full rounded-xl border border-zinc-300 bg-white px-4 py-3 dark:border-zinc-600 dark:bg-zinc-950 dark:text-white" />
                             <p class="mt-1 text-xs text-zinc-500">Usamos apenas para validação cadastral e conformidade.</p>
@@ -576,9 +770,17 @@ function submitRegistration() {
                             <p v-if="form.errors.document" class="mt-1 text-sm text-red-600">{{ form.errors.document }}</p>
                         </div>
                         <template v-if="form.person_type === 'pj'">
+                            <p v-if="cnpjLookupLoading" class="text-xs text-zinc-500">Consultando CNPJ na Receita…</p>
+                            <div
+                                v-if="cnpjSituacaoWarning"
+                                class="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200"
+                            >
+                                {{ cnpjSituacaoWarning }}
+                            </div>
                             <div>
                                 <label class="block text-xs font-semibold uppercase text-zinc-500">Razão social</label>
                                 <input v-model="form.company_name" type="text" class="wl-input mt-1 w-full rounded-xl border border-zinc-300 bg-white px-4 py-3 dark:border-zinc-600 dark:bg-zinc-950 dark:text-white" />
+                                <p v-if="cnpjOfficialRazaoHint" class="mt-1 text-xs text-zinc-500">{{ cnpjOfficialRazaoHint }}</p>
                                 <p v-if="form.errors.company_name" class="mt-1 text-sm text-red-600">{{ form.errors.company_name }}</p>
                             </div>
                             <div>
@@ -689,14 +891,37 @@ function submitRegistration() {
                             <label class="block text-xs font-semibold uppercase text-zinc-500">Confirmar senha</label>
                             <input v-model="form.password_confirmation" type="password" required autocomplete="new-password" class="wl-input mt-1 w-full rounded-xl border border-zinc-300 bg-white px-4 py-3 dark:border-zinc-600 dark:bg-zinc-950 dark:text-white" />
                         </div>
+                        <label class="flex cursor-pointer items-start gap-3 rounded-xl border border-zinc-200 bg-white p-4 dark:border-zinc-600 dark:bg-zinc-950">
+                            <input
+                                v-model="form.accept_terms_privacy"
+                                type="checkbox"
+                                class="wl-checkbox mt-0.5 h-4 w-4 shrink-0 rounded border-zinc-300"
+                            />
+                            <span class="text-sm leading-snug text-zinc-700 dark:text-zinc-300">
+                                Li e aceito os
+                                <a href="/termos-de-uso" target="_blank" rel="noopener" class="font-medium text-[var(--color-primary)] underline">Termos de Uso</a>
+                                e a
+                                <a href="/politica-privacidade" target="_blank" rel="noopener" class="font-medium text-[var(--color-primary)] underline">Política de Privacidade</a>.
+                            </span>
+                        </label>
+                        <p v-if="form.errors.accept_terms_privacy" class="text-sm text-red-600">
+                            {{ form.errors.accept_terms_privacy }}
+                        </p>
+                        <div v-if="registration_turnstile?.enabled && registration_turnstile?.site_key" class="pt-2">
+                            <AuthTurnstileField
+                                :config="registration_turnstile"
+                                v-model="turnstileToken"
+                                :error="form.errors.turnstile_token"
+                            />
+                        </div>
                     </div>
 
                     <p
-                        v-if="wizardStepError"
+                        v-if="registrationAlert"
                         class="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200"
                         role="alert"
                     >
-                        {{ wizardStepError }}
+                        {{ registrationAlert }}
                     </p>
 
                     <div class="flex items-center justify-between gap-3 pt-2">
@@ -705,24 +930,20 @@ function submitRegistration() {
                             Voltar
                         </Button>
                         <span v-else />
-                        <Button type="submit" class="min-w-[120px]" :style="{ backgroundColor: primary, color: '#ffffff' }" :disabled="form.processing">
+                        <Button type="submit" class="min-w-[120px]" :style="{ backgroundColor: primary, color: '#0a0a0a' }" :disabled="form.processing">
                             {{ step === totalSteps ? (form.processing ? 'Criando…' : 'Criar conta') : 'Continuar' }}
                         </Button>
                     </div>
                 </form>
             </div>
 
-            <p class="mt-6 text-center text-sm text-zinc-600 dark:text-zinc-400">
+            <p class="mt-6 text-center text-sm text-zinc-600 dark:text-zinc-400" :class="isImmersive ? 'dark:text-white/55' : ''">
                 Já tem conta?
                 <Link href="/login" class="font-medium text-[var(--color-primary)] hover:underline">Entrar</Link>
             </p>
-        </div>
 
-        <div
-            v-if="heroImage"
-            class="relative hidden overflow-hidden bg-zinc-100 dark:bg-zinc-900 lg:flex lg:flex-1 lg:items-center lg:justify-center"
-        >
-            <img :src="heroImage" alt="" class="h-full w-full object-cover opacity-90 dark:opacity-80" />
-        </div>
-    </div>
+        <template #footer>
+            <LegalFooterLinks class="mt-4" />
+        </template>
+    </AuthPageShell>
 </template>

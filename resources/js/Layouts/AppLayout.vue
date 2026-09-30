@@ -1,23 +1,54 @@
 <script setup>
-import { computed, ref, watch, watchEffect, provide, onBeforeUnmount } from 'vue';
-import { usePage } from '@inertiajs/vue3';
+import { computed, ref, watch, watchEffect, provide, onBeforeUnmount, onMounted } from 'vue';
+import { Head, usePage } from '@inertiajs/vue3';
 import { useSidebarProvider } from '@/composables/useSidebar';
 import { usePanelPushSubscribe } from '@/composables/usePanelPushSubscribe';
+import { useSellerDashboardTemplate } from '@/composables/useSellerDashboardTemplate';
+import { useThemedPageHeading } from '@/composables/useThemedPageHeading';
 import AppSidebar from '@/components/layout/AppSidebar.vue';
 import AppHeader from '@/components/layout/AppHeader.vue';
 import MobileBottomNav from '@/components/layout/MobileBottomNav.vue';
 import PwaInstallPrompt from '@/components/layout/PwaInstallPrompt.vue';
+import PushNotificationsBanner from '@/components/layout/PushNotificationsBanner.vue';
 import NotificationsPanel from '@/components/layout/NotificationsPanel.vue';
 import Backdrop from '@/components/layout/Backdrop.vue';
 import FlashToast from '@/components/layout/FlashToast.vue';
+import SellerSupportFab from '@/components/layout/SellerSupportFab.vue';
 import CloudBillingBanner from '@/components/layout/CloudBillingBanner.vue';
 import KycBanner from '@/components/layout/KycBanner.vue';
+import TotpPromptBanner from '@/components/layout/TotpPromptBanner.vue';
+import DemoExploreBanner from '@/components/layout/DemoExploreBanner.vue';
+import DemoModeBanner from '@/components/layout/DemoModeBanner.vue';
 
-const { isExpanded } = useSidebarProvider();
+const { isExpanded, setExpanded } = useSidebarProvider();
 usePanelPushSubscribe();
+const { isAurora, isKawaii, isThemedShell, templateId } = useSellerDashboardTemplate();
+const { clearHeading } = useThemedPageHeading();
 const page = usePage();
-const pwaPluginEnabled = computed(() => page.props.pwa_plugin_enabled !== false);
+
+watch(
+    () => page.url,
+    () => {
+        clearHeading();
+    },
+);
 const customerPanel = computed(() => !!page.props.customer_panel);
+const sellerPanelSupport = computed(() => page.props.seller_panel_support ?? null);
+const showSellerSupportFab = computed(() => {
+    const config = sellerPanelSupport.value;
+    if (!config || customerPanel.value || isPixGoRoute.value) {
+        return false;
+    }
+    const enabled = config.enabled === true || config.enabled === 1 || config.enabled === '1' || config.enabled === 'true';
+
+    return enabled && !!config.href;
+});
+const isPixGoRoute = computed(() => {
+    const path = (page.url ?? '').split('?')[0];
+    return path === '/pixgo' || path.startsWith('/pixgo/');
+});
+const showAppHeader = computed(() => !isPixGoRoute.value);
+const showMobileBottomNav = computed(() => !customerPanel.value && !isPixGoRoute.value);
 const pageTitle = computed(() => page.props.pageTitle ?? null);
 const pageTitleBadge = computed(() => page.props.pageTitleBadge ?? null);
 const contentMaxWidth = computed(() => (page.props.layoutFullWidth ? 'max-w-[1600px]' : 'max-w-7xl'));
@@ -45,8 +76,92 @@ function onNotificationsUnreadCountUpdate(count) {
 }
 
 watchEffect(() => {
-    const primary = page.props.appSettings?.theme_primary || '#8A2BE2';
-    document.documentElement.style.setProperty('--color-primary', primary);
+    const accent = page.props.marketplaceTheme?.accent
+        || page.props.appSettings?.theme_primary
+        || '#FF5A1F';
+    document.documentElement.style.setProperty('--color-primary', accent);
+    document.documentElement.style.setProperty('--mk-accent', accent);
+});
+
+function applyThemedSidebarExpanded() {
+    if (isThemedShell.value && typeof window !== 'undefined' && window.innerWidth >= 1024) {
+        setExpanded(true);
+    }
+}
+
+let lightLockObserver = null;
+
+onMounted(() => {
+    applyThemedSidebarExpanded();
+    // Garante claro mesmo se algum script antigo tentar reaplicar dark.
+    if (!customerPanel.value && typeof document !== 'undefined') {
+        document.documentElement.classList.remove('dark');
+        const keepLight = () => {
+            if (document.documentElement.classList.contains('dark')) {
+                document.documentElement.classList.remove('dark');
+            }
+        };
+        keepLight();
+        lightLockObserver = new MutationObserver(keepLight);
+        lightLockObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+    }
+});
+
+watch(isThemedShell, () => {
+    applyThemedSidebarExpanded();
+});
+
+const shellDataAttrs = computed(() => {
+    if (customerPanel.value) {
+        return {};
+    }
+    return {
+        'data-seller-template': templateId.value,
+    };
+});
+
+const mainOffsetClass = computed(() => {
+    if (customerPanel.value) {
+        return isExpanded.value ? 'lg:ml-[260px]' : 'lg:ml-[64px]';
+    }
+    if (isThemedShell.value) {
+        return 'lg:ml-[276px]';
+    }
+    return isExpanded.value ? 'lg:ml-[260px]' : 'lg:ml-[64px]';
+});
+
+const contentShellClass = computed(() => {
+    if (isPixGoRoute.value) {
+        return 'flex min-h-[calc(100dvh-0px)] flex-1 flex-col overflow-hidden rounded-none bg-white shadow-none lg:min-h-[calc(100dvh-1rem)]';
+    }
+    if (isThemedShell.value && !customerPanel.value) {
+        const prefix = isKawaii.value ? 'kawaii-content-shell' : 'aurora-content-shell';
+        return `${prefix} flex min-h-0 flex-1 flex-col overflow-hidden rounded-none`;
+    }
+    if (!customerPanel.value) {
+        return 'mk-seller-content flex min-h-0 flex-1 flex-col overflow-hidden';
+    }
+    return 'flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl bg-white shadow-sm';
+});
+
+const mainAreaPaddingClass = computed(() => {
+    if (isPixGoRoute.value) {
+        return 'p-0';
+    }
+    if (isThemedShell.value && !customerPanel.value) {
+        return 'p-3 pt-2 md:p-4 md:pt-2 lg:px-6 lg:pb-6 lg:pt-3';
+    }
+    return 'p-3 md:p-4 lg:p-6';
+});
+
+const mainContentPaddingClass = computed(() => {
+    if (isPixGoRoute.value) {
+        return 'flex-1 p-0';
+    }
+    if (isThemedShell.value && !customerPanel.value) {
+        return 'flex-1 px-4 pb-24 pt-2 md:px-6 md:pt-2 lg:pb-8';
+    }
+    return 'flex-1 px-4 pb-24 pt-4 md:px-6 md:pt-6 lg:pb-8';
 });
 
 const dashboardCurrentBanner = computed(() => {
@@ -84,39 +199,64 @@ watch([isSellerDashboard, dashboardBanners], () => {
 
 onBeforeUnmount(() => {
     stopDashboardCarousel();
+    if (lightLockObserver) {
+        lightLockObserver.disconnect();
+        lightLockObserver = null;
+    }
 });
 </script>
 
 <template>
-    <div class="min-h-screen bg-zinc-100 dark:bg-zinc-900">
+    <div
+        class="min-h-screen"
+        :class="[
+            customerPanel
+                ? 'bg-zinc-100'
+                : isThemedShell
+                    ? 'seller-shell-root'
+                    : 'mk-seller-root',
+            isKawaii && !customerPanel ? 'kawaii-shell-root' : '',
+        ]"
+        v-bind="shellDataAttrs"
+    >
+        <Head v-if="!customerPanel">
+            <link rel="preconnect" href="https://fonts.googleapis.com" />
+            <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="" />
+            <link
+                rel="stylesheet"
+                href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@600;700;800&family=Inter:wght@400;500;600;700&display=swap"
+            />
+        </Head>
         <AppSidebar />
         <slot name="sidebar-after-nav" />
         <Backdrop />
         <div
-            class="flex min-h-screen flex-col transition-all duration-300 ease-in-out p-3 md:p-4 lg:p-6"
-            :class="[
-                isExpanded ? 'lg:ml-[260px]' : 'lg:ml-[64px]',
-            ]"
+            class="flex min-h-screen flex-col transition-all duration-300 ease-in-out"
+            :class="[mainOffsetClass, mainAreaPaddingClass]"
         >
             <div class="flex w-full shrink-0 flex-col gap-2">
-                <div v-if="!customerPanel" class="-mx-3 md:-mx-4 lg:-mx-6">
+                <div v-if="!customerPanel && !isPixGoRoute" class="-mx-3 md:-mx-4 lg:-mx-6">
+                    <DemoModeBanner />
+                    <TotpPromptBanner />
+                    <DemoExploreBanner class="mx-3 mb-2 md:mx-4 lg:mx-6" />
                     <CloudBillingBanner />
                     <KycBanner />
                 </div>
-                <AppHeader :page-title="pageTitle" :page-title-badge="pageTitleBadge" />
+                <AppHeader v-if="showAppHeader" :page-title="pageTitle" :page-title-badge="pageTitleBadge" />
                 <slot name="header-actions" />
             </div>
             <div
                 v-if="isSellerDashboard && dashboardBanners.length"
-                class="mb-4 overflow-hidden rounded-xl md:rounded-2xl"
+                class="mb-4 overflow-hidden rounded-[16px] border border-[#EBE2D8] bg-white"
+                :class="isThemedShell ? (isKawaii ? 'kawaii-card border' : 'aurora-surface aurora-divider border') : ''"
             >
-                <div class="relative">
+                <div class="relative aspect-[1200/420] w-full overflow-hidden md:aspect-[1600/320]">
                     <img
                         v-if="dashboardCurrentBanner"
                         :key="dashboardCurrentBanner.id"
                         :src="dashboardBannerUrl(dashboardCurrentBanner)"
                         :alt="dashboardCurrentBanner.title || 'Banner da dashboard'"
-                        class="h-[96px] w-full object-cover md:h-[112px] lg:h-[128px]"
+                        class="h-full w-full object-cover"
                     />
                     <div v-if="dashboardBanners.length > 1" class="pointer-events-none absolute inset-x-0 bottom-3 flex items-center justify-center gap-2 px-4">
                         <button
@@ -132,21 +272,29 @@ onBeforeUnmount(() => {
                 </div>
             </div>
             <FlashToast />
-            <PwaInstallPrompt v-if="pwaPluginEnabled" />
+            <SellerSupportFab
+                v-if="showSellerSupportFab"
+                :config="sellerPanelSupport"
+            />
+            <div v-if="!customerPanel && !isPixGoRoute" class="px-4 pt-3 lg:px-6">
+                <PushNotificationsBanner />
+            </div>
+            <PwaInstallPrompt v-if="!isPixGoRoute" />
             <NotificationsPanel
                 v-if="!customerPanel"
                 :open="showNotificationsPanel"
                 @update:open="showNotificationsPanel = $event"
                 @unread-count-update="onNotificationsUnreadCountUpdate"
             />
-            <MobileBottomNav v-if="!customerPanel" />
-            <div class="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden">
-                <main class="flex-1 px-4 pb-24 pt-2 md:px-6 md:pt-3 lg:pb-8">
+            <MobileBottomNav v-if="showMobileBottomNav" />
+            <div :class="contentShellClass">
+                <main :class="mainContentPaddingClass">
                     <div
                         class="w-full"
                         :class="[
-                            layoutContentFlushLeft ? 'max-w-none lg:-ml-6' : 'mx-auto',
-                            !layoutContentFlushLeft && contentMaxWidth,
+                            isPixGoRoute || layoutContentFlushLeft ? 'max-w-none' : 'mx-auto',
+                            layoutContentFlushLeft && !isPixGoRoute ? 'lg:-ml-6' : '',
+                            !isPixGoRoute && !layoutContentFlushLeft && contentMaxWidth,
                         ]"
                     >
                         <slot />

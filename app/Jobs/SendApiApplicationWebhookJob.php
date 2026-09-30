@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Models\ApiApplication;
 use App\Models\Order;
+use App\Support\WebhookCustomerPayload;
 use App\Support\WebhookUrlValidator;
 use InvalidArgumentException;
 use Illuminate\Bus\Queueable;
@@ -64,12 +65,16 @@ class SendApiApplicationWebhookJob implements ShouldQueue
             'updated_at' => $order->updated_at?->toIso8601String(),
         ];
 
+        $customer = WebhookCustomerPayload::fromOrder($order);
+        if ($customer !== []) {
+            $payload['customer'] = $customer;
+        }
+
         $body = json_encode($payload);
         $headers = ['Content-Type' => 'application/json'];
 
         if ($app->webhook_secret !== null && $app->webhook_secret !== '') {
-            $signature = hash_hmac('sha256', $body, $app->webhook_secret);
-            $headers['X-Getfy-Signature'] = $signature;
+            $headers['X-Webhook-Signature'] = hash_hmac('sha256', $body, $app->webhook_secret);
         }
 
         try {

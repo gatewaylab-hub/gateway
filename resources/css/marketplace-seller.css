@@ -1,0 +1,160 @@
+/* Painel do vendedor — tokens alinhados à home Gamkon */
+.mk-seller-root {
+    --mk-accent: #ff5a1f;
+    --color-primary: var(--mk-accent);
+    --mk-cream: #fbf7f2;
+    --mk-ink: #1a1410;
+    --mk-muted: #6b5e54;
+    --mk-border: #ebe2d8;
+    --mk-border-strong: #e2d7cb;
+    --mk-soft: #f1eae2;
+    background: var(--mk-cream);
+    color: var(--mk-ink);
+    color-scheme: light;
+    font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
+    font-feature-settings: 'cv11', 'ss01';
+}
+
+.mk-seller-root .font-display {
+    font-family: 'Plus Jakarta Sans', 'Inter', ui-sans-serif, system-ui, sans-serif;
+}
+
+.mk-seller-root .mk-seller-sidebar {
+    background: #fff !important;
+    border-right: 1px solid var(--mk-border);
+    border-radius: 0;
+    color: var(--mk-ink);
+}
+
+.mk-seller-root .mk-seller-content {
+    background: #fff !important;
+    border: 1px solid var(--mk-border);
+    border-radius: 16px;
+    box-shadow: 0 1px 0 rgba(26, 20, 16, 0.04);
+    color: var(--mk-ink);
+}
+
+/* Conteúdo ganha mais ar sem o header chrome */
+.mk-seller-root .mk-seller-content main {
+    padding-top: 1.25rem;
+}
+
+@media (min-width: 1024px) {
+    .mk-seller-root .mk-seller-content main {
+        padding-top: 1.75rem;
+    }
+}
+
+.mk-seller-root .menu-item-active {
+    background: var(--mk-accent, var(--color-primary, #ff5a1f)) !important;
+    color: #fff !important;
+    font-weight: 600;
+    border-radius: 12px;
+}
+
+.mk-seller-root .menu-item-active::before {
+    display: none;
+}
+
+.mk-seller-root .menu-item-inactive {
+    color: #3d332b !important;
+    border-radius: 12px;
+}
+
+.mk-seller-root .menu-item-inactive:hover {
+    background: color-mix(in srgb, var(--mk-accent, #ff5a1f) 12%, transparent) !important;
+    color: var(--mk-ink) !important;
+}
+
+.mk-seller-root .menu-item-icon-active {
+    color: #fff !important;
+}
+
+.mk-seller-root .menu-item-icon-inactive {
+    color: #8a7b6e !important;
+}
+
+.mk-seller-root .menu-item-inactive:hover .menu-item-icon-inactive {
+    color: var(--mk-accent, #ff5a1f) !important;
+}
+
+.mk-seller-root .mk-seller-subnav {
+    background: var(--mk-soft);
+    border: 1px solid var(--mk-border);
+}
+
+.mk-seller-root .mk-seller-subnav-item {
+    color: #3d332b;
+}
+
+.mk-seller-root .mk-seller-subnav-item-active {
+    background: #fff;
+    color: var(--mk-accent, #ff5a1f);
+    font-weight: 600;
+    box-shadow: 0 1px 0 rgba(26, 20, 16, 0.04);
+}
+
+/* Botões default pretos → laranja primário no painel */
+.mk-seller-root .bg-zinc-900,
+.mk-seller-root .bg-zinc-950,
+.mk-seller-root .bg-\[\#1A1410\],
+.mk-seller-root .bg-\[\#1a1410\] {
+    background-color: var(--mk-accent, var(--color-primary, #ff5a1f)) !important;
+}
+
+.mk-seller-root .hover\:bg-zinc-800:hover,
+.mk-seller-root .hover\:bg-black:hover {
+    background-color: color-mix(in srgb, var(--mk-accent, #ff5a1f) 88%, #000) !important;
+}
+
+/* Neutraliza leftovers dark:/zinc escuros dentro do shell claro */
+.mk-seller-root .dark\:bg-zinc-800,
+.mk-seller-root .dark\:bg-zinc-800\/50,
+.mk-seller-root .dark\:bg-zinc-900,
+.mk-seller-root .dark\:bg-zinc-900\/50,
+.mk-seller-root .dark\:bg-zinc-950 {
+    background-color: transparent;
+}
+
+.mk-seller-root [class*='dark:bg-zinc'],
+.mk-seller-root [class*='dark:text-zinc'],
+.mk-seller-root [class*='dark:border-zinc'] {
+    /* fallback visual: tipografia/borda claras já vêm das classes light */
+}
+
+.mk-seller-root .bg-zinc-50,
+.mk-seller-root .bg-zinc-100,
+.mk-seller-root .bg-zinc-100\/80 {
+    background-color: var(--mk-soft) !important;
+}
+
+.mk-seller-root .border-zinc-200,
+.mk-seller-root .border-zinc-200\/60,
+.mk-seller-root .border-zinc-200\/80,
+.mk-seller-root .border-zinc-100 {
+    border-color: var(--mk-border) !important;
+}
+
+.mk-seller-root .text-zinc-900,
+.mk-seller-root .text-zinc-800 {
+    color: var(--mk-ink) !important;
+}
+
+.mk-seller-root .text-zinc-700,
+.mk-seller-root .text-zinc-600 {
+    color: #3d332b !important;
+}
+
+.mk-seller-root .text-zinc-500,
+.mk-seller-root .text-zinc-400 {
+    color: var(--mk-muted) !important;
+}
+
+.mk-seller-root .bg-white {
+    background-color: #fff !important;
+}
+
+.mk-seller-root .rounded-xl,
+.mk-seller-root .rounded-2xl {
+    border-radius: 14px;
+}

@@ -10,7 +10,7 @@ class CajuPayCredentialEconomics
     public const DEFAULT_MIN_PAYOUT_BRL = GatewayPayoutEconomics::DEFAULT_MIN_PAYOUT_BRL;
 
     /**
-     * Líquido mínimo exigido: mínimo CajuPay + taxas PIX/saque (referência admin).
+     * Líquido mínimo exigido pelo gateway: mínimo CajuPay configurado (sem somar taxas admin).
      *
      * @return array{
      *     required_min_net: float,
@@ -21,6 +21,11 @@ class CajuPayCredentialEconomics
      */
     public static function fromGateway(): array
     {
+        $account = app(CajuPayAccountResolver::class)->defaultOrFirstConnected();
+        if ($account !== null && $account->is_connected) {
+            return self::fromCredentialsArray($account->getDecryptedCredentials());
+        }
+
         $cred = GatewayCredential::resolveForPayment(null, 'cajupay');
         if ($cred === null || ! $cred->is_connected) {
             return self::defaults();

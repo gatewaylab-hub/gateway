@@ -3,8 +3,11 @@
 namespace App\Http\Controllers;
 
 use App\Support\DockerSetupState;
+use App\Support\DockerEnvBootstrap;
+use App\Models\User;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Artisan;
 use Illuminate\View\View;
 
 class DockerSetupController extends Controller
@@ -58,8 +61,15 @@ class DockerSetupController extends Controller
         // Não forçar https:// só por ser um hostname: no compose padrão só existe HTTP (ex.: :80).
         // Se gravarmos https sem TLS na frente, o login quebra (cookies Secure + redirects) e https://domínio recusa conexão (nada na 443).
         $scheme = $this->resolveRequestScheme($request);
+        $url = $scheme.'://'.$host;
+        $port = (int) $request->getPort();
+        $defaultPort = $scheme === 'https' ? 443 : 80;
 
-        return $scheme.'://'.$host;
+        if ($port > 0 && $port !== $defaultPort) {
+            $url .= ':'.$port;
+        }
+
+        return $url;
     }
 
     private function resolveRequestScheme(Request $request): string
@@ -121,14 +131,8 @@ class DockerSetupController extends Controller
         $url = $this->normalizeAppUrlForDocker($host, $request);
 
         $cronSecret = null;
-        $persistedEnvPath = base_path('.docker/app.env');
         $envPath = base_path('.env');
-        if (is_file($persistedEnvPath)) {
-            $env = (string) file_get_contents($persistedEnvPath);
-            if (preg_match('/^\s*CRON_SECRET\s*=\s*(.*)\s*$/mi', $env, $m)) {
-                $cronSecret = trim((string) ($m[1] ?? ''), " \t\n\r\0\x0B\"'");
-            }
-        } elseif (is_file($envPath)) {
+        if (is_file($envPath)) {
             $env = (string) file_get_contents($envPath);
             if (preg_match('/^\s*CRON_SECRET\s*=\s*(.*)\s*$/mi', $env, $m)) {
                 $cronSecret = trim((string) ($m[1] ?? ''), " \t\n\r\0\x0B\"'");
@@ -138,12 +142,19 @@ class DockerSetupController extends Controller
             $cronSecret = rtrim(strtr(base64_encode(random_bytes(24)), '+/', '-_'), '=');
         }
 
-        $this->setEnvPersisted([
+        $this->setEnv([
             'APP_URL' => $url,
             'DOCKER_SETUP_DONE' => 'true',
             'APP_INSTALLED' => 'true',
             'CRON_SECRET' => $cronSecret,
         ]);
+
+        DockerEnvBootstrap::ensureAppKey();
+        try {
+            Artisan::call('migrate', ['--force' => true]);
+        } catch (\Throwable $e) {
+            report($e);
+        }
 
         $dockerDir = base_path('.docker');
         if (! is_dir($dockerDir)) {
@@ -151,27 +162,38 @@ class DockerSetupController extends Controller
         }
         file_put_contents($dockerDir.DIRECTORY_SEPARATOR.'app.url', $url);
         file_put_contents($dockerDir.DIRECTORY_SEPARATOR.'setup.done', 'true');
-        file_put_contents($dockerDir.DIRECTORY_SEPARATOR.'Caddyfile.domains', $host." {\n\treverse_proxy app:80\n}\n");
+        $this->writeCaddyDomainBlock($host, $dockerDir);
 
-        return redirect('/login')->with('success', 'Configuração inicial salva.');
+        return redirect(User::count() > 0 ? '/login' : '/criar-admin')
+            ->with('success', 'Configuração inicial salva.');
     }
 
-    private function setEnvPersisted(array $vars): void
+    /**
+     * TLS na origem (porta 443) para Cloudflare SSL "Completo" / "Completo estrito".
+     * Sem isto, só a porta 80 responde e o modo Full gera erro 522 na borda.
+     */
+    private function writeCaddyDomainBlock(string $host, string $dockerDir): void
     {
-        $dockerDir = base_path('.docker');
-        if (! is_dir($dockerDir)) {
-            mkdir($dockerDir, 0777, true);
+        $cert = $dockerDir.DIRECTORY_SEPARATOR.'certs'.DIRECTORY_SEPARATOR.'origin.pem';
+        $key = $dockerDir.DIRECTORY_SEPARATOR.'certs'.DIRECTORY_SEPARATOR.'origin-key.pem';
+        if (is_file($cert) && is_file($key)) {
+            $tlsLine = "\ttls /etc/getfy/certs/origin.pem /etc/getfy/certs/origin-key.pem\n";
+        } else {
+            // Cloudflare "Completo" aceita certificado autoassinado na origem (tls internal).
+            $tlsLine = "\ttls internal\n";
         }
 
-        $envPath = $dockerDir.DIRECTORY_SEPARATOR.'app.env';
+        file_put_contents(
+            $dockerDir.DIRECTORY_SEPARATOR.'Caddyfile.domains',
+            $host." {\n".$tlsLine."\treverse_proxy app:80\n}\n"
+        );
+    }
+
+    private function setEnv(array $vars): void
+    {
+        $envPath = base_path('.env');
         if (! is_file($envPath)) {
-            // Baseia no .env atual (se existir) para não perder outras configs,
-            // senão usa o exemplo como seed.
-            if (is_file(base_path('.env'))) {
-                copy(base_path('.env'), $envPath);
-            } else {
-                copy(base_path('.env.example'), $envPath);
-            }
+            copy(base_path('.env.example'), $envPath);
         }
 
         $content = (string) file_get_contents($envPath);

@@ -39,6 +39,9 @@ const props = defineProps({
     app_url: { type: String, default: '' },
 });
 
+const page = usePage();
+const platformAppName = computed(() => String(page.props.appSettings?.app_name || '').trim());
+
 const activeTab = ref('aparencia');
 
 const configForm = useForm({
@@ -50,7 +53,7 @@ const configForm = useForm({
         login: {
             title: '',
             subtitle: '',
-            primary_color: '#8A2BE2',
+            primary_color: '#0ea5e9',
             background_color: '#18181b',
             logo: '',
             background_image: '',
@@ -59,8 +62,13 @@ const configForm = useForm({
             login_without_password: props.produto.member_area_config?.login?.login_without_password ?? false,
             ...props.produto.member_area_config?.login,
         },
-        pwa: { name: '', short_name: '', theme_color: '#8A2BE2', push_enabled: false, ...props.produto.member_area_config?.pwa },
-        certificate: { ...props.produto.member_area_config?.certificate },
+        pwa: { name: '', short_name: '', theme_color: '#0ea5e9', push_enabled: false, ...props.produto.member_area_config?.pwa },
+        certificate: {
+            release_mode: 'completion_percent',
+            completion_percent: 100,
+            days_after_access: 0,
+            ...props.produto.member_area_config?.certificate,
+        },
         community_enabled: props.produto.member_area_config?.community_enabled ?? false,
         gamification: { enabled: false, achievements: [], ...props.produto.member_area_config?.gamification },
     },
@@ -107,7 +115,6 @@ async function sendPushNotification() {
     }
 }
 
-const page = usePage();
 const baseUrlForLink = computed(() => props.app_url || (page.props.app_url ?? '') || (typeof window !== 'undefined' ? window.location.origin : '') || '');
 const memberAreaFullLink = computed(() => {
     const type = configForm.domain_type;
@@ -246,7 +253,8 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
             </nav>
             <div class="flex shrink-0 items-center gap-2">
                 <a
-                    :href="produto.member_area_url"
+                    v-if="memberAreaFullLink"
+                    :href="memberAreaFullLink"
                     target="_blank"
                     rel="noopener"
                     class="hidden items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800 sm:flex"
@@ -463,8 +471,20 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                     <div class="space-y-4">
                         <Toggle v-model="configForm.member_area_config.certificate.enabled" label="Habilitar certificado" />
                         <div>
+                            <label class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Liberar certificado quando</label>
+                            <select v-model="configForm.member_area_config.certificate.release_mode" :class="inputClass">
+                                <option value="completion_percent">Atingir % de conclusão do curso</option>
+                                <option value="days_after_access">Após X dias de acesso ao curso</option>
+                                <option value="both">% de conclusão e dias de acesso</option>
+                            </select>
+                        </div>
+                        <div v-if="configForm.member_area_config.certificate.release_mode !== 'days_after_access'">
                             <label class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">% conclusão mínima</label>
                             <input v-model.number="configForm.member_area_config.certificate.completion_percent" type="number" min="0" max="100" :class="inputClass" />
+                        </div>
+                        <div v-if="configForm.member_area_config.certificate.release_mode !== 'completion_percent'">
+                            <label class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Dias após o acesso ao curso</label>
+                            <input v-model.number="configForm.member_area_config.certificate.days_after_access" type="number" min="0" max="3650" :class="inputClass" />
                         </div>
                         <div>
                             <label class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Assinatura</label>
@@ -560,7 +580,7 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                                         <label class="mb-1.5 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Cor do tema</label>
                                         <div class="flex items-center gap-3">
                                             <input v-model="configForm.member_area_config.pwa.theme_color" type="color" class="h-10 w-14 cursor-pointer rounded-lg border border-zinc-300 dark:border-zinc-600" />
-                                            <input v-model="configForm.member_area_config.pwa.theme_color" type="text" :class="inputClass" class="flex-1 font-mono text-sm" placeholder="#8A2BE2" maxlength="20" />
+                                            <input v-model="configForm.member_area_config.pwa.theme_color" type="text" :class="inputClass" class="flex-1 font-mono text-sm" placeholder="#0ea5e9" maxlength="20" />
                                         </div>
                                     </div>
                                 </div>
@@ -634,6 +654,7 @@ const inputClass = 'block w-full rounded-lg border border-zinc-300 bg-white px-3
                     :mode="previewMode"
                     :config="configForm.member_area_config"
                     :product-name="produto.name"
+                    :platform-app-name="platformAppName"
                 />
             </div>
         </div>

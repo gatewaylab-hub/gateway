@@ -9,7 +9,9 @@ use App\Models\Withdrawal;
 use App\Services\EffectiveMerchantFees;
 use App\Services\Payout\GatewayPayoutEconomics;
 use App\Services\Payout\PayoutUserSettings;
-use Illuminate\Support\Facades\URL;
+use App\Services\Payout\WithdrawalPayoutDestination;
+use App\Services\Withdrawal\WithdrawalMinimumService;
+use App\Support\GatewayWebhookUrl;
 
 class SpacepagPayoutService
 {
@@ -45,7 +47,7 @@ class SpacepagPayoutService
         }
 
         $economics = GatewayPayoutEconomics::fromCredentialsArray('spacepag', $credentials);
-        $requiredNet = $economics['required_min_net'];
+        $requiredNet = WithdrawalMinimumService::effectiveRequiredMinNet($economics);
         $minCents = (int) max(1, (int) round($requiredNet * 100));
         $apiAmount = GatewayPayoutEconomics::transferAmountBrlForApi($net, $economics['admin_fee_payout_brl']);
         $amountCents = (int) round($net * 100);
@@ -61,10 +63,12 @@ class SpacepagPayoutService
         }
 
         $settings = is_array($owner->payout_settings) ? $owner->payout_settings : [];
-        $pixKey = PayoutUserSettings::pixKey($settings);
-        $pixKeyType = PayoutUserSettings::pixKeyType($settings);
+        $fromWithdrawal = WithdrawalPayoutDestination::fromWithdrawal($withdrawal);
+        $pixKey = $fromWithdrawal['pix_key'] ?? PayoutUserSettings::pixKey($settings);
+        $pixKeyType = $fromWithdrawal['pix_key_type'] ?? PayoutUserSettings::pixKeyType($settings);
         $receiverName = isset($settings['receiver_name']) ? trim((string) $settings['receiver_name']) : '';
-        $receiverDocument = isset($settings['receiver_document']) ? trim((string) $settings['receiver_document']) : '';
+        $receiverDocument = $fromWithdrawal['key_owner_document']
+            ?? (isset($settings['receiver_document']) ? trim((string) $settings['receiver_document']) : '');
         $receiverEmail = isset($settings['receiver_email']) ? trim((string) $settings['receiver_email']) : '';
 
         if ($pixKey === '' || $pixKeyType === '' || $receiverName === '' || $receiverDocument === '' || $receiverEmail === '') {
@@ -107,21 +111,13 @@ class SpacepagPayoutService
      */
     private static function resolveWebhookPostbackUrl(array $credentials): string
     {
-        $path = route('webhooks.spacepag', [], false);
-        if (! is_string($path) || $path === '') {
-            $path = '/webhooks/gateways/spacepag';
-        }
-
-        $base = trim((string) (config('getfy.webhook_public_url') ?? ''));
-        if ($base !== '') {
-            return $base.$path;
-        }
+        $path = GatewayWebhookUrl::pathForGateway('spacepag');
 
         $credBase = trim((string) ($credentials['webhook_postback_base_url'] ?? $credentials['postback_base_url'] ?? ''));
         if ($credBase !== '') {
             return rtrim($credBase, '/').$path;
         }
 
-        return URL::to(route('webhooks.spacepag', [], true));
+        return GatewayWebhookUrl::forGateway('spacepag');
     }
 }

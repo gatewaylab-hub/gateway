@@ -3,6 +3,7 @@ import { computed } from 'vue';
 import { Link } from '@inertiajs/vue3';
 import LayoutInfoprodutor from '@/Layouts/LayoutInfoprodutor.vue';
 import ProdutosTabs from '@/components/produtos/ProdutosTabs.vue';
+import AfiliadoTabs from '@/components/afiliados/AfiliadoTabs.vue';
 import { useI18n } from '@/composables/useI18n';
 import { Package, ExternalLink, UserPlus } from 'lucide-vue-next';
 
@@ -31,11 +32,11 @@ function isApproved(row) {
                 {{ t('products.affiliates_page_title', 'Afiliados') }}
             </h1>
             <p class="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-                {{ t('products.affiliates_page_subtitle', 'Produtos em que você é afiliado aprovado.') }}
+                {{ t('products.affiliates_page_subtitle', 'Produtos em que você solicitou ou foi aprovado como afiliado.') }}
             </p>
         </div>
 
-        <ProdutosTabs />
+        <AfiliadoTabs />
 
         <div v-if="!list.length" class="rounded-xl border border-dashed border-zinc-300 bg-zinc-50/50 px-6 py-12 text-center dark:border-zinc-600 dark:bg-zinc-800/40">
             <UserPlus class="mx-auto h-10 w-10 text-zinc-400" aria-hidden="true" />
@@ -99,6 +100,12 @@ function isApproved(row) {
                             {{ formatBRL(row.price_brl) }}
                         </p>
                     </div>
+                    <p
+                        v-if="!isApproved(row)"
+                        class="mt-2 text-xs text-amber-700 dark:text-amber-200"
+                    >
+                        {{ t('products.affiliate_pending_hint', 'Aguardando aprovação do produtor. Você será avisado no painel e por e-mail quando for aprovado.') }}
+                    </p>
                     <div class="mt-2 flex flex-wrap gap-2">
                         <Link
                             v-if="isApproved(row)"

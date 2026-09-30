@@ -1,68 +1,63 @@
 import './bootstrap';
 import { config as inertiaConfig } from '@inertiajs/core';
 
-inertiaConfig.set('prefetch.hoverDelay', 40);
+inertiaConfig.set('prefetch.hoverDelay', 200);
 
 // Migração: versões antigas registravam /painel-sw.js com scope "/" e isso pode interceptar checkout + scripts de terceiros (Meta Pixel).
-// Aqui removemos automaticamente o registro legado (scope raiz) quando existir.
+// Remove inscrição push e o registro legado (scope raiz). Registro do SW ativo fica em usePanelPushSubscribe.
 if (typeof window !== 'undefined' && typeof navigator !== 'undefined' && navigator.serviceWorker?.getRegistrations) {
     try {
-        navigator.serviceWorker.getRegistrations().then((regs) => {
+        navigator.serviceWorker.getRegistrations().then(async (regs) => {
             const origin = window.location.origin;
-            regs.forEach((reg) => {
+            for (const reg of regs) {
                 const scriptUrl = reg?.active?.scriptURL || reg?.installing?.scriptURL || reg?.waiting?.scriptURL || '';
                 const scope = reg?.scope || '';
                 const isPainelSw = typeof scriptUrl === 'string' && scriptUrl.includes('/painel-sw.js');
                 const isRootScope = typeof scope === 'string' && scope === `${origin}/`;
                 if (isPainelSw && isRootScope) {
-                    reg.unregister().catch(() => {});
+                    try {
+                        const sub = await reg.pushManager?.getSubscription?.();
+                        if (sub) {
+                            await sub.unsubscribe();
+                        }
+                    } catch (_) {}
+                    try {
+                        await reg.unregister();
+                    } catch (_) {}
                 }
-            });
+            }
         });
     } catch (_) {}
 }
 
-// Registrar Service Worker do painel apenas fora da área de membros e do checkout (sem prompts/efeitos PWA no checkout)
-let skipPanelPwa = false;
-if (typeof window !== 'undefined') {
-    const path = window.location.pathname;
-    const isPlatform = path.startsWith('/plataforma');
-    const isCheckout = path.startsWith('/c/') || path.startsWith('/checkout') || path.startsWith('/api-checkout');
-    let isMemberArea = path.startsWith('/m/');
-    if (!isMemberArea) {
-        try {
-            const appEl = document.getElementById('app');
-            const data = appEl?.getAttribute('data-page');
-            if (data) {
-                const page = JSON.parse(data);
-                const comp = page?.component;
-                const url = page?.url ?? '';
-                isMemberArea = (typeof comp === 'string' && comp.includes('MemberAreaApp')) || (typeof url === 'string' && url.startsWith('/m/'));
-            }
-        } catch (_) {}
-    }
-    skipPanelPwa = isMemberArea || isCheckout || isPlatform;
-}
-if (!skipPanelPwa && typeof navigator !== 'undefined' && navigator.serviceWorker) {
-    // Scope restrito evita que o SW do painel intercepte o checkout e scripts de terceiros (pixels, gateways).
-    navigator.serviceWorker.register('/painel-sw.js', { scope: '/painel/' }).catch((error) => {
-        console.warn('[PWA] Falha ao registrar service worker:', error);
-    });
-}
-
-// Vidstack Player 1.x (Web Components) – estilos e registros antes do Vue
-import 'vidstack/player/styles/default/theme.css';
-import 'vidstack/player/styles/default/layouts/audio.css';
-import 'vidstack/player/styles/default/layouts/video.css';
-import 'vidstack/player';
-import 'vidstack/player/layouts';
-import 'vidstack/player/ui';
-import { createInertiaApp, usePage } from '@inertiajs/vue3';
+import { createInertiaApp, usePage, router } from '@inertiajs/vue3';
 import { createApp as createVueApp, h } from 'vue';
 import { watchEffect } from 'vue';
 import { resolvePageComponent } from 'laravel-vite-plugin/inertia-helpers';
 import { createPinia } from 'pinia';
-import DemoBanner from '@/components/DemoBanner.vue';
+import { resolveLoginPathForExpiredSession } from './lib/sessionExpired';
+
+// Envia o CSRF da meta em toda visita Inertia (evita 419 após sessão longa ou abas antigas)
+router.on('before', (event) => {
+    const token = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content');
+    if (token) {
+        event.detail.visit.headers = {
+            ...event.detail.visit.headers,
+            'X-CSRF-TOKEN': token,
+        };
+    }
+});
+
+router.on('invalid', (event) => {
+    if (event.detail.response?.status === 419) {
+        event.preventDefault();
+        // Hard navigate para login com ?expired=1 (token fresco) — sem reload silencioso
+        window.location.href = resolveLoginPathForExpiredSession(
+            window.location.pathname,
+            window.location.search,
+        );
+    }
+});
 
 // Sincroniza a meta csrf-token com o token da página atual (evita 419 em gateways e outras requisições axios)
 const CsrfSync = {
@@ -135,8 +130,7 @@ createInertiaApp({
     },
     setup({ el, App, props, plugin }) {
         const vueApp = createVueApp({
-            render: () =>
-                h('div', { class: 'contents' }, [h(App, props), h(DemoBanner), h(CsrfSync)]),
+            render: () => h('div', { class: 'contents' }, [h(App, props), h(CsrfSync)]),
         });
         vueApp.use(plugin);
         vueApp.use(createPinia());
@@ -144,6 +138,6 @@ createInertiaApp({
     },
     progress: {
         delay: 200,
-        color: '#8A2BE2',
+        color: '#0ea5e9',
     },
 });

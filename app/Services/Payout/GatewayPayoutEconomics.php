@@ -38,6 +38,18 @@ class GatewayPayoutEconomics
      */
     public static function fromSlug(string $slug): array
     {
+        if ($slug === 'cajupay') {
+            // Contas multi-CajuPay (CajuPayAccount) — não a credencial legada GatewayCredential.
+            $e = \App\Services\CajuPay\CajuPayCredentialEconomics::fromGateway();
+
+            return [
+                'required_min_net' => $e['required_min_net'],
+                'payout_min_brl' => $e['cajupay_payout_min_brl'],
+                'admin_fee_pix_brl' => $e['cajupay_admin_fee_pix_brl'],
+                'admin_fee_payout_brl' => $e['cajupay_admin_fee_payout_brl'],
+            ];
+        }
+
         $cred = GatewayCredential::resolveForPayment(null, $slug);
         if ($cred === null || ! $cred->is_connected) {
             return self::defaults();
@@ -69,11 +81,33 @@ class GatewayPayoutEconomics
             $minPayout = self::parseNonNegative($credentials['woovi_payout_min_brl'] ?? null, self::DEFAULT_MIN_PAYOUT_BRL);
             $feePix = self::parseNonNegative($credentials['woovi_admin_fee_pix_brl'] ?? null, 0.0);
             $feePayout = self::parseNonNegative($credentials['woovi_admin_fee_payout_brl'] ?? null, 0.0);
+        } elseif ($slug === 'bspay') {
+            $minPayout = self::parseNonNegative($credentials['bspay_payout_min_brl'] ?? null, self::DEFAULT_MIN_PAYOUT_BRL);
+            $feePix = self::parseNonNegative($credentials['bspay_admin_fee_pix_brl'] ?? null, 0.0);
+            $feePayout = self::parseNonNegative($credentials['bspay_admin_fee_payout_brl'] ?? null, 0.0);
+        } elseif ($slug === 'versell') {
+            $minPayout = self::parseNonNegative($credentials['versell_payout_min_brl'] ?? null, self::DEFAULT_MIN_PAYOUT_BRL);
+            $feePix = self::parseNonNegative($credentials['versell_admin_fee_pix_brl'] ?? null, 0.0);
+            $feePayout = self::parseNonNegative($credentials['versell_admin_fee_payout_brl'] ?? null, 0.0);
+        } elseif ($slug === 'xflow') {
+            $minPayout = self::parseNonNegative($credentials['xflow_payout_min_brl'] ?? null, self::DEFAULT_MIN_PAYOUT_BRL);
+            $feePix = self::parseNonNegative($credentials['xflow_admin_fee_pix_brl'] ?? null, 0.0);
+            $feePayout = self::parseNonNegative($credentials['xflow_admin_fee_payout_brl'] ?? null, 0.0);
+        } elseif ($slug === 'okto') {
+            $minPayout = self::parseNonNegative($credentials['okto_payout_min_brl'] ?? null, self::DEFAULT_MIN_PAYOUT_BRL);
+            $feePix = self::parseNonNegative($credentials['okto_admin_fee_pix_brl'] ?? null, 0.0);
+            $feePayout = self::parseNonNegative($credentials['okto_admin_fee_payout_brl'] ?? null, 0.0);
+        } elseif ($slug === 'onlyup') {
+            $minPayout = self::parseNonNegative($credentials['onlyup_payout_min_brl'] ?? null, self::DEFAULT_MIN_PAYOUT_BRL);
+            $feePix = self::parseNonNegative($credentials['onlyup_admin_fee_pix_brl'] ?? null, 0.0);
+            $feePayout = self::parseNonNegative($credentials['onlyup_admin_fee_payout_brl'] ?? null, 0.0);
         } else {
             return self::defaults();
         }
 
-        $required = round($minPayout + $feePix + $feePayout, 2);
+        // Piso técnico do adquirente = mínimo líquido configurado.
+        // Taxas admin (PIX/saque) não entram no piso do seller — só KPIs + valor da API de cashout.
+        $required = round($minPayout, 2);
 
         return [
             'required_min_net' => $required,

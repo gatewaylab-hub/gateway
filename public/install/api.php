@@ -33,7 +33,30 @@ if ($isAppInstalled($basePath)) {
     exit;
 }
 
+if (! filter_var(getenv('INSTALLER_ENABLED') !== false ? getenv('INSTALLER_ENABLED') : 'true', FILTER_VALIDATE_BOOLEAN)) {
+    ob_end_clean();
+    echo json_encode(['success' => false, 'message' => 'Instalador web desabilitado.']);
+    exit;
+}
+
+$expectedInstallerToken = getenv('INSTALLER_TOKEN') ?: '';
+if ($expectedInstallerToken === '' && is_file($basePath . DIRECTORY_SEPARATOR . '.install-token')) {
+    $expectedInstallerToken = trim((string) file_get_contents($basePath . DIRECTORY_SEPARATOR . '.install-token'));
+}
+if ($expectedInstallerToken !== '') {
+    $provided = $_SERVER['HTTP_X_INSTALLER_TOKEN'] ?? $_GET['installer_token'] ?? '';
+    if (! is_string($provided) || ! hash_equals($expectedInstallerToken, $provided)) {
+        ob_end_clean();
+        http_response_code(403);
+        echo json_encode(['success' => false, 'message' => 'Token de instalação inválido.']);
+        exit;
+    }
+}
+
 $input = json_decode(file_get_contents('php://input') ?: '{}', true) ?: [];
+if ($expectedInstallerToken !== '' && empty($input['installer_token'])) {
+    $input['installer_token'] = $_SERVER['HTTP_X_INSTALLER_TOKEN'] ?? $_GET['installer_token'] ?? '';
+}
 $action = $input['action'] ?? '';
 
 /**
@@ -93,9 +116,9 @@ if ($action === 'install-step') {
     $dbDatabase = $input['db_database'] ?? '';
     $dbUser = $input['db_username'] ?? '';
     $dbPass = $input['db_password'] ?? '';
-    $appName = $input['app_name'] ?? 'gatewayLab';
+    $appName = $input['app_name'] ?? 'Getfy';
     $appUrl = rtrim($input['app_url'] ?? '', '/');
-    $appEnv = $input['app_env'] ?? 'production';
+    $appEnv = 'production';
     $sessionDriver = $input['session_driver'] ?? 'file';
 
     if (empty($dbDatabase) || empty($dbUser)) {
@@ -105,7 +128,7 @@ if ($action === 'install-step') {
     $queueDriver = $sessionDriver;
     $cacheDriver = $sessionDriver === 'redis' ? 'redis' : 'file';
     $envPath = $basePath . '/.env';
-    $isDev = ($appEnv === 'local');
+    $isDev = false;
 
     $phpBin = null;
     if (defined('PHP_BINARY') && PHP_BINARY) {
@@ -284,8 +307,9 @@ APP_MAINTENANCE_DRIVER=file
 BCRYPT_ROUNDS=12
 
 LOG_CHANNEL=stack
-LOG_STACK=single
-LOG_LEVEL=debug
+LOG_STACK=daily
+LOG_LEVEL=warning
+LOG_DAILY_DAYS=7
 
 DB_CONNECTION=mysql
 DB_HOST={$dbHost}
@@ -480,11 +504,13 @@ PWA_VAPID_PRIVATE=
                     $app = require $basePath . '/bootstrap/app.php';
                     $app->make(\Illuminate\Contracts\Console\Kernel::class)->bootstrap();
                     $app->make(\Illuminate\Contracts\Console\Kernel::class)->call('pwa:vapid');
-                    $log[] = '[Fallback] Chaves VAPID geradas em processo.';
+                    $log[] = '[Fallback] Chaves VAPID geradas no .env (opcional).';
                 }
             } catch (Throwable $e) {
-                $log[] = '[Aviso] pwa:vapid falhou: ' . $e->getMessage() . ' – rode depois: php artisan pwa:vapid';
+                $log[] = '[Aviso] pwa:vapid opcional: ' . $e->getMessage() . ' – configure push em Plataforma → App.';
             }
+        } else {
+            $log[] = '[Info] Chaves VAPID no .env. Você também pode usar Plataforma → App → Notificações push (VAPID ou Firebase).';
         }
         $cronSecret = bin2hex(random_bytes(24));
         $envContent = file_get_contents($envPath);

@@ -14,7 +14,16 @@ const emit = defineEmits(['update:open', 'unread-count-update']);
 
 const page = usePage();
 const pushEnabled = computed(() => !!page.props.push_enabled);
-const { pushRegistered, registerAndSubscribe, pushSubscribing, checkExistingSubscription, lastPushError } = usePanelPushSubscribe();
+const {
+    pushRegistered,
+    registerAndSubscribe,
+    pushSubscribing,
+    subscribeInFlight,
+    checkExistingSubscription,
+    lastPushError,
+    pushNeedsResubscribe,
+    needsPermission,
+} = usePanelPushSubscribe();
 
 // Não acessar Notification no template (é API global; Vue resolve como prop do componente). Tudo via computeds:
 const hasNotificationAPI = computed(() => typeof window !== 'undefined' && typeof window.Notification !== 'undefined');
@@ -24,7 +33,36 @@ const notificationPermissionDenied = computed(
 const notificationPermissionGranted = computed(
     () => hasNotificationAPI.value && window.Notification.permission === 'granted'
 );
-const pushActive = computed(() => notificationPermissionGranted.value && pushRegistered.value);
+const pushActive = computed(() => notificationPermissionGranted.value && pushRegistered.value && !pushNeedsResubscribe.value);
+
+const pushErrorMessage = computed(() => {
+    const err = lastPushError.value;
+    if (err === 'notification_permission_default' || needsPermission.value) {
+        return 'Permita notificações no navegador para ativar os avisos de vendas.';
+    }
+    if (err === 'push_not_configured') {
+        return 'Notificações push não configuradas no servidor (chaves VAPID).';
+    }
+    if (err === 'notification_permission_denied') {
+        return 'Notificações bloqueadas. Habilite nas configurações do navegador.';
+    }
+    if (err === 'csrf_expired') {
+        return 'Sessão expirada. Recarregue a página e tente ativar novamente.';
+    }
+    if (err === 'rate_limited') {
+        return 'Muitas tentativas. Aguarde um minuto e tente novamente.';
+    }
+    if (err === 'push_forbidden') {
+        return 'Sem permissão para ativar notificações nesta conta.';
+    }
+    if (pushNeedsResubscribe.value) {
+        return 'Sua inscrição expirou após uma atualização. Toque em reativar abaixo.';
+    }
+    if (err) {
+        return 'Não foi possível ativar agora. Tente novamente em alguns segundos.';
+    }
+    return '';
+});
 // Botão "Ativar": este navegador não inscrito, push habilitado no servidor, API disponível e permissão não negada
 const canActivatePush = computed(
     () =>
@@ -49,6 +87,9 @@ async function fetchNotifications() {
         notifications.value = data.data ?? [];
         unreadCount.value = data.unread_count ?? 0;
         pushSubscribed.value = data.push_subscribed ?? false;
+            if (data.push_needs_resubscribe) {
+                pushNeedsResubscribe.value = true;
+            }
         meta.value = data.meta ?? { current_page: 1, last_page: 1, total: 0 };
         emit('unread-count-update', unreadCount.value);
     } catch (_) {
@@ -62,12 +103,14 @@ watch(
     () => props.open,
     async (isOpen) => {
         if (isOpen) {
-            const synced = await checkExistingSubscription();
-            await fetchNotifications();
-            // Se o browser tiver subscription válida, mas o endpoint de listagem ainda retornar estado antigo,
-            // usamos a confirmação local para evitar mostrar "inativo" incorretamente.
-            if (synced && !pushSubscribed.value) {
-                pushSubscribed.value = true;
+            if (!subscribeInFlight.value) {
+                const synced = await checkExistingSubscription();
+                await fetchNotifications();
+                if (synced && !pushSubscribed.value) {
+                    pushSubscribed.value = true;
+                }
+            } else {
+                await fetchNotifications();
             }
         }
     },
@@ -136,6 +179,7 @@ function formatDate(dateStr) {
 
 async function activateNotifications() {
     if (typeof window === 'undefined' || typeof window.Notification === 'undefined' || !pushEnabled.value) return;
+    if (subscribeInFlight.value) return;
     activatingPush.value = true;
     try {
         const result = await window.Notification.requestPermission();
@@ -145,8 +189,13 @@ async function activateNotifications() {
                 await fetchNotifications();
                 pushSubscribed.value = true;
             }
+        } else if (result === 'denied') {
+            lastPushError.value = 'notification_permission_denied';
         }
-    } catch (_) {}
+    } catch (e) {
+        console.warn('activateNotifications failed:', e);
+        lastPushError.value = 'subscription_failed';
+    }
     activatingPush.value = false;
 }
 
@@ -240,16 +289,10 @@ const hasUnread = computed(() => unreadCount.value > 0);
                             Notificações bloqueadas. Habilite nas configurações do navegador para receber avisos.
                         </p>
                         <p
-                            v-else-if="pushEnabled && !pushActive && lastPushError"
+                            v-else-if="pushEnabled && !pushActive && pushErrorMessage"
                             class="mt-2 text-xs text-zinc-500 dark:text-zinc-400"
                         >
-                            Não foi possível ativar agora. Tente novamente em alguns segundos.
-                        </p>
-                        <p
-                            v-else-if="!pushEnabled"
-                            class="mt-2 text-xs text-zinc-500 dark:text-zinc-400"
-                        >
-                            Notificações push não configuradas no servidor (chaves VAPID).
+                            {{ pushErrorMessage }}
                         </p>
                     </div>
 

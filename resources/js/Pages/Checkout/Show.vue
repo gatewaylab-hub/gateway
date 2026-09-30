@@ -1,6 +1,7 @@
 <script setup>
-import { ref, computed, watch, onUnmounted, onMounted } from 'vue';
-import { Head } from '@inertiajs/vue3';
+import { ref, computed, watch, onMounted, onUnmounted, toRef, provide } from 'vue';
+import { getMetaEntries } from '@/lib/metaTracking/browserPixel.js';
+import { Head, usePage } from '@inertiajs/vue3';
 import { AlertCircle, CheckCircle2 } from 'lucide-vue-next';
 import { useCheckoutLocale } from '@/composables/useCheckoutLocale';
 import CheckoutTimer from '@/components/checkout/CheckoutTimer.vue';
@@ -9,14 +10,22 @@ import CheckoutYoutube from '@/components/checkout/CheckoutYoutube.vue';
 import CheckoutSummary from '@/components/checkout/CheckoutSummary.vue';
 import CheckoutForm from '@/components/checkout/CheckoutForm.vue';
 import CheckoutSidebar from '@/components/checkout/CheckoutSidebar.vue';
+import CheckoutPurchaseSummary from '@/components/checkout/CheckoutPurchaseSummary.vue';
+import CheckoutLegalFooter from '@/components/checkout/CheckoutLegalFooter.vue';
+import { usePlatformBranding } from '@/composables/usePlatformBranding';
 import SalesNotification from '@/components/checkout/SalesNotification.vue';
 import SupportButton from '@/components/checkout/SupportButton.vue';
 import ExitPopup from '@/components/checkout/ExitPopup.vue';
 import ConversionPixels from '@/components/checkout/ConversionPixels.vue';
+import { runCheckoutMetaTracking } from '@/composables/useMetaCheckoutTracking';
+import { trackMetricsEvent } from '@/lib/metricsTracking.js';
+import MarketplaceCheckoutShell from '@/Layouts/MarketplaceCheckoutShell.vue';
 
 defineOptions({ layout: null });
 
 const PREVIEW_MESSAGE_TYPE = 'checkout-builder-preview-config';
+const PREVIEW_READY_TYPE = 'checkout-builder-preview-ready';
+const PREVIEW_STORAGE_KEY = 'checkout-builder-live-preview-v1';
 
 const props = defineProps({
     product: { type: Object, required: true },
@@ -50,24 +59,90 @@ const props = defineProps({
     card_mercadopago_sandbox: { type: Boolean, default: false },
     /** Chaves por gateway slug para gateways de plugin (checkout_payload_keys na definição). Ex.: { 'meu-gateway': { publishable_key: '...' } } */
     card_gateway_keys: { type: Object, default: () => ({}) },
+    paypal_client_id: { type: String, default: '' },
+    paypal_sandbox: { type: Boolean, default: false },
     subscription_plan: { type: Object, default: null },
     /** Definido no servidor quando a URL traz `?preview=1` (preview no iframe do Builder). */
     checkout_builder_preview: { type: Boolean, default: false },
+    turnstile: { type: Object, default: () => ({ enabled: false, site_key: '', mode: 'pix_boleto' }) },
     /** Código de afiliado (`?ref=`) propagado ao checkout. */
     affiliate_ref: { type: String, default: '' },
+    /** Quando true, loga motivos de tracking Meta no console do browser. */
+    meta_tracking_debug: { type: Boolean, default: false },
+    /** Aviso legal da plataforma no rodapé do quadro. Vazio = Termos · Privacidade. */
+    platform_checkout_notice: { type: String, default: '' },
+    /** Cliente logado (role cliente) com dados de perfil para pular o formulário. */
+    authenticated_customer: { type: Object, default: null },
 });
 
 const previewConfig = ref(null);
+const previewEpoch = ref(0);
 const conversionPixelsRef = ref(null);
+provide('checkoutConversionPixelsRef', conversionPixelsRef);
 
-function onPreviewMessage(event) {
-    if (!props.checkout_builder_preview) return;
-    if (event.origin !== window.location.origin) return;
-    if (event?.data?.type !== PREVIEW_MESSAGE_TYPE || event.data.config == null) return;
-    previewConfig.value = event.data.config;
+const isBuilderPreview = computed(() => {
+    if (props.checkout_builder_preview) return true;
+    if (typeof window === 'undefined') return false;
+    try {
+        return new URLSearchParams(window.location.search).get('preview') === '1';
+    } catch (_) {
+        return false;
+    }
+});
+
+function applyPreviewConfig(config) {
+    if (config == null || typeof config !== 'object') return;
+    try {
+        const next = JSON.stringify(config);
+        const prev = previewConfig.value != null ? JSON.stringify(previewConfig.value) : '';
+        if (next === prev) return;
+    } catch (_) {}
+    previewConfig.value = config;
+    previewEpoch.value += 1;
 }
 
-/** Config ao vivo do Builder (postMessage); antes da primeira mensagem usa o config do servidor. */
+function announcePreviewReady() {
+    if (!isBuilderPreview.value || typeof window === 'undefined') return;
+    if (window.parent === window) return;
+    try {
+        window.parent.postMessage({ type: PREVIEW_READY_TYPE }, '*');
+    } catch (_) {}
+}
+
+function onPreviewMessage(event) {
+    if (!isBuilderPreview.value) return;
+    const fromParent = event.source === window.parent;
+    const sameOrigin = event.origin === window.location.origin;
+    if (!fromParent && !sameOrigin) return;
+    if (event?.data?.type !== PREVIEW_MESSAGE_TYPE || event.data.config == null) return;
+    applyPreviewConfig(event.data.config);
+}
+
+function readPreviewFromStorage() {
+    try {
+        const raw = localStorage.getItem(PREVIEW_STORAGE_KEY);
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        if (parsed?.config == null) return;
+        applyPreviewConfig(parsed.config);
+    } catch (_) {}
+}
+
+let previewPollTimer = null;
+
+/** Listener no setup (não só no onMounted) para não perder postMessage se o parent disparar no @load do iframe antes do mount. */
+if (typeof window !== 'undefined') {
+    if (isBuilderPreview.value) {
+        window.addEventListener('message', onPreviewMessage);
+        window.__applyCheckoutBuilderPreview = applyPreviewConfig;
+        readPreviewFromStorage();
+    }
+    if (props.meta_tracking_debug) {
+        window.__GETFY_META_TRACKING_DEBUG__ = true;
+    }
+}
+
+/** Config ao vivo do Builder (postMessage / localStorage / bridge); antes da primeira mensagem usa o config do servidor. */
 const effectiveConfig = computed(() => {
     if (previewConfig.value != null) {
         return previewConfig.value;
@@ -75,13 +150,45 @@ const effectiveConfig = computed(() => {
     return props.config;
 });
 
-/** Listener no setup (não só no onMounted) para não perder postMessage se o parent disparar no @load do iframe antes do mount. */
-if (typeof window !== 'undefined' && props.checkout_builder_preview) {
-    window.addEventListener('message', onPreviewMessage);
-}
+/** Chave visual: força remount controlado só no modo preview quando o config muda. */
+const previewRemountKey = computed(() => {
+    if (!isBuilderPreview.value) return 'checkout';
+    try {
+        return `p-${previewEpoch.value}-${JSON.stringify({
+            a: effectiveConfig.value?.appearance,
+            t: effectiveConfig.value?.timer,
+            n: effectiveConfig.value?.sales_notification,
+            f: effectiveConfig.value?.customer_fields,
+            s: effectiveConfig.value?.summary,
+            y: effectiveConfig.value?.youtube_url,
+            yp: effectiveConfig.value?.youtube_position,
+            sb: effectiveConfig.value?.support_button,
+            ft: effectiveConfig.value?.footer,
+            ep: effectiveConfig.value?.exit_popup?.enabled,
+            rv: effectiveConfig.value?.reviews,
+        })}`;
+    } catch (_) {
+        return `p-${previewEpoch.value}`;
+    }
+});
+
+onMounted(() => {
+    if (!isBuilderPreview.value) return;
+    announcePreviewReady();
+    readPreviewFromStorage();
+    previewPollTimer = window.setInterval(readPreviewFromStorage, 200);
+    [40, 160, 400].forEach((ms) => setTimeout(() => announcePreviewReady(), ms));
+});
 onUnmounted(() => {
-    if (typeof window !== 'undefined' && props.checkout_builder_preview) {
+    if (typeof window !== 'undefined' && isBuilderPreview.value) {
         window.removeEventListener('message', onPreviewMessage);
+        if (window.__applyCheckoutBuilderPreview === applyPreviewConfig) {
+            delete window.__applyCheckoutBuilderPreview;
+        }
+    }
+    if (previewPollTimer) {
+        clearInterval(previewPollTimer);
+        previewPollTimer = null;
     }
 });
 
@@ -96,22 +203,34 @@ const {
     formatPrice,
     supportedLocales,
 } = useCheckoutLocale({
-    translations: props.checkout_translations,
-    currencies: props.currencies,
-    suggestedLocale: props.suggested_locale,
-    suggestedCurrency: props.suggested_currency,
+    translations: toRef(props, 'checkout_translations'),
+    currencies: toRef(props, 'currencies'),
+    suggestedLocale: toRef(props, 'suggested_locale'),
+    suggestedCurrency: toRef(props, 'suggested_currency'),
+    suggestedCountryCode: toRef(props, 'suggested_country_code'),
     storageKey: props.product?.checkout_slug || 'default',
 });
 
 const localeLabels = { pt_BR: 'PT', en: 'EN', es: 'ES' };
+const { branding, appName } = usePlatformBranding();
+const page = usePage();
+const marketplaceAccent = computed(() => page.props.marketplaceTheme?.accent || '#FF5A1F');
+const platformLogoUrl = computed(() =>
+    String(branding.value?.app_logo || branding.value?.app_logo_icon || '').trim()
+);
 const appearance = computed(() => effectiveConfig.value?.appearance ?? {});
-const backgroundColor = computed(() => appearance.value.background_color || '#E3E3E3');
-const primaryColor = computed(() => appearance.value.primary_color || '#8A2BE2');
+const backgroundColor = computed(() => appearance.value.background_color || '#FBF7F2');
+const primaryColor = computed(() => appearance.value.primary_color || marketplaceAccent.value);
 const banners = computed(() => appearance.value.banners ?? []);
 const sideBannersFiltered = computed(() => (appearance.value.side_banners ?? []).filter(Boolean));
 const timerConfig = computed(() => effectiveConfig.value?.timer ?? {});
 const salesNotificationConfig = computed(() => effectiveConfig.value?.sales_notification ?? {});
 const storageKey = computed(() => props.product?.checkout_slug || 'default');
+const productBackHref = computed(() => {
+    const slug = props.product?.slug;
+    return slug ? `/anuncio/${slug}` : '/';
+});
+const checkoutShellTitle = computed(() => props.product?.name || 'Finalizar compra');
 
 const seo = computed(() => effectiveConfig.value?.seo ?? {});
 /** Título da aba do navegador e para compartilhamento (Open Graph). Vem do "Título para compartilhamento" no Builder. */
@@ -165,35 +284,81 @@ const orderBumpsTotalBrl = computed(() =>
     selectedOrderBumpsList.value.reduce((sum, b) => sum + (Number(b.amount_brl) || 0), 0)
 );
 
+const shippingAmountBrl = ref(0);
+function onShippingAmountUpdate(amount) {
+    shippingAmountBrl.value = Number(amount) || 0;
+}
+const requiresShipping = computed(() => Boolean(props.product?.requires_shipping));
+watch(
+    requiresShipping,
+    (needs) => {
+        if (needs && displayCurrency.value !== 'BRL') {
+            setCurrency('BRL');
+        }
+    },
+    { immediate: true }
+);
 const checkoutTotalBrl = computed(() => {
     const base = appliedCoupon.value?.final_price ?? props.product?.price_brl ?? props.product?.price ?? 0;
-    return Number(base) + orderBumpsTotalBrl.value;
+    return Number(base) + orderBumpsTotalBrl.value + (requiresShipping.value ? shippingAmountBrl.value : 0);
 });
 
 const conversionPixels = computed(() => props.conversion_pixels || {});
 
 const checkoutTotalInCurrency = computed(() => priceInCurrency(checkoutTotalBrl.value));
 
-let initiateCheckoutRequested = false;
-async function fireInitiateCheckoutOnce() {
-    if (initiateCheckoutRequested) return;
-    initiateCheckoutRequested = true;
-    if (!conversionPixelsRef.value?.fireInitiateCheckoutReliable) return;
-    await conversionPixelsRef.value.fireInitiateCheckoutReliable(
-        checkoutTotalInCurrency.value,
-        displayCurrency.value,
-        props.product?.checkout_slug || ''
-    );
+let checkoutMetaTrackingDone = false;
+
+async function startCheckoutMetaTracking() {
+    if (checkoutMetaTrackingDone || props.checkout_builder_preview) return;
+    if (!props.checkout_session_token) return;
+
+    // Tracking interno (paralelo; nunca bloqueia Meta/UTMify).
+    try {
+        trackMetricsEvent({
+            event_name: 'checkout_view',
+            event_id: `chk-view:${props.checkout_session_token}`,
+            product_id: props.product?.id,
+            tenant_id: props.product?.tenant_id,
+            offer_id: props.offer?.id,
+            plan_id: props.subscription_plan?.id,
+            affiliate_ref: props.affiliate_ref || undefined,
+            properties: { checkout_session_token: props.checkout_session_token },
+        });
+    } catch (_) {}
+
+    const result = await runCheckoutMetaTracking({
+        pixels: conversionPixels.value,
+        checkoutSessionToken: props.checkout_session_token,
+        value: checkoutTotalInCurrency.value,
+        currency: displayCurrency.value,
+        contentKey: props.product?.checkout_slug || '',
+        contentName: props.product?.name || '',
+    });
+
+    if (result?.ok) {
+        checkoutMetaTrackingDone = true;
+    }
 }
 
-onMounted(async () => {
-    // Meta: InitiateCheckout ao abrir o checkout (evita double fire no mesmo carreg. com initiateCheckoutRequested).
-    await fireInitiateCheckoutOnce();
-});
+function onConversionPixelsMetaReady() {
+    startCheckoutMetaTracking();
+}
+
+function onConversionPixelsReady() {
+    if (getMetaEntries(conversionPixels.value).length === 0) {
+        startCheckoutMetaTracking();
+    }
+}
 </script>
 
 <template>
-    <ConversionPixels ref="conversionPixelsRef" :pixels="conversionPixels" @ready="fireInitiateCheckoutOnce" />
+    <ConversionPixels
+        ref="conversionPixelsRef"
+        :pixels="conversionPixels"
+        @ready="onConversionPixelsReady"
+        @meta-ready="onConversionPixelsMetaReady"
+    />
     <Head>
         <title>{{ pageTitle }}</title>
         <meta v-if="pageDescription" name="description" :content="pageDescription" />
@@ -202,19 +367,30 @@ onMounted(async () => {
         <meta v-if="ogImage" property="og:image" :content="ogImage" />
         <link rel="icon" :href="faviconHref" />
     </Head>
+    <MarketplaceCheckoutShell
+        :title="checkoutShellTitle"
+        back-label="Voltar ao anúncio"
+        :back-href="productBackHref"
+        transparent
+    >
     <div
         id="getfy-checkout-root"
+        :key="previewRemountKey"
         data-checkout="page"
-        class="min-h-screen transition-colors duration-300"
-        :style="{ backgroundColor }"
+        class="min-h-[60vh] transition-colors duration-300"
+        :style="{ backgroundColor, '--mk-accent': primaryColor }"
     >
         <CheckoutTimer :config="timerConfig" :storage-key="storageKey" :t="t" />
 
-        <div class="mx-auto max-w-6xl px-4 pb-6 pt-10 sm:px-6 sm:pb-8 sm:pt-12 lg:pb-10 lg:pt-14" data-checkout="layout-inner">
+        <div
+            class="mx-auto max-w-[1240px] px-5 pb-8 sm:pb-10"
+            :class="banners.length ? 'pt-3' : 'pt-6'"
+            data-checkout="layout-inner"
+        >
             <!-- Flash -->
             <div
                 v-if="flash?.error"
-                class="mb-6 flex items-center gap-3 rounded-2xl border border-red-200/80 bg-red-50/95 px-4 py-3.5 text-sm font-medium text-red-800 shadow-sm backdrop-blur sm:px-5"
+                class="mb-5 flex items-center gap-3 rounded-[14px] border border-red-200 bg-red-50 px-4 py-3.5 text-sm font-medium text-red-800 sm:px-5"
                 data-checkout="flash-error"
                 role="alert"
             >
@@ -225,7 +401,7 @@ onMounted(async () => {
             </div>
             <div
                 v-if="flash?.success"
-                class="mb-6 flex items-center gap-3 rounded-2xl border border-emerald-200/80 bg-emerald-50/95 px-4 py-3.5 text-sm font-medium text-emerald-800 shadow-sm backdrop-blur sm:px-5"
+                class="mb-5 flex items-center gap-3 rounded-[14px] border border-emerald-200 bg-emerald-50 px-4 py-3.5 text-sm font-medium text-emerald-800 sm:px-5"
                 data-checkout="flash-success"
                 role="status"
             >
@@ -236,11 +412,11 @@ onMounted(async () => {
             </div>
             <div
                 v-if="flash?.info"
-                class="mb-6 flex items-center gap-3 rounded-2xl border border-sky-200/80 bg-sky-50/95 px-4 py-3.5 text-sm font-medium text-sky-800 shadow-sm backdrop-blur sm:px-5"
+                class="mb-5 flex items-center gap-3 rounded-[14px] border border-[#E2D7CB] bg-white px-4 py-3.5 text-sm font-medium text-[#3D332B] sm:px-5"
                 data-checkout="flash-info"
                 role="status"
             >
-                <span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-sky-100 text-sky-600">
+                <span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#F1EAE2] text-[color:var(--mk-accent)]">
                     <CheckCircle2 class="h-4 w-4" />
                 </span>
                 {{ flash.info }}
@@ -249,11 +425,11 @@ onMounted(async () => {
             <CheckoutBanners v-if="banners.length" :urls="banners" />
             <CheckoutYoutube v-if="(effectiveConfig?.youtube_position ?? 'top') !== 'bottom'" :url="effectiveConfig?.youtube_url" />
 
-            <div class="flex flex-col gap-8 lg:flex-row lg:gap-10" data-checkout="layout-columns">
+            <div class="flex flex-col gap-6 lg:flex-row lg:gap-8" data-checkout="layout-columns">
                 <!-- Coluna principal -->
                 <div class="w-full lg:w-2/3" data-checkout="column-primary">
                     <div
-                        class="overflow-visible rounded-3xl border border-white/20 bg-white/95 p-6 shadow-xl shadow-black/5 backdrop-blur sm:p-8"
+                        class="overflow-visible rounded-[16px] border border-[#EBE2D8] bg-white p-5 shadow-[0_1px_0_rgba(26,20,16,0.04)] sm:p-7"
                         data-checkout="card-main"
                     >
                         <CheckoutSummary
@@ -273,13 +449,15 @@ onMounted(async () => {
                             @set-locale="setLocale"
                             @set-currency="setCurrency"
                         />
-                        <hr class="my-8 border-0 border-t border-gray-100" data-checkout="divider-summary-form" />
+                        <hr class="my-7 border-0 border-t border-[#EBE2D8]" data-checkout="divider-summary-form" />
                         <CheckoutForm
                             :product-id="product.id"
                             :product-offer-id="product.product_offer_id ?? null"
                             :subscription-plan-id="product.subscription_plan_id ?? null"
                             :affiliate-ref="affiliate_ref || ''"
                             :checkout-session-token="checkout_session_token || ''"
+                            :turnstile="turnstile || {}"
+                            :checkout-builder-preview="isBuilderPreview"
                             :order-bumps="order_bumps || []"
                             v-model:order-bump-ids="selectedOrderBumpIds"
                             :primary-color="primaryColor"
@@ -300,20 +478,48 @@ onMounted(async () => {
                             :card-mercadopago-public-key="card_mercadopago_public_key || ''"
                             :card-mercadopago-sandbox="card_mercadopago_sandbox"
                             :card-gateway-keys="card_gateway_keys || {}"
+                            :paypal-client-id="paypal_client_id || ''"
+                            :paypal-sandbox="paypal_sandbox"
+                            :checkout-locale="locale"
                             :checkout-total-brl="checkoutTotalBrl"
+                            :conversion-pixels="conversion_pixels"
+                            :requires-shipping="requiresShipping"
+                            :product-subtotal-brl="
+                                appliedCoupon?.final_price ?? product?.price_brl ?? product?.price ?? 0
+                            "
+                            :platform-checkout-notice="platform_checkout_notice || ''"
+                            :authenticated-customer="authenticated_customer"
+                            @update:shipping-amount="onShippingAmountUpdate"
                             @coupon-applied="onCouponApplied"
                             @coupon-cleared="onCouponCleared"
-                            @purchase-confirmed="
-                                (e) =>
-                                    conversionPixelsRef?.firePurchaseReliable?.(
-                                        e?.value ?? checkoutTotalBrl,
-                                        e?.currency ?? 'BRL',
-                                        e?.orderId ?? '',
-                                        false,
-                                        e?.triggerType ?? 'approved',
-                                        350
-                                    )
-                            "
+                        >
+                            <template #before-submit>
+                                <CheckoutPurchaseSummary
+                                    compact
+                                    :product="product"
+                                    :subscription-plan="subscription_plan"
+                                    :applied-coupon="appliedCoupon"
+                                    :selected-order-bumps="selectedOrderBumpsList"
+                                    :order-bumps-total-brl="orderBumpsTotalBrl"
+                                    :requires-shipping="requiresShipping"
+                                    :shipping-amount-brl="shippingAmountBrl"
+                                    :t="t"
+                                    :display-currency="displayCurrency"
+                                    :price-in-currency="priceInCurrency"
+                                    :format-price="formatPrice"
+                                    :primary-color="primaryColor"
+                                />
+                            </template>
+                        </CheckoutForm>
+                    </div>
+                    <div
+                        class="mt-4 overflow-hidden rounded-[16px] border border-[#EBE2D8] bg-white p-5 shadow-[0_1px_0_rgba(26,20,16,0.04)] lg:hidden"
+                        data-checkout="card-legal-footer"
+                    >
+                        <CheckoutLegalFooter
+                            :logo-url="platformLogoUrl"
+                            :app-name="appName"
+                            :notice="platform_checkout_notice || ''"
                         />
                     </div>
                 </div>
@@ -326,6 +532,8 @@ onMounted(async () => {
                     :applied-coupon="appliedCoupon"
                     :selected-order-bumps="selectedOrderBumpsList"
                     :order-bumps-total-brl="orderBumpsTotalBrl"
+                    :requires-shipping="requiresShipping"
+                    :shipping-amount-brl="shippingAmountBrl"
                     :t="t"
                     :display-currency="displayCurrency"
                     :price-in-currency="priceInCurrency"
@@ -344,7 +552,7 @@ onMounted(async () => {
                     :key="i"
                     :src="url"
                     alt="Banner"
-                    class="w-full rounded-2xl object-cover shadow-lg"
+                    class="w-full rounded-[14px] object-cover"
                     @error="(e) => e?.target && (e.target.style.display = 'none')"
                 />
             </div>
@@ -369,4 +577,5 @@ onMounted(async () => {
             @accept="onExitPopupAccept"
         />
     </div>
+    </MarketplaceCheckoutShell>
 </template>

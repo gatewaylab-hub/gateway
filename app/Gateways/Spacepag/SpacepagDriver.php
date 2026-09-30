@@ -23,7 +23,8 @@ class SpacepagDriver implements GatewayDriver
         float $amount,
         array $consumer,
         string $externalId,
-        string $postbackUrl
+        string $postbackUrl,
+        array $options = []
     ): array {
         $token = $this->getToken($credentials);
         if ($token === null) {
@@ -597,7 +598,7 @@ class SpacepagDriver implements GatewayDriver
             ->asJson()
             ->timeout($timeoutSeconds)
             ->withHeaders([
-                'User-Agent' => config('app.name', 'gatewayLab'),
+                'User-Agent' => config('app.name', 'Getfy'),
             ])
             ->withOptions($options);
     }

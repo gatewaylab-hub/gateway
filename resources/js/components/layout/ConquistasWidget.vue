@@ -1,12 +1,17 @@
 <script setup>
 import { computed } from 'vue';
-import { Link } from '@inertiajs/vue3';
-import { usePage } from '@inertiajs/vue3';
+import { Link, usePage } from '@inertiajs/vue3';
 import { formatCompactCurrency } from '@/lib/utils';
+import { navPrefetch } from '@/composables/useAppSidebarNav';
+import { useSellerDashboardTemplate } from '@/composables/useSellerDashboardTemplate';
+import { useSidebar } from '@/composables/useSidebar';
 
 const props = defineProps({
     variant: { type: String, default: 'header' }, // 'header' | 'sidebar' | 'dashboard'
 });
+
+const { isAurora, isKawaii, isThemedShell } = useSellerDashboardTemplate();
+const { closeMobileSidebarIfOpen, isMobile } = useSidebar();
 
 const page = usePage();
 const progress = computed(() => page.props.achievementsProgress ?? null);
@@ -36,77 +41,101 @@ const nextLabel = computed(() => {
     return formatCompactCurrency(next.threshold);
 });
 
+const remainingLabel = computed(() => {
+    const remaining = progress.value?.remaining;
+    if (remaining == null || remaining <= 0) return null;
+    if (!progress.value?.next_achievement) return null;
+    return formatCompactCurrency(remaining);
+});
+
 const totalLabel = computed(() => {
     const total = progress.value?.total_valid_sales ?? 0;
     return formatCompactCurrency(total);
 });
 
-const panelNavPrefetch = ['hover', 'click'];
+const isSidebar = computed(() => props.variant === 'sidebar');
+const showLabel = computed(
+    () => props.variant === 'header'
+        || props.variant === 'dashboard'
+        || props.variant === 'sidebar',
+);
 </script>
 
 <template>
     <Link
         v-if="progress"
         href="/conquistas"
-        :prefetch="panelNavPrefetch"
-        class="group flex shrink-0 items-center gap-3 rounded-lg px-3 py-2 transition-colors hover:bg-zinc-100 dark:hover:bg-zinc-800"
+        :prefetch="navPrefetch(isMobile)"
+        class="group flex shrink-0 cursor-pointer touch-manipulation items-center gap-3 transition-colors"
         :class="{
-            'w-full flex-col items-stretch gap-2': props.variant === 'sidebar',
-            'w-full rounded-xl border border-zinc-200 px-4 py-3 dark:border-zinc-700': props.variant === 'dashboard',
+            'flex-col items-stretch gap-2 rounded-[14px] border border-[#EBE2D8] bg-white px-3 py-3 hover:border-[#E2D7CB]': isSidebar && !isThemedShell,
+            'flex-col items-stretch gap-2 rounded-lg px-3 py-2 hover:bg-zinc-100': isSidebar && isThemedShell,
+            'w-full rounded-xl border border-[#EBE2D8] bg-[#F1EAE2]/50 px-4 py-3 hover:bg-[#F1EAE2]': props.variant === 'dashboard',
+            'rounded-lg px-3 py-2 hover:bg-[#F1EAE2]': props.variant === 'header',
+            '!border-0 !bg-transparent !p-0 hover:!bg-transparent': isAurora && isSidebar,
         }"
         title="Conquistas"
+        @click="closeMobileSidebarIfOpen"
     >
-        <div
-            class="flex shrink-0 items-center justify-center overflow-hidden rounded-xl bg-zinc-100 dark:bg-zinc-800"
-            :class="[
-                props.variant === 'sidebar' ? 'h-12 w-12' : 'h-10 w-10',
-                { 'opacity-60 grayscale': isLocked },
-            ]"
-        >
-            <img
-                v-if="iconUrl"
-                :src="iconUrl"
-                alt=""
-                :class="[
-                    props.variant === 'sidebar' ? 'h-8 w-8' : 'h-7 w-7',
-                    'object-contain',
-                ]"
-            />
-        </div>
-        <div
-            class="min-w-0 flex-1"
-            :class="[
-                props.variant === 'sidebar' ? 'w-full' : '',
-                props.variant === 'dashboard' ? 'w-full' : '',
-                props.variant === 'header' ? 'hidden w-[130px] sm:block' : '',
-            ]"
-        >
-            <p
-                v-if="props.variant === 'header' || props.variant === 'dashboard' || props.variant === 'sidebar'"
-                class="mb-1 text-[10px] font-semibold uppercase tracking-wide text-zinc-600 dark:text-zinc-400"
-            >
-                FATURAMENTO
-            </p>
+        <div class="flex items-center gap-3" :class="isSidebar ? 'w-full' : ''">
             <div
-                class="w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700"
+                class="flex shrink-0 items-center justify-center overflow-hidden rounded-xl bg-[#F1EAE2]"
                 :class="[
-                    props.variant === 'sidebar' || props.variant === 'dashboard' ? 'h-2.5' : 'h-2',
+                    isSidebar ? 'h-11 w-11' : 'h-10 w-10',
+                    { 'opacity-60 grayscale': isLocked },
                 ]"
             >
-                <div
-                    class="h-full rounded-full bg-[var(--color-primary)] transition-all duration-500"
-                    :style="{ width: `${progressPercent}%` }"
+                <img
+                    v-if="iconUrl"
+                    :src="iconUrl"
+                    alt=""
+                    :class="[
+                        isSidebar ? 'h-7 w-7' : 'h-7 w-7',
+                        'object-contain',
+                    ]"
                 />
             </div>
-            <p
-                class="mt-1 truncate text-zinc-500 dark:text-zinc-400"
+            <div
+                class="min-w-0 flex-1"
                 :class="[
-                    props.variant === 'sidebar' || props.variant === 'dashboard' ? 'text-xs' : 'text-[11px]',
+                    isSidebar || props.variant === 'dashboard' ? 'w-full' : '',
+                    props.variant === 'header' ? 'hidden w-[130px] sm:block' : '',
                 ]"
             >
-                {{ totalLabel }}
-                <span v-if="nextLabel"> → {{ nextLabel }}</span>
-            </p>
+                <p
+                    v-if="showLabel"
+                    class="mb-1 text-[10px] font-semibold uppercase tracking-wide text-[#8A7B6E]"
+                    :class="isAurora && isSidebar ? 'aurora-fg-muted' : isKawaii && isSidebar ? 'kawaii-fg-muted' : ''"
+                >
+                    Faturamento
+                </p>
+                <div
+                    class="w-full overflow-hidden rounded-full bg-[#EBE2D8]"
+                    :class="[
+                        isSidebar || props.variant === 'dashboard' ? 'h-2' : 'h-2',
+                    ]"
+                >
+                    <div
+                        class="h-full rounded-full bg-[var(--color-primary)] transition-all duration-500"
+                        :style="{ width: `${progressPercent}%` }"
+                    />
+                </div>
+                <p
+                    class="mt-1 truncate text-[#6B5E54]"
+                    :class="[
+                        isSidebar || props.variant === 'dashboard' ? 'text-xs' : 'text-[11px]',
+                    ]"
+                >
+                    {{ totalLabel }}
+                    <span v-if="nextLabel"> → {{ nextLabel }}</span>
+                </p>
+                <p
+                    v-if="remainingLabel"
+                    class="truncate text-[10px] text-[#8A7B6E]"
+                >
+                    Faltam {{ remainingLabel }}
+                </p>
+            </div>
         </div>
     </Link>
 </template>

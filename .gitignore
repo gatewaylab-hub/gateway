@@ -1,7 +1,6 @@
 *.log
 .DS_Store
 .env
-.docker/stack.env
 /vendor
 /bootstrap/cache/*
 !/bootstrap/cache/.gitignore
@@ -26,7 +25,24 @@
 Homestead.json
 Homestead.yaml
 Thumbs.db
-/docs
+/docs/*
+!/docs/releases/
+!/docs/releases/**
+!/docs/llm/
+!/docs/llm/**
 /Docs Gateways
-docs
 Docs Gateways
+/plugins
+/public/build
+/.docker/app.key
+/.docker/pwa_vapid.env
+/.docker/stack.env
+/.docker/setup.done
+/.docker/app.url
+/.docker/Caddyfile.domains
+/.docker/compose-profile
+/.docker/certs/
+/storage/stacker/
+/agent/node_modules
+/dist-releases
+/tmp*

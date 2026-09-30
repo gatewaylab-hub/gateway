@@ -43,17 +43,36 @@ class KycRegistrationTest extends TestCase
             'monthly_revenue_range' => 'up_to_10k',
             'password' => 'Password123!',
             'password_confirmation' => 'Password123!',
+            'accept_terms_privacy' => '1',
         ];
 
         $response = $this->post('/cadastro', $payload);
 
-        $response->assertRedirect('/dashboard');
+        $response->assertRedirect('/financeiro?tab=seus-dados');
 
         $u = User::query()->where('email', 'vendedor@example.com')->first();
         $this->assertNotNull($u);
         $this->assertSame(User::ROLE_INFOPRODUTOR, $u->role);
         $this->assertSame(User::KYC_NOT_SUBMITTED, $u->kyc_status);
+        $this->assertSame('pending', $u->account_status);
         $this->assertAuthenticatedAs($u);
+    }
+
+    public function test_dashboard_redirects_when_kyc_not_submitted(): void
+    {
+        $seller = User::query()->create([
+            'name' => 'Seller',
+            'email' => 'seller-gate@example.com',
+            'password' => Hash::make('password'),
+            'role' => User::ROLE_INFOPRODUTOR,
+            'kyc_status' => User::KYC_NOT_SUBMITTED,
+            'account_status' => 'pending',
+        ]);
+        $seller->update(['tenant_id' => $seller->id]);
+
+        $this->actingAs($seller)
+            ->get('/dashboard')
+            ->assertRedirect('/financeiro?tab=seus-dados');
     }
 
     public function test_validar_documento_disponivel_para_cpf_livre(): void
@@ -109,6 +128,23 @@ class KycRegistrationTest extends TestCase
             ]);
     }
 
+    public function test_pending_review_cannot_access_dashboard(): void
+    {
+        $seller = User::query()->create([
+            'name' => 'Seller Review',
+            'email' => 'seller-review@example.com',
+            'password' => Hash::make('password'),
+            'role' => User::ROLE_INFOPRODUTOR,
+            'kyc_status' => User::KYC_PENDING_REVIEW,
+            'account_status' => 'pending',
+        ]);
+        $seller->update(['tenant_id' => $seller->id]);
+
+        $this->actingAs($seller)
+            ->get('/dashboard')
+            ->assertRedirect('/financeiro?tab=seus-dados');
+    }
+
     public function test_finance_pix_blocked_without_kyc(): void
     {
         $seller = User::query()->create([
@@ -116,7 +152,8 @@ class KycRegistrationTest extends TestCase
             'email' => 'seller@example.com',
             'password' => Hash::make('password'),
             'role' => User::ROLE_INFOPRODUTOR,
-            'kyc_status' => User::KYC_NOT_SUBMITTED,
+            'kyc_status' => User::KYC_PENDING_REVIEW,
+            'account_status' => 'pending',
         ]);
         $seller->update(['tenant_id' => $seller->id]);
 
@@ -128,7 +165,6 @@ class KycRegistrationTest extends TestCase
             'pix_key' => '52998224725',
         ]);
 
-        $response->assertRedirect(route('financeiro.seller.index'));
-        $this->assertStringContainsString('KYC', (string) session('error'));
+        $response->assertRedirect('/financeiro?tab=seus-dados');
     }
 }

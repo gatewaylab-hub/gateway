@@ -1,19 +1,39 @@
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { Link, usePage } from '@inertiajs/vue3';
-import { LayoutDashboard, CircleDollarSign, Package, Cable } from 'lucide-vue-next';
+import { LayoutDashboard, CircleDollarSign, Package, Wallet } from 'lucide-vue-next';
 import { usePwaInstall } from '@/composables/usePwaInstall';
+import { useSidebar } from '@/composables/useSidebar';
+import { panelNavPrefetch } from '@/composables/useAppSidebarNav';
+
+const DEFAULT_LOGO = '/images/favicon.png';
 
 const page = usePage();
 const { isStandalone } = usePwaInstall('painel');
-const appSettings = () => page.props.appSettings ?? {};
-const logoUrl = () => appSettings().pwa_icon_192 || appSettings().app_logo_icon || '/icons/icone.png';
+const { isMobileOpen, isMobile } = useSidebar();
+
+const appSettings = computed(() => page.props.appSettings ?? {});
+
+const logoLight = computed(() => {
+    const s = appSettings.value;
+    return s.pwa_nav_logo || s.app_logo_icon || DEFAULT_LOGO;
+});
+
+const logoDark = computed(() => {
+    const s = appSettings.value;
+    return s.pwa_nav_logo_dark || s.app_logo_icon_dark || logoLight.value;
+});
+
+const showDualLogo = computed(() => {
+    const s = appSettings.value;
+    return !!(s.pwa_nav_logo_dark || s.app_logo_icon_dark);
+});
 
 const navItems = [
     { name: 'Home', href: '/dashboard', icon: LayoutDashboard },
     { name: 'Vendas', href: '/vendas', icon: CircleDollarSign },
     { name: 'Produtos', href: '/produtos', icon: Package },
-    { name: 'Integrações', href: '/integracoes', icon: Cable },
+    { name: 'Financeiro', href: '/financeiro', icon: Wallet },
 ];
 
 const navVisible = ref(true);
@@ -27,7 +47,14 @@ function isActive(href) {
     return url === href || url.startsWith(href + '/');
 }
 
-const panelNavPrefetch = ['hover', 'click'];
+function navLinkClass(href) {
+    return [
+        'flex min-w-0 flex-col items-center justify-center gap-0.5 px-1 py-2 text-[11px] font-medium leading-tight rounded-xl transition-colors cursor-pointer touch-manipulation border-0 bg-transparent text-center no-underline',
+        isActive(href)
+            ? 'text-[var(--color-primary)]'
+            : 'text-[#8A7B6E] hover:text-[#1A1410]',
+    ];
+}
 
 function onScroll() {
     if (typeof window === 'undefined') return;
@@ -57,12 +84,12 @@ onUnmounted(() => {
 <template>
     <nav
         v-if="isStandalone"
-        class="fixed bottom-4 left-4 right-4 z-[99998] mx-auto flex max-w-md items-center justify-between gap-1 rounded-2xl bg-zinc-900 px-3 py-2 shadow-lg dark:bg-zinc-950 lg:hidden transition-transform duration-300 ease-out"
+        class="fixed bottom-4 left-4 right-4 z-[99998] mx-auto grid max-w-md grid-cols-5 items-end gap-0 rounded-2xl border border-[#EBE2D8] bg-white px-1 pb-2 pt-3 shadow-lg lg:hidden transition-transform duration-300 ease-out"
+        :class="isMobile && isMobileOpen ? 'pointer-events-none' : ''"
         aria-label="Navegação principal"
         role="navigation"
         :style="{ transform: navVisible ? 'translateY(0)' : 'translateY(calc(100% + 2rem))' }"
     >
-        <!-- Home e Vendas -->
         <Link
             v-for="item in navItems.slice(0, 2)"
             :key="item.href"
@@ -70,37 +97,40 @@ onUnmounted(() => {
             :prefetch="panelNavPrefetch"
             :aria-current="isActive(item.href) ? 'page' : undefined"
             :aria-label="item.name"
-            class="flex flex-1 flex-col items-center gap-0.5 px-2 py-2 text-xs font-medium rounded-xl transition-colors cursor-pointer touch-manipulation border-0 bg-transparent text-left no-underline"
-            :class="
-                isActive(item.href)
-                    ? 'text-[var(--color-primary)]'
-                    : 'text-zinc-400 hover:text-zinc-200'
-            "
+            :class="navLinkClass(item.href)"
         >
             <component :is="item.icon" class="h-5 w-5 shrink-0" aria-hidden="true" />
-            <span>{{ item.name }}</span>
+            <span class="truncate">{{ item.name }}</span>
         </Link>
 
-        <!-- Logo central -->
-        <Link
-            href="/dashboard"
-            :prefetch="panelNavPrefetch"
-            aria-label="Home"
-            class="flex shrink-0 flex-col items-center justify-center -mt-6 cursor-pointer touch-manipulation border-0 bg-transparent no-underline"
-        >
-            <span
-                class="flex h-14 w-14 items-center justify-center rounded-full bg-zinc-700 shadow-lg shadow-black/30 ring-2 ring-zinc-500/60 dark:bg-zinc-600 dark:shadow-black/50 dark:ring-zinc-400/40"
+        <div class="relative flex min-h-12 items-end justify-center">
+            <Link
+                href="/dashboard"
+                :prefetch="panelNavPrefetch"
+                aria-label="Home"
+                class="absolute bottom-1 left-1/2 z-10 flex -translate-x-1/2 cursor-pointer touch-manipulation items-center justify-center border-0 bg-transparent p-0 no-underline"
             >
-                <img
-                    :src="logoUrl()"
-                    alt=""
-                    class="h-8 w-8 object-contain"
-                    aria-hidden="true"
-                />
-            </span>
-        </Link>
+                <span
+                    class="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-white p-2.5 shadow-lg shadow-[#E2D7CB]/80 ring-2 ring-[#EBE2D8]"
+                >
+                    <img
+                        :src="logoLight"
+                        alt=""
+                        class="block h-full w-full max-h-9 max-w-9 object-contain object-center"
+                        :class="showDualLogo ? 'dark:hidden' : ''"
+                        aria-hidden="true"
+                    />
+                    <img
+                        v-if="showDualLogo"
+                        :src="logoDark"
+                        alt=""
+                        class="hidden h-full w-full max-h-9 max-w-9 object-contain object-center dark:block"
+                        aria-hidden="true"
+                    />
+                </span>
+            </Link>
+        </div>
 
-        <!-- Produtos e Ajustes -->
         <Link
             v-for="item in navItems.slice(2)"
             :key="item.href"
@@ -108,15 +138,10 @@ onUnmounted(() => {
             :prefetch="panelNavPrefetch"
             :aria-current="isActive(item.href) ? 'page' : undefined"
             :aria-label="item.name"
-            class="flex flex-1 flex-col items-center gap-0.5 px-2 py-2 text-xs font-medium rounded-xl transition-colors cursor-pointer touch-manipulation border-0 bg-transparent text-left no-underline"
-            :class="
-                isActive(item.href)
-                    ? 'text-[var(--color-primary)]'
-                    : 'text-zinc-400 hover:text-zinc-200'
-            "
+            :class="navLinkClass(item.href)"
         >
             <component :is="item.icon" class="h-5 w-5 shrink-0" aria-hidden="true" />
-            <span>{{ item.name }}</span>
+            <span class="truncate">{{ item.name }}</span>
         </Link>
     </nav>
 </template>

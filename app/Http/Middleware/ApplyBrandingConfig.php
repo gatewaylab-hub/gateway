@@ -6,6 +6,7 @@ use App\Models\BrandingSetting;
 use Closure;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Schema;
+use App\Support\BrandingAssetUrls;
 use Symfony\Component\HttpFoundation\Response;
 
 class ApplyBrandingConfig
@@ -18,7 +19,11 @@ class ApplyBrandingConfig
         'app_logo_dark' => 'getfy.app_logo_dark',
         'app_logo_icon' => 'getfy.app_logo_icon',
         'app_logo_icon_dark' => 'getfy.app_logo_icon_dark',
+        'pwa_nav_logo' => 'getfy.pwa_nav_logo',
+        'pwa_nav_logo_dark' => 'getfy.pwa_nav_logo_dark',
         'login_hero_image' => 'getfy.login_hero_image',
+        'login_hero_tagline' => 'getfy.login_hero_tagline',
+        'login_hero_subtagline' => 'getfy.login_hero_subtagline',
         'favicon_url' => 'getfy.favicon_url',
         'pwa_icon_192' => 'getfy.pwa_icon_192',
         'pwa_icon_512' => 'getfy.pwa_icon_512',
@@ -26,24 +31,44 @@ class ApplyBrandingConfig
 
     public function handle(Request $request, Closure $next): Response
     {
-        try {
-            if (! Schema::hasTable('branding_settings')) {
-                return $next($request);
-            }
-        } catch (\Throwable) {
+        if ($request->is('plataforma/configuracoes/storage/*')) {
             return $next($request);
         }
 
-        $data = $this->effectiveData($request);
-        $merge = [];
-        foreach (self::CONFIG_KEYS as $jsonKey => $configKey) {
-            $v = $data[$jsonKey] ?? null;
-            if (is_string($v) && $v !== '') {
-                $merge[$configKey] = $v;
+        $hasBrandingTable = false;
+        try {
+            $hasBrandingTable = Schema::hasTable('branding_settings');
+        } catch (\Throwable) {
+            $hasBrandingTable = false;
+        }
+
+        if ($hasBrandingTable) {
+            $data = $this->effectiveData($request);
+            $merge = [];
+            foreach (self::CONFIG_KEYS as $jsonKey => $configKey) {
+                $v = $data[$jsonKey] ?? null;
+                if (is_string($v) && $v !== '') {
+                    if (in_array($jsonKey, BrandingAssetUrls::IMAGE_KEYS, true)) {
+                        $v = BrandingAssetUrls::resolve($v);
+                    }
+                    $merge[$configKey] = $v;
+                }
+            }
+            if ($merge !== []) {
+                config($merge);
+            }
+
+            try {
+                \App\Support\PanelPushSettings::applyToConfig();
+            } catch (\Throwable) {
+                // ignore during install / partial schema
             }
         }
-        if ($merge !== []) {
-            config($merge);
+
+        try {
+            \App\Support\PanelColorScheme::applyToConfig();
+        } catch (\Throwable) {
+            // ignore during install / partial schema
         }
 
         return $next($request);

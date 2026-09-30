@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Http\Middleware\ApplyBrandingConfig;
 use App\Models\BrandingSetting;
+use App\Support\BrandingAssetUrls;
 use Illuminate\Support\Facades\Schema;
 
 /**
@@ -46,12 +47,12 @@ class BrandingEmailData
     {
         $appName = $merged['app_name'] ?? null;
         if (! is_string($appName) || $appName === '') {
-            $appName = (string) config('app.name', 'gatewayLab');
+            $appName = (string) config('app.name', 'Getfy');
         }
 
         $primary = $merged['theme_primary'] ?? null;
         if (! is_string($primary) || ! preg_match('/^#[0-9A-Fa-f]{6}$/', $primary)) {
-            $primary = '#4f46e5';
+            $primary = (string) config('getfy.theme_primary', '#0050fc');
         }
 
         $logo = $merged['app_logo'] ?? '';
@@ -72,8 +73,8 @@ class BrandingEmailData
     private static function fallback(): array
     {
         return [
-            'app_name' => (string) config('app.name', 'gatewayLab'),
-            'theme_primary' => '#4f46e5',
+            'app_name' => (string) config('app.name', 'Getfy'),
+            'theme_primary' => (string) config('getfy.theme_primary', '#0050fc'),
             'logo_url' => null,
         ];
     }
@@ -83,12 +84,9 @@ class BrandingEmailData
         if ($url === '') {
             return null;
         }
-        if (str_starts_with($url, 'http://') || str_starts_with($url, 'https://')) {
-            return $url;
-        }
 
-        $base = rtrim((string) config('app.url'), '/');
+        $resolved = BrandingAssetUrls::resolve($url);
 
-        return $base.'/'.ltrim($url, '/');
+        return $resolved !== '' ? $resolved : null;
     }
 }

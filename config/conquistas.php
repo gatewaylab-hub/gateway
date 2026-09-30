@@ -35,7 +35,7 @@ return [
         [
             'threshold' => 5_000_000,
             'slug' => 'lenda-getfy',
-            'name' => 'Lenda da gatewayLab',
+            'name' => 'Lenda da Getfy',
             'image' => 'https://cdn.getfy.cloud/conquistas/5M.png',
         ],
         [

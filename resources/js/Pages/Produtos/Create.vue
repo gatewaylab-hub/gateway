@@ -2,12 +2,12 @@
 import { useForm } from '@inertiajs/vue3';
 import LayoutInfoprodutor from '@/Layouts/LayoutInfoprodutor.vue';
 import Button from '@/components/ui/Button.vue';
+import { normalizeMoneyInput } from '@/lib/moneyDecimal';
 
 defineOptions({ layout: LayoutInfoprodutor });
 
 const form = useForm({
     name: '',
-    slug: '',
     description: '',
     type: 'area_membros',
     price: 0,
@@ -17,15 +17,14 @@ const form = useForm({
 
 <template>
     <div class="space-y-4">
-            <form class="max-w-xl space-y-4" @submit.prevent="form.post('/produtos')">
+            <form
+                class="max-w-xl space-y-4"
+                @submit.prevent="form.transform((d) => ({ ...d, price: normalizeMoneyInput(d.price) })).post('/produtos')"
+            >
                 <div>
                     <label class="block text-sm font-medium text-zinc-700 dark:text-zinc-300">Nome</label>
                     <input v-model="form.name" type="text" required class="mt-1 block w-full rounded-lg border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-900 px-3 py-2" />
                     <p v-if="form.errors.name" class="mt-1 text-sm text-red-600">{{ form.errors.name }}</p>
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-zinc-700 dark:text-zinc-300">Slug (opcional)</label>
-                    <input v-model="form.slug" type="text" class="mt-1 block w-full rounded-lg border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-900 px-3 py-2" />
                 </div>
                 <div>
                     <label class="block text-sm font-medium text-zinc-700 dark:text-zinc-300">Descrição</label>
@@ -43,7 +42,7 @@ const form = useForm({
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-zinc-700 dark:text-zinc-300">Preço (R$)</label>
-                        <input v-model="form.price" type="number" step="0.01" min="0" required class="mt-1 block w-full rounded-lg border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-900 px-3 py-2" />
+                        <input v-model="form.price" type="number" step="any" min="0" inputmode="decimal" required class="mt-1 block w-full rounded-lg border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-900 px-3 py-2" />
                         <p v-if="form.errors.price" class="mt-1 text-sm text-red-600">{{ form.errors.price }}</p>
                     </div>
                 </div>

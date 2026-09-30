@@ -2,6 +2,7 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import { Head, useForm, usePage, router } from '@inertiajs/vue3';
 import { QrCode, Barcode, CreditCard, Receipt, ShieldCheck, AlertCircle, ArrowLeft } from 'lucide-vue-next';
+import CheckoutTurnstile from '@/components/checkout/CheckoutTurnstile.vue';
 import {
     API_CHECKOUT_PAGARME_TOKENIZE_FORM_ID,
     PAGARME_TOKENIZE_FORM_ACTION,
@@ -10,6 +11,7 @@ import {
     requestPagarmeTokenFromForm,
     resetPagarmeTokenizeScriptState,
 } from '@/composables/usePagarmeTokenizecard.js';
+import { requestCieloPaymentToken, formatCieloSopHolderName } from '@/composables/useCieloSilentOrderPost.js';
 
 defineOptions({ layout: null });
 
@@ -24,6 +26,7 @@ const props = defineProps({
     amount: { type: Number, required: true },
     currency: { type: String, default: 'BRL' },
     currencies: { type: Array, default: () => [] },
+    product_id: { type: [String, Number], default: null },
     product_name: { type: String, default: null },
     product_image_url: { type: String, default: null },
     available_methods: { type: Array, default: () => [] },
@@ -37,7 +40,34 @@ const props = defineProps({
     card_pagarme_public_key: { type: String, default: '' },
     /** Base da API v5 para tokenização (igual config/services.pagarme.base_url). */
     card_pagarme_api_base_url: { type: String, default: 'https://api.pagar.me/core/v5' },
+    turnstile: { type: Object, default: () => ({ enabled: false, site_key: '', mode: 'pix_boleto' }) },
 });
+
+const honeypotWebsite = ref('');
+const turnstileToken = ref('');
+const turnstileRef = ref(null);
+
+function turnstileRequiredFor(method) {
+    const cfg = props.turnstile || {};
+    if (!cfg.enabled || !cfg.site_key) return false;
+    const mode = cfg.mode || 'pix_boleto';
+    if (mode === 'disabled') return false;
+    if (mode === 'all_payments') return true;
+    return ['pix', 'boleto', 'pix_auto'].includes(method);
+}
+
+function withCheckoutSecurity(form) {
+    if (turnstileRequiredFor(form.payment_method) && !turnstileToken.value) {
+        error.value = 'Aguarde a verificação de segurança e tente novamente.';
+        return false;
+    }
+    form.transform((data) => ({
+        ...data,
+        website: honeypotWebsite.value,
+        turnstile_token: turnstileRequiredFor(data.payment_method) ? turnstileToken.value : '',
+    }));
+    return true;
+}
 
 const page = usePage();
 const flashError = computed(() => page.props.flash?.error ?? null);
@@ -138,7 +168,20 @@ function onError(errors) {
 const canPayWithStripe = computed(() => props.card_gateway_slug === 'stripe' && (props.card_stripe_publishable_key || '').trim() !== '');
 const canPayWithEfi = computed(() => props.card_gateway_slug === 'efi' && (props.card_efi_payee_code || '').trim() !== '');
 const canPayWithPagarme = computed(() => props.card_gateway_slug === 'pagarme' && (props.card_pagarme_public_key || '').trim() !== '');
-const canPayWithCard = computed(() => props.available_methods?.includes('card') && (canPayWithStripe.value || canPayWithEfi.value || canPayWithPagarme.value));
+const canPayWithCielo = computed(() => props.card_gateway_slug === 'cielo' && props.product_id != null && String(props.product_id) !== '');
+const canPayWithCard = computed(() => props.available_methods?.includes('card') && (canPayWithStripe.value || canPayWithEfi.value || canPayWithPagarme.value || canPayWithCielo.value));
+const cieloExpirationDate = computed(() => {
+    const digits = (efiCardExp.value || '').replace(/\D/g, '');
+    const month = digits.slice(0, 2);
+    let year = digits.slice(2);
+    if (year.length === 2) {
+        year = `20${year}`;
+    }
+    if (month.length !== 2 || year.length !== 4) {
+        return '';
+    }
+    return `${month}/${year}`;
+});
 
 /** Método selecionado para exibir o bloco de ação (pix, boleto, card ou null). */
 const selectedMethod = ref(null);
@@ -375,6 +418,42 @@ async function submitCard(ev) {
             return;
         }
 
+        if (canPayWithCielo.value) {
+            const numberDigits = (efiCardNumber.value || '').replace(/\D/g, '');
+            const expDigits = (efiCardExp.value || '').replace(/\D/g, '');
+            const month = expDigits.slice(0, 2);
+            let year = expDigits.slice(2);
+            if (year.length === 2) {
+                year = `20${year}`;
+            }
+            const cvv = (efiCardCvv.value || '').replace(/\D/g, '').slice(0, 4);
+            if (numberDigits.length < 13 || numberDigits.length > 19 || month.length !== 2 || year.length !== 4 || cvv.length < 3) {
+                error.value = 'Preencha todos os dados do cartão corretamente.';
+                cardSubmitting.value = false;
+                return;
+            }
+            await nextTick();
+            const { payment_token, card_mask } = await requestCieloPaymentToken({
+                productId: props.product_id,
+                installments: 1,
+            });
+            const last4 = numberDigits.slice(-4);
+            router.post('/api-checkout/pay', {
+                session_token: props.session_token,
+                payment_method: 'card',
+                payment_token,
+                card_mask: card_mask || (last4 ? `**** ${last4}` : ''),
+            }, {
+                preserveScroll: true,
+                onError: (err) => {
+                    onError(err);
+                    cardSubmitting.value = false;
+                },
+                onFinish: () => { cardSubmitting.value = false; },
+            });
+            return;
+        }
+
         if (canPayWithEfi.value) {
             const numberDigits = (efiCardNumber.value || '').replace(/\D/g, '');
             const expDigits = (efiCardExp.value || '').replace(/\D/g, '');
@@ -582,7 +661,20 @@ async function submitCard(ev) {
                         <template v-else-if="selectedMethod === 'pix'">
                             <div class="rounded-xl border-2 border-zinc-200 bg-zinc-50/30 p-4 space-y-4">
                                 <p class="text-sm text-zinc-600">Clique abaixo para gerar o QR Code PIX. Você será redirecionado para a página de pagamento.</p>
-                                <form @submit.prevent="pixForm.post('/api-checkout/pay', { preserveScroll: true, onError })">
+                                <div v-if="turnstileRequiredFor('pix')" class="mb-3">
+                                    <CheckoutTurnstile
+                                        ref="turnstileRef"
+                                        :site-key="turnstile.site_key"
+                                        v-model="turnstileToken"
+                                    />
+                                </div>
+                                <form
+                                    @submit.prevent="
+                                        if (withCheckoutSecurity(pixForm)) {
+                                            pixForm.post('/api-checkout/pay', { preserveScroll: true, onError });
+                                        }
+                                    "
+                                >
                                     <div class="flex gap-2">
                                         <button
                                             type="button"
@@ -645,7 +737,19 @@ async function submitCard(ev) {
                         <template v-else-if="selectedMethod === 'boleto'">
                             <div class="rounded-xl border-2 border-zinc-200 bg-zinc-50/30 p-4 space-y-4">
                                 <p class="text-sm text-zinc-600">Clique abaixo para gerar o boleto. Você será redirecionado para a página com o código de barras e o link para download.</p>
-                                <form @submit.prevent="boletoForm.post('/api-checkout/pay', { preserveScroll: true, onError })">
+                                <div v-if="turnstileRequiredFor('boleto')" class="mb-3">
+                                    <CheckoutTurnstile
+                                        :site-key="turnstile.site_key"
+                                        v-model="turnstileToken"
+                                    />
+                                </div>
+                                <form
+                                    @submit.prevent="
+                                        if (withCheckoutSecurity(boletoForm)) {
+                                            boletoForm.post('/api-checkout/pay', { preserveScroll: true, onError });
+                                        }
+                                    "
+                                >
                                     <div class="flex gap-2">
                                         <button
                                             type="button"
@@ -764,7 +868,14 @@ async function submitCard(ev) {
                                         </div>
                                     </div>
                                 </template>
-                                <template v-else-if="canPayWithEfi">
+                                <template v-else-if="canPayWithEfi || canPayWithCielo">
+                                    <template v-if="canPayWithCielo">
+                                        <input type="hidden" class="bp-sop-cardholdername" :value="formatCieloSopHolderName(cardHolderName)" />
+                                        <input type="hidden" class="bp-sop-cardnumber" :value="(efiCardNumber || '').replace(/\D/g, '')" />
+                                        <input type="hidden" class="bp-sop-cardexpirationdate" :value="cieloExpirationDate" />
+                                        <input type="hidden" class="bp-sop-cardcvv bp-sop-cardcvvc" :value="(efiCardCvv || '').replace(/\D/g, '')" />
+                                        <input type="hidden" class="bp-sop-cardtype" value="creditCard" />
+                                    </template>
                                     <div>
                                         <label for="card-number-efi" class="mb-2 block text-sm font-medium text-zinc-700">Número do cartão</label>
                                         <input
@@ -842,7 +953,7 @@ async function submitCard(ev) {
                 </div>
 
                 <p class="mt-8 text-center text-xs text-zinc-500">
-                    Powered by gatewayLab
+                    Powered by Getfy
                 </p>
             </div>
         </main>

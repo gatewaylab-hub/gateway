@@ -207,7 +207,7 @@ const hasUnread = computed(() => unreadCount.value > 0);
         >
             <div
                 v-if="open"
-                class="fixed inset-0 z-[100000] flex justify-end"
+                class="fixed inset-0 z-[100000] flex justify-end print:hidden"
                 aria-modal="true"
                 role="dialog"
                 aria-label="Notificações"
@@ -264,7 +264,7 @@ const hasUnread = computed(() => unreadCount.value > 0);
                             v-if="canActivatePush"
                             type="button"
                             class="mt-2 w-full rounded-lg px-3 py-2 text-sm font-medium text-white transition hover:opacity-90 disabled:opacity-60"
-                            :style="{ backgroundColor: 'var(--ma-primary, #8A2BE2)' }"
+                            :style="{ backgroundColor: 'var(--ma-primary, #0ea5e9)' }"
                             :disabled="activatingPush || pushSubscribing"
                             @click="activateNotifications"
                         >
@@ -307,7 +307,7 @@ const hasUnread = computed(() => unreadCount.value > 0);
                                 v-if="hasUnread"
                                 type="button"
                                 class="text-sm font-medium hover:underline"
-                                :style="{ color: 'var(--ma-primary, #8A2BE2)' }"
+                                :style="{ color: 'var(--ma-primary, #0ea5e9)' }"
                                 @click="markAllRead"
                             >
                                 Marcar todas como lidas

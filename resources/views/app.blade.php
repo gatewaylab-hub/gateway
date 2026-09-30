@@ -2,31 +2,22 @@
     $path = request()->path();
     $isMemberArea = str_starts_with($path, 'm/') || request()->attributes->get('member_area_slug');
     $isCheckout = str_starts_with($path, 'c/') || str_starts_with($path, 'checkout') || str_starts_with($path, 'api-checkout');
-    try {
-        $pwaPluginEnabled = \App\Plugins\PluginRegistry::isEnabled('pwa');
-    } catch (\Throwable) {
-        $pwaPluginEnabled = false;
-    }
-    $skipPanelPwa = $isMemberArea || $isCheckout || ! $pwaPluginEnabled;
+    $skipPanelPwa = $isMemberArea || $isCheckout;
 @endphp
 <!DOCTYPE html>
 <html lang="{{ str_replace('_', '-', app()->getLocale()) }}">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <script>
-        (function(){try{var s=localStorage.getItem('theme');var t=s||'dark';document.documentElement.classList.toggle('dark',t==='dark');}catch(_){}})();
-    </script>
+    @include('partials.panel-theme-init')
     <meta name="csrf-token" content="{{ csrf_token() }}">
-    <title>{{ config('getfy.app_name', config('app.name', 'gatewayLab')) }}</title>
+    <title>{{ config('getfy.app_name', config('app.name', 'Stacker')) }}</title>
     @unless($skipPanelPwa)
     @php
         $wlFavicon = config('getfy.favicon_url');
-        $wlFavicon = ($wlFavicon !== null && $wlFavicon !== '') ? $wlFavicon : asset('icons/favicon.png');
+        $wlFavicon = ($wlFavicon !== null && $wlFavicon !== '') ? $wlFavicon : '/images/favicon.png';
         $wlThemeColor = config('getfy.pwa_theme_color');
-        $wlThemeColor = ($wlThemeColor !== null && $wlThemeColor !== '') ? $wlThemeColor : config('getfy.theme_primary', '#8A2BE2');
+        $wlThemeColor = ($wlThemeColor !== null && $wlThemeColor !== '') ? $wlThemeColor : config('getfy.theme_primary', '#0ea5e9');
         $wlAppleIcon = config('getfy.pwa_icon_192');
         $wlVersion = null;
         try {
@@ -58,8 +49,6 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="default">
     @if($wlAppleIcon !== null && $wlAppleIcon !== '')
     <link rel="apple-touch-icon" href="{{ $wlWithVersion($wlAppleIcon) }}">
-    @elseif(is_file(public_path('icons/icone.png')))
-    <link rel="apple-touch-icon" href="{{ $wlWithVersion(url('/icons/icone.png')) }}">
     @elseif(is_file(public_path('icons/icon-192x192.png')))
     <link rel="apple-touch-icon" href="{{ $wlWithVersion(url('/icons/icon-192x192.png')) }}">
     @elseif(is_file(public_path('icons/icon-512x512.png')))

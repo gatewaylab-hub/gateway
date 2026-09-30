@@ -2,13 +2,33 @@
 
 namespace App\Services;
 
+use App\Models\Order;
 use App\Models\Setting;
 use App\Models\User;
+use App\Support\CardInstallmentEconomics;
+use App\Support\PercentDecimal;
 
 class EffectiveMerchantFees
 {
+    /** Origens em que o PIX usa a taxa `api_pix` (REST ou checkout hospedado criado pela API). Cartão/boleto seguem taxas de checkout. */
+    public const API_ORDER_SOURCES = ['api', 'api_checkout_pro'];
+
+    /** @var list<string> */
+    private const RULE_KEYS = ['pix', 'api_pix', 'pixgo', 'open_finance', 'card', 'apple_pay', 'google_pay', 'boleto', 'withdrawal'];
+
     /**
-     * @return array{pix: array{percent: float, fixed: float}, card: array{percent: float, fixed: float}, boleto: array{percent: float, fixed: float}, withdrawal: array{percent: float, fixed: float}}
+     * @return array{
+     *     pix: array{percent: float, fixed: float},
+     *     api_pix: array{percent: float, fixed: float},
+     *     pixgo: array{percent: float, fixed: float},
+     *     open_finance: array{percent: float, fixed: float},
+     *     card: array{percent: float, fixed: float},
+     *     apple_pay: array{percent: float, fixed: float},
+     *     google_pay: array{percent: float, fixed: float},
+     *     boleto: array{percent: float, fixed: float},
+     *     withdrawal: array{percent: float, fixed: float},
+     *     card_installments: array<int, array{percent: float, fixed: float, days_to_available: int}>
+     * }
      */
     public static function platformDefaults(): array
     {
@@ -18,79 +38,237 @@ class EffectiveMerchantFees
         }
         $base = [
             'pix' => ['percent' => 0.0, 'fixed' => 0.0],
+            'api_pix' => ['percent' => 0.0, 'fixed' => 0.0],
+            'pixgo' => ['percent' => 0.0, 'fixed' => 0.0],
+            'open_finance' => ['percent' => 0.0, 'fixed' => 0.0],
             'card' => ['percent' => 0.0, 'fixed' => 0.0],
+            'apple_pay' => ['percent' => 0.0, 'fixed' => 0.0],
+            'google_pay' => ['percent' => 0.0, 'fixed' => 0.0],
             'boleto' => ['percent' => 0.0, 'fixed' => 0.0],
             'withdrawal' => ['percent' => 0.0, 'fixed' => 0.0],
         ];
-        if (! is_array($raw)) {
-            return $base;
-        }
-        foreach (['pix', 'card', 'boleto', 'withdrawal'] as $k) {
-            if (! isset($raw[$k]) || ! is_array($raw[$k])) {
-                continue;
+        if (is_array($raw)) {
+            foreach (self::RULE_KEYS as $k) {
+                if (! isset($raw[$k]) || ! is_array($raw[$k])) {
+                    continue;
+                }
+                $base[$k]['percent'] = PercentDecimal::toFloat(PercentDecimal::normalize($raw[$k]['percent'] ?? 0));
+                $base[$k]['fixed'] = round((float) ($raw[$k]['fixed'] ?? 0), 2);
             }
-            $base[$k]['percent'] = (float) ($raw[$k]['percent'] ?? 0);
-            $base[$k]['fixed'] = (float) ($raw[$k]['fixed'] ?? 0);
         }
+        // Primeira configuração / legado: sem bloco `api_pix`, herda PIX checkout.
+        if (! is_array($raw) || ! isset($raw['api_pix']) || ! is_array($raw['api_pix'])) {
+            $base['api_pix'] = $base['pix'];
+        }
+        // Legado: sem bloco `pixgo`, herda PIX checkout (comportamento anterior).
+        if (! is_array($raw) || ! isset($raw['pixgo']) || ! is_array($raw['pixgo'])) {
+            $base['pixgo'] = $base['pix'];
+        }
+        // Legado: sem bloco `open_finance`, herda PIX (comportamento anterior à taxa dedicada).
+        if (! is_array($raw) || ! isset($raw['open_finance']) || ! is_array($raw['open_finance'])) {
+            $base['open_finance'] = $base['pix'];
+        }
+        // Wallets CajuPay: sem bloco próprio, herdam taxa de cartão checkout.
+        if (! is_array($raw) || ! isset($raw['apple_pay']) || ! is_array($raw['apple_pay'])) {
+            $base['apple_pay'] = $base['card'];
+        }
+        if (! is_array($raw) || ! isset($raw['google_pay']) || ! is_array($raw['google_pay'])) {
+            $base['google_pay'] = $base['card'];
+        }
+
+        $installRaw = is_array($raw) ? ($raw['card_installments'] ?? null) : null;
+        $base['card_installments'] = CardInstallmentEconomics::normalizeRules(
+            is_array($installRaw) ? $installRaw : null,
+            $base['card']
+        );
 
         return $base;
     }
 
     /**
-     * @return array{pix: array{percent: float, fixed: float}, card: array{percent: float, fixed: float}, boleto: array{percent: float, fixed: float}, withdrawal: array{percent: float, fixed: float}}
+     * Método de taxa alinhado ao checkout (ex.: CajuPay SDK: apple_pay / google_pay em metadata).
      */
-    public static function forTenant(int $tenantId): array
+    public static function feeMethodForOrder(Order $order): string
     {
-        $defaults = self::platformDefaults();
-        $owner = User::query()
-            ->where('tenant_id', $tenantId)
-            ->where('role', User::ROLE_INFOPRODUTOR)
-            ->first();
-        if ($owner === null) {
-            $owner = User::query()->where('id', $tenantId)->where('role', User::ROLE_INFOPRODUTOR)->first();
+        $method = $order->payment_method;
+        if ($method === null || $method === '') {
+            $meta = $order->metadata ?? [];
+            $method = is_array($meta) ? ($meta['checkout_payment_method'] ?? null) : null;
         }
-        if ($owner === null || empty($owner->merchant_fees) || ! is_array($owner->merchant_fees)) {
-            return $defaults;
-        }
-        $ov = $owner->merchant_fees;
-        foreach (['pix', 'card', 'boleto', 'withdrawal'] as $k) {
-            if (! isset($ov[$k]) || ! is_array($ov[$k])) {
-                continue;
-            }
-            if (array_key_exists('percent', $ov[$k])) {
-                $defaults[$k]['percent'] = (float) $ov[$k]['percent'];
-            }
-            if (array_key_exists('fixed', $ov[$k])) {
-                $defaults[$k]['fixed'] = (float) $ov[$k]['fixed'];
-            }
+        $feeMethod = (string) ($method ?: 'pix');
+        $meta = is_array($order->metadata ?? null) ? $order->metadata : [];
+        $cajuWallet = isset($meta['cajupay_wallet']) ? strtolower(trim((string) $meta['cajupay_wallet'])) : '';
+        if (($method === 'card' || $feeMethod === 'card') && in_array($cajuWallet, ['apple_pay', 'google_pay'], true)) {
+            return $cajuWallet;
         }
 
-        return $defaults;
+        if (in_array($feeMethod, ['paypal'], true)) {
+            return 'card';
+        }
+
+        return $feeMethod;
     }
 
     /**
-     * @param  'pix'|'card'|'boleto'|'withdrawal'  $method
+     * @return array{
+     *     pix: array{percent: float, fixed: float},
+     *     api_pix: array{percent: float, fixed: float},
+     *     pixgo: array{percent: float, fixed: float},
+     *     card: array{percent: float, fixed: float},
+     *     apple_pay: array{percent: float, fixed: float},
+     *     google_pay: array{percent: float, fixed: float},
+     *     boleto: array{percent: float, fixed: float},
+     *     withdrawal: array{percent: float, fixed: float}
+     * }
+     */
+    public static function forTenant(int $tenantId): array
+    {
+        // tenant_id em pedidos/carteira é o id do infoprodutor dono; overrides ficam em users.merchant_fees.
+        $owner = User::query()
+            ->where('id', $tenantId)
+            ->where('role', User::ROLE_INFOPRODUTOR)
+            ->first();
+        if ($owner === null) {
+            $owner = User::query()
+                ->where('tenant_id', $tenantId)
+                ->where('role', User::ROLE_INFOPRODUTOR)
+                ->first();
+        }
+        if ($owner === null || empty($owner->merchant_fees) || ! is_array($owner->merchant_fees)) {
+            return self::platformDefaults();
+        }
+
+        return self::fromOverrides($owner->merchant_fees);
+    }
+
+    /**
+     * Taxas efetivas a partir dos overrides crus (null/vazio = herdar só da plataforma).
+     *
+     * @param  array<string, mixed>|null  $rawOverrides
+     * @return array{
+     *     pix: array{percent: float, fixed: float},
+     *     api_pix: array{percent: float, fixed: float},
+     *     pixgo: array{percent: float, fixed: float},
+     *     open_finance: array{percent: float, fixed: float},
+     *     card: array{percent: float, fixed: float},
+     *     apple_pay: array{percent: float, fixed: float},
+     *     google_pay: array{percent: float, fixed: float},
+     *     boleto: array{percent: float, fixed: float},
+     *     withdrawal: array{percent: float, fixed: float}
+     * }
+     */
+    public static function fromOverrides(?array $rawOverrides): array
+    {
+        $defaults = self::platformDefaults();
+        if (! is_array($rawOverrides) || $rawOverrides === []) {
+            return $defaults;
+        }
+        foreach (self::RULE_KEYS as $k) {
+            if (! isset($rawOverrides[$k]) || ! is_array($rawOverrides[$k])) {
+                continue;
+            }
+            if (array_key_exists('percent', $rawOverrides[$k])) {
+                $defaults[$k]['percent'] = PercentDecimal::toFloat(PercentDecimal::normalize($rawOverrides[$k]['percent']));
+            }
+            if (array_key_exists('fixed', $rawOverrides[$k])) {
+                $defaults[$k]['fixed'] = round((float) $rawOverrides[$k]['fixed'], 2);
+            }
+        }
+
+        return self::applyDerivedInheritance($defaults, $rawOverrides);
+    }
+
+    /**
+     * Herda canais derivados do pai efetivo quando o infoprodutor não definiu o filho explicitamente.
+     *
+     * @param  array<string, array{percent: float, fixed: float}>  $effective
+     * @param  array<string, mixed>|null  $rawOverrides
+     * @return array<string, array{percent: float, fixed: float}>
+     */
+    private static function applyDerivedInheritance(array $effective, ?array $rawOverrides): array
+    {
+        // Só herda quando o pai foi customizado. Override só de api_pix/pixgo/saque/etc.
+        // não pode puxar wallets para card nem api_pix/pixgo para pix global.
+        if (! self::overrideBlockIsExplicit($rawOverrides, 'api_pix')
+            && self::overrideBlockIsExplicit($rawOverrides, 'pix')) {
+            $effective['api_pix'] = $effective['pix'];
+        }
+        if (! self::overrideBlockIsExplicit($rawOverrides, 'pixgo')
+            && self::overrideBlockIsExplicit($rawOverrides, 'pix')) {
+            $effective['pixgo'] = $effective['pix'];
+        }
+        if (! self::overrideBlockIsExplicit($rawOverrides, 'open_finance')
+            && self::overrideBlockIsExplicit($rawOverrides, 'pix')) {
+            $effective['open_finance'] = $effective['pix'];
+        }
+        if (! self::overrideBlockIsExplicit($rawOverrides, 'apple_pay')
+            && self::overrideBlockIsExplicit($rawOverrides, 'card')) {
+            $effective['apple_pay'] = $effective['card'];
+        }
+        if (! self::overrideBlockIsExplicit($rawOverrides, 'google_pay')
+            && self::overrideBlockIsExplicit($rawOverrides, 'card')) {
+            $effective['google_pay'] = $effective['card'];
+        }
+
+        return $effective;
+    }
+
+    /**
+     * @param  array<string, mixed>|null  $rawOverrides
+     */
+    private static function overrideBlockIsExplicit(?array $rawOverrides, string $key): bool
+    {
+        if (! is_array($rawOverrides) || ! isset($rawOverrides[$key]) || ! is_array($rawOverrides[$key])) {
+            return false;
+        }
+
+        $block = $rawOverrides[$key];
+
+        return (array_key_exists('percent', $block) && $block['percent'] !== '' && $block['percent'] !== null)
+            || (array_key_exists('fixed', $block) && $block['fixed'] !== '' && $block['fixed'] !== null);
+    }
+
+    /**
+     * @param  'pix'|'open_finance'|'card'|'apple_pay'|'google_pay'|'boleto'|'withdrawal'|'pix_auto'  $method
      * @return array{fee: float, net: float, gross: float, percent: float, fixed: float}
      */
-    public static function calculateSaleFee(int $tenantId, string $method, float $gross): array
+    public static function calculateSaleFee(int $tenantId, string $method, float $gross, ?string $source = null, ?int $installments = null): array
     {
-        $map = ['pix' => 'pix', 'card' => 'card', 'boleto' => 'boleto', 'pix_auto' => 'pix'];
+        $map = [
+            'pix' => 'pix',
+            'open_finance' => 'open_finance',
+            'card' => 'card',
+            'apple_pay' => 'apple_pay',
+            'google_pay' => 'google_pay',
+            'boleto' => 'boleto',
+            'paypal' => 'card',
+            'pix_auto' => 'pix',
+        ];
         $key = $map[$method] ?? $method;
-        if (! in_array($key, ['pix', 'card', 'boleto'], true)) {
+        if (! in_array($key, ['pix', 'open_finance', 'card', 'apple_pay', 'google_pay', 'boleto'], true)) {
             $key = 'pix';
         }
         $rules = self::forTenant($tenantId);
-        $percent = $rules[$key]['percent'];
-        $fixed = $rules[$key]['fixed'];
-        $fee = round($gross * ($percent / 100.0) + $fixed, 2);
-        if ($fee > $gross) {
-            $fee = $gross;
+        if ($key === 'pix' && $source === 'pixgo') {
+            $key = 'pixgo';
+        } elseif ($key === 'pix' && $source !== null && in_array($source, self::API_ORDER_SOURCES, true)) {
+            $key = 'api_pix';
         }
-        $net = round($gross - $fee, 2);
+        $percent = PercentDecimal::toFloat(PercentDecimal::normalize($rules[$key]['percent'] ?? 0));
+        $fixed = round((float) ($rules[$key]['fixed'] ?? 0), 2);
+        if ($key === 'card' && $installments !== null && CardInstallmentEconomics::platformHasSavedTable()) {
+            $row = CardInstallmentEconomics::ruleFor(
+                $rules['card_installments'] ?? [],
+                $installments
+            );
+            $percent = $row['percent'];
+            $fixed = $row['fixed'];
+        }
+        $amounts = PercentDecimal::feeFromGross($gross, PercentDecimal::normalize($percent), $fixed);
 
         return [
-            'fee' => $fee,
-            'net' => $net,
+            'fee' => $amounts['fee'],
+            'net' => $amounts['net'],
             'gross' => $gross,
             'percent' => $percent,
             'fixed' => $fixed,
@@ -105,15 +283,15 @@ class EffectiveMerchantFees
     public static function calculateWithdrawalFee(int $tenantId, float $requestedAmount): array
     {
         $rules = self::forTenant($tenantId);
-        $percent = $rules['withdrawal']['percent'];
-        $fixed = $rules['withdrawal']['fixed'];
-        $fee = round($requestedAmount * ($percent / 100.0) + $fixed, 2);
-        if ($fee > $requestedAmount) {
-            $fee = $requestedAmount;
-        }
-        $net = round($requestedAmount - $fee, 2);
+        $percent = PercentDecimal::toFloat(PercentDecimal::normalize($rules['withdrawal']['percent'] ?? 0));
+        $fixed = round((float) ($rules['withdrawal']['fixed'] ?? 0), 2);
+        $amounts = PercentDecimal::feeFromGross($requestedAmount, PercentDecimal::normalize($percent), $fixed);
 
-        return ['fee' => $fee, 'net' => $net, 'gross' => $requestedAmount];
+        return [
+            'fee' => $amounts['fee'],
+            'net' => $amounts['net'],
+            'gross' => $requestedAmount,
+        ];
     }
 
     /**

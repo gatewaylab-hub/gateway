@@ -5,7 +5,7 @@ import LayoutInfoprodutor from '@/Layouts/LayoutInfoprodutor.vue';
 import Button from '@/components/ui/Button.vue';
 import Toggle from '@/components/ui/Toggle.vue';
 import Checkbox from '@/components/ui/Checkbox.vue';
-import ProdutosTabs from '@/components/produtos/ProdutosTabs.vue';
+import AfiliadoTabs from '@/components/afiliados/AfiliadoTabs.vue';
 import { useI18n } from '@/composables/useI18n';
 import {
     mergeConversionPixels,
@@ -27,8 +27,26 @@ const props = defineProps({
 });
 
 const selectedPixelTab = ref('meta');
-const copied = ref(false);
+const copiedKey = ref(null);
 let copyTimer;
+
+const offerLinks = computed(() => {
+    const links = props.enrollment.offer_links;
+    if (Array.isArray(links) && links.length) {
+        return links;
+    }
+    if (props.enrollment.affiliate_link) {
+        return [{
+            type: 'main',
+            id: null,
+            label: 'Checkout principal',
+            price: null,
+            currency: 'BRL',
+            url: props.enrollment.affiliate_link,
+        }];
+    }
+    return [];
+});
 
 const PIXEL_TABS = computed(() => [
     { id: 'meta', label: 'Meta Ads', image: '/images/pixels/meta.png' },
@@ -77,18 +95,37 @@ function copyToClipboard(text) {
     return Promise.resolve(fallbackCopy(s));
 }
 
-function copyAffiliateLink() {
-    const url = props.enrollment.affiliate_link;
+function copyAffiliateLink(url, key = 'main') {
     if (!url) return;
     copyToClipboard(url).then((ok) => {
         if (ok) {
-            copied.value = true;
+            copiedKey.value = key;
             clearTimeout(copyTimer);
             copyTimer = setTimeout(() => {
-                copied.value = false;
+                copiedKey.value = null;
             }, 2000);
         }
     });
+}
+
+function formatOfferPrice(link) {
+    if (link?.price == null || Number.isNaN(Number(link.price))) {
+        return '';
+    }
+    try {
+        return Number(link.price).toLocaleString('pt-BR', {
+            style: 'currency',
+            currency: link.currency || 'BRL',
+        });
+    } catch (_) {
+        return String(link.price);
+    }
+}
+
+function linkCopyKey(link) {
+    if (link?.type === 'offer') return `offer-${link.id}`;
+    if (link?.type === 'plan') return `plan-${link.id}`;
+    return 'main';
 }
 </script>
 
@@ -117,43 +154,79 @@ function copyAffiliateLink() {
             {{ page.props.flash.success }}
         </div>
 
-        <ProdutosTabs />
+        <AfiliadoTabs />
 
         <section class="overflow-hidden rounded-2xl border border-zinc-200/80 bg-white shadow-sm dark:border-zinc-700/80 dark:bg-zinc-800/95">
             <div class="border-b border-zinc-200/80 bg-gradient-to-r from-zinc-50/90 to-zinc-100/50 px-6 py-4 dark:from-zinc-800/80 dark:to-zinc-800/50">
                 <h2 class="text-base font-semibold text-zinc-900 dark:text-white">
                     {{ t('products.affiliate_link_section', 'Link de afiliação') }}
                 </h2>
+                <p class="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
+                    {{ t('products.affiliate_links_hint', 'Use o link principal, das ofertas ou dos planos do produto.') }}
+                </p>
             </div>
-            <div class="space-y-3 p-6">
+            <div class="space-y-4 p-6">
                 <div
-                    v-if="enrollment.affiliate_link"
-                    class="flex flex-col gap-2 sm:flex-row sm:items-center"
+                    v-for="link in offerLinks"
+                    :key="linkCopyKey(link)"
+                    class="rounded-xl border border-zinc-200 bg-zinc-50/60 p-4 dark:border-zinc-700 dark:bg-zinc-900/40"
                 >
-                    <code
-                        class="min-w-0 flex-1 truncate rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs text-zinc-800 dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-200"
+                    <div class="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+                        <p class="text-sm font-medium text-zinc-900 dark:text-white">
+                            {{ link.label }}
+                            <span
+                                v-if="link.type === 'main'"
+                                class="ml-2 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-200"
+                            >
+                                {{ t('products.affiliate_link_main_badge', 'Principal') }}
+                            </span>
+                            <span
+                                v-else-if="link.type === 'offer'"
+                                class="ml-2 rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-sky-800 dark:bg-sky-950/50 dark:text-sky-200"
+                            >
+                                Oferta
+                            </span>
+                            <span
+                                v-else-if="link.type === 'plan'"
+                                class="ml-2 rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-violet-800 dark:bg-violet-950/50 dark:text-violet-200"
+                            >
+                                Plano
+                            </span>
+                        </p>
+                        <p v-if="formatOfferPrice(link)" class="text-xs text-zinc-500 dark:text-zinc-400">
+                            {{ formatOfferPrice(link) }}
+                        </p>
+                    </div>
+                    <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
+                        <code
+                            class="min-w-0 flex-1 truncate rounded-lg border border-zinc-200 bg-white px-3 py-2 text-xs text-zinc-800 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200"
+                        >
+                            {{ link.url }}
+                        </code>
+                        <Button
+                            type="button"
+                            variant="outline"
+                            class="shrink-0 gap-2"
+                            @click="copyAffiliateLink(link.url, linkCopyKey(link))"
+                        >
+                            <Check v-if="copiedKey === linkCopyKey(link)" class="h-4 w-4 text-emerald-600" aria-hidden="true" />
+                            <Copy v-else class="h-4 w-4" aria-hidden="true" />
+                            {{ copiedKey === linkCopyKey(link) ? t('common.copied', 'Copiado') : t('products.affiliate_copy_link', 'Copiar link') }}
+                        </Button>
+                    </div>
+                    <a
+                        :href="link.url"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        class="mt-2 inline-flex items-center gap-1.5 text-sm font-medium text-[var(--color-primary)] hover:underline"
                     >
-                        {{ enrollment.affiliate_link }}
-                    </code>
-                    <Button type="button" variant="outline" class="shrink-0 gap-2" @click="copyAffiliateLink">
-                        <Check v-if="copied" class="h-4 w-4 text-emerald-600" aria-hidden="true" />
-                        <Copy v-else class="h-4 w-4" aria-hidden="true" />
-                        {{ copied ? t('common.copied', 'Copiado') : t('products.affiliate_copy_link', 'Copiar link') }}
-                    </Button>
+                        <ExternalLink class="h-4 w-4" aria-hidden="true" />
+                        {{ t('products.affiliate_open_checkout', 'Abrir checkout') }}
+                    </a>
                 </div>
-                <p v-else class="text-sm text-amber-700 dark:text-amber-200">
+                <p v-if="!offerLinks.length" class="text-sm text-amber-700 dark:text-amber-200">
                     {{ t('products.affiliate_no_link', 'Link indisponível.') }}
                 </p>
-                <a
-                    v-if="enrollment.affiliate_link"
-                    :href="enrollment.affiliate_link"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    class="inline-flex items-center gap-1.5 text-sm font-medium text-[var(--color-primary)] hover:underline"
-                >
-                    <ExternalLink class="h-4 w-4" aria-hidden="true" />
-                    {{ t('products.affiliate_open_checkout', 'Abrir checkout') }}
-                </a>
             </div>
         </section>
 

@@ -5,13 +5,15 @@ namespace App\Services;
 use App\Models\CheckoutSession;
 use App\Models\Order;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 
 class UtmifyService
 {
     private const ENDPOINT = 'https://api.utmify.com.br/api-credentials/orders';
 
     /**
-     * Build payload and send order to UTMfy API.
+     * Build payload and send order to UTMIFY API.
      *
      * @param  array{approved_at?: string|null, refunded_at?: string|null}  $options
      */
@@ -22,7 +24,104 @@ class UtmifyService
         array $options = []
     ): void {
         $body = $this->buildPayload($order, $utmifyStatus, $options);
+
+        if (config('utmify.debug')) {
+            Log::debug('Utmify API request', [
+                'order_id' => $order->id,
+                'status' => $utmifyStatus,
+                'trackingParameters' => $body['trackingParameters'] ?? [],
+            ]);
+        }
+
         $this->post($apiKey, $body);
+    }
+
+    /**
+     * Send a test order to UTMIFY API.
+     */
+    public function sendTest(string $apiKey): void
+    {
+        $this->post($apiKey, $this->buildTestPayload());
+    }
+
+    public function resolveCheckoutSessionForOrder(Order $order): ?CheckoutSession
+    {
+        $session = CheckoutSession::query()->where('order_id', $order->id)->first();
+        if ($session) {
+            return $session;
+        }
+
+        $meta = is_array($order->metadata) ? $order->metadata : [];
+        $token = isset($meta['checkout_session_token']) && is_string($meta['checkout_session_token'])
+            ? trim($meta['checkout_session_token'])
+            : '';
+
+        if ($token !== '') {
+            $session = CheckoutSession::query()->where('session_token', $token)->first();
+            if ($session) {
+                return $session;
+            }
+        }
+
+        if ($order->product_id && $order->tenant_id) {
+            return CheckoutSession::query()
+                ->where('product_id', $order->product_id)
+                ->where('tenant_id', $order->tenant_id)
+                ->whereNotNull('utm_source')
+                ->where('utm_source', '!=', '')
+                ->orderByDesc('id')
+                ->first();
+        }
+
+        return null;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function buildTestPayload(): array
+    {
+        $now = now()->utc()->format('Y-m-d H:i:s');
+        $platform = config('getfy.app_name', 'Getfy');
+
+        return [
+            'orderId' => 'test-'.Str::uuid()->toString(),
+            'platform' => $platform,
+            'paymentMethod' => 'pix',
+            'status' => 'paid',
+            'isTest' => true,
+            'createdAt' => $now,
+            'approvedDate' => $now,
+            'refundedAt' => null,
+            'customer' => [
+                'name' => 'Cliente Exemplo',
+                'email' => 'exemplo@email.com',
+                'phone' => '11999999999',
+                'document' => '12345678900',
+                'country' => 'BR',
+                'ip' => '',
+            ],
+            'products' => [
+                [
+                    'id' => 'test-product',
+                    'name' => 'Produto de teste',
+                    'planId' => null,
+                    'planName' => null,
+                    'quantity' => 1,
+                    'priceInCents' => 1000,
+                ],
+            ],
+            'trackingParameters' => $this->buildTrackingParameters(null, [
+                'utm_source' => 'test',
+                'utm_medium' => 'test',
+                'utm_campaign' => 'test',
+            ]),
+            'commission' => [
+                'totalPriceInCents' => 1000,
+                'gatewayFeeInCents' => 0,
+                'userCommissionInCents' => 1000,
+            ],
+        ];
     }
 
     /**
@@ -33,10 +132,11 @@ class UtmifyService
     {
         $order->loadMissing(['user', 'orderItems.product', 'orderItems.productOffer', 'orderItems.subscriptionPlan']);
 
-        $session = CheckoutSession::where('order_id', $order->id)->first();
+        $session = $this->resolveCheckoutSessionForOrder($order);
+        $meta = is_array($order->metadata) ? $order->metadata : [];
 
         $orderId = $order->gateway_id ?: (string) $order->id;
-        $paymentMethod = $this->mapPaymentMethod($order->gateway);
+        $paymentMethod = $this->mapPaymentMethod($order);
         $createdAt = $order->created_at->utc()->format('Y-m-d H:i:s');
         $approvedDate = $options['approved_at'] ?? ($utmifyStatus === 'paid' ? $order->updated_at->utc()->format('Y-m-d H:i:s') : null);
         $refundedAt = $options['refunded_at'] ?? null;
@@ -83,15 +183,7 @@ class UtmifyService
             ];
         }
 
-        $trackingParameters = [
-            'src' => null,
-            'sck' => null,
-            'utm_source' => $session?->utm_source,
-            'utm_campaign' => $session?->utm_campaign,
-            'utm_medium' => $session?->utm_medium,
-            'utm_content' => null,
-            'utm_term' => null,
-        ];
+        $trackingParameters = $this->buildTrackingParameters($session, $meta);
 
         $totalCents = (int) round((float) $order->amount * 100);
         $commission = [
@@ -102,7 +194,7 @@ class UtmifyService
 
         $body = [
             'orderId' => $orderId,
-            'platform' => 'Primicia',
+            'platform' => config('getfy.app_name', 'Getfy'),
             'paymentMethod' => $paymentMethod,
             'status' => $utmifyStatus,
             'createdAt' => $createdAt,
@@ -122,24 +214,63 @@ class UtmifyService
     }
 
     /**
-     * POST to UTMfy API. Throws on failure.
+     * UTMify exige todas as 7 chaves de tracking sempre presentes (string ou null).
+     * Prioridade: order.metadata > CheckoutSession.
+     *
+     * @param  array<string, mixed>  $meta
+     * @return array<string, string|null>
+     */
+    public function buildTrackingParameters(?CheckoutSession $session, array $meta): array
+    {
+        $trackingParameters = [];
+
+        foreach (CheckoutSession::TRACKING_FIELD_KEYS as $key) {
+            $raw = $meta[$key] ?? $session?->{$key} ?? null;
+            if (is_string($raw)) {
+                $trimmed = trim($raw);
+                $trackingParameters[$key] = $trimmed !== '' ? $trimmed : null;
+            } else {
+                $trackingParameters[$key] = null;
+            }
+        }
+
+        return $trackingParameters;
+    }
+
+    /**
+     * POST to UTMIFY API. Throws on failure.
      */
     public function post(string $apiKey, array $body): \Illuminate\Http\Client\Response
     {
-        $response = Http::timeout(15)
+        $response = Http::timeout((int) config('utmify.http_timeout', 15))
             ->withHeaders(['x-api-token' => $apiKey])
             ->post(self::ENDPOINT, $body);
 
         if (! $response->successful()) {
             throw new \RuntimeException(
-                'UTMfy API error: ' . $response->status() . ' ' . $response->body()
+                'UTMIFY API error: '.$response->status().' '.$response->body()
             );
         }
 
         return $response;
     }
 
-    private function mapPaymentMethod(?string $gateway): string
+    private function mapPaymentMethod(Order $order): string
+    {
+        $key = $order->resolveCheckoutPaymentMethodKey();
+        if ($key !== null) {
+            return match ($key) {
+                'pix', 'pix_auto' => 'pix',
+                'boleto' => 'boleto',
+                'card', 'apple_pay', 'google_pay', 'paypal' => 'credit_card',
+                default => $this->mapPaymentMethodFromGateway($order->gateway),
+            };
+        }
+
+        return $this->mapPaymentMethodFromGateway($order->gateway);
+    }
+
+    private function mapPaymentMethodFromGateway(?string $gateway): string
     {
         if (! $gateway) {
             return 'pix';

@@ -9,6 +9,9 @@ use App\Models\Product;
 use App\Models\ProductOffer;
 use App\Models\SubscriptionPlan;
 use App\Support\ApiHostedCheckoutPricing;
+use App\Services\ApiPixAccess;
+use App\Services\MerchantOperationalGuard;
+use App\Services\MinimumChargeService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
@@ -21,14 +24,19 @@ class CheckoutSessionsController extends Controller
         if (! $app instanceof ApiApplication) {
             abort(500, 'API application not resolved');
         }
+        if (! ApiPixAccess::effectiveForTenant($app->tenant_id)) {
+            return response()->json(['message' => 'API PIX disabled for this tenant.'], 403);
+        }
+        MerchantOperationalGuard::assertCanAcceptPayments((int) $app->tenant_id);
 
+        $apiMin = app(MinimumChargeService::class)->apiPixMinimumBrlForTenant((int) $app->tenant_id);
         $validated = $request->validate([
             'customer' => ['required', 'array'],
             'customer.email' => ['required', 'email'],
             'customer.name' => ['nullable', 'string', 'max:255'],
             'customer.cpf' => ['nullable', 'string', 'max:14'],
             'customer.phone' => ['nullable', 'string', 'max:24'],
-            'amount' => ['required', 'numeric', 'min:0.01'],
+            'amount' => ['required', 'numeric', 'min:'.$apiMin],
             'currency' => ['nullable', 'string', 'in:BRL,USD,EUR'],
             'product_id' => ['nullable', 'string', 'exists:products,id'],
             'product_offer_id' => ['nullable', 'integer', 'exists:product_offers,id'],
@@ -39,10 +47,14 @@ class CheckoutSessionsController extends Controller
         ]);
 
         $tenantId = $app->tenant_id;
+        $chargeBrl = null;
         if (! empty($validated['product_id'])) {
             $product = Product::where('id', $validated['product_id'])->where('tenant_id', $tenantId)->first();
             if (! $product) {
                 return response()->json(['message' => 'Produto não encontrado.'], 422);
+            }
+            if (! $product->isAvailableForPurchase()) {
+                return response()->json(['message' => 'Produto indisponível para compra.'], 422);
             }
             $offerId = isset($validated['product_offer_id']) ? (int) $validated['product_offer_id'] : null;
             $planId = isset($validated['subscription_plan_id']) ? (int) $validated['subscription_plan_id'] : null;
@@ -70,7 +82,15 @@ class CheckoutSessionsController extends Controller
             if (abs($expectedBrl - $requestedBrl) > 0.02) {
                 return response()->json(['message' => 'Valor não corresponde ao preço do produto.'], 422);
             }
+            $chargeBrl = $expectedBrl;
         }
+
+        if ($chargeBrl === null) {
+            $requestCurrency = strtoupper((string) ($validated['currency'] ?? 'BRL'));
+            $chargeBrl = ApiHostedCheckoutPricing::amountToBrl((float) $validated['amount'], $requestCurrency);
+        }
+
+        app(MinimumChargeService::class)->assertApiPayment($chargeBrl, (int) $tenantId);
 
         $expiresIn = (int) ($validated['expires_in'] ?? 30);
         $expiresAt = now()->addMinutes($expiresIn);

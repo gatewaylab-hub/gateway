@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, watch } from 'vue';
-import { useForm } from '@inertiajs/vue3';
+import { useForm, usePage } from '@inertiajs/vue3';
 import {
     Smartphone,
     Users,
@@ -9,47 +9,121 @@ import {
     CreditCard,
     ChevronRight,
     X,
+    Truck,
+    Store,
 } from 'lucide-vue-next';
 import Button from '@/components/ui/Button.vue';
 import Toggle from '@/components/ui/Toggle.vue';
 import { useI18n } from '@/composables/useI18n';
+import { sanitizeHtmlAllowlist } from '@/lib/sanitizeHtml';
+import { normalizeMoneyInput } from '@/lib/moneyDecimal';
 
 const props = defineProps({
     open: { type: Boolean, default: false },
     productTypes: { type: Array, default: () => [] },
     billingTypes: { type: Array, default: () => [] },
+    productCategories: { type: Array, default: () => [] },
+    marketplaceCategories: { type: Array, default: () => [] },
     exchangeRates: { type: Object, default: () => ({ brl_eur: 0.16, brl_usd: 0.18 }) },
     pluginFormSections: { type: Array, default: () => [] },
+    checkoutGatewayUi: {
+        type: Object,
+        default: () => ({
+            card_show_installments: false,
+            card_installments_gateway_name: '',
+            platform_card_installments_enabled: false,
+            platform_card_installments_max: 12,
+        }),
+    },
 });
 
 const emit = defineEmits(['close', 'success']);
 const { t } = useI18n();
+const page = usePage();
+
+const platformMinCharge = computed(() => Number(page.props.platform_minimum_charge_brl ?? 0));
+const platformMinChargeLabel = computed(() =>
+    platformMinCharge.value > 0
+        ? new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(platformMinCharge.value)
+        : null
+);
 
 const step = ref(1);
 const selectedType = ref(null);
 
 const typeIcons = {
+    anuncio: Store,
     aplicativo: Smartphone,
     area_membros: Users,
     link: Link,
     link_pagamento: CreditCard,
+    produto_fisico: Truck,
 };
 
 const form = useForm({
     name: '',
     description: '',
+    category: 'outros',
+    marketplace_category_id: '',
     type: '',
+    delivery_mode: 'chat',
+    warranty_text: '',
+    region_text: '',
     billing_type: 'one_time',
     price: '',
     currency: 'BRL',
     is_active: true,
     image: null,
     deliverable_link: '',
+    card_installments: {
+        enabled: false,
+        max: 2,
+    },
 });
 
 const priceNum = computed(() => parseFloat(form.price) || 0);
 const priceEur = computed(() => (priceNum.value * (props.exchangeRates.brl_eur ?? 0.16)).toFixed(2));
 const priceUsd = computed(() => (priceNum.value * (props.exchangeRates.brl_usd ?? 0.18)).toFixed(2));
+const MIN_PARCELA_BRL = 5;
+const showCardInstallments = computed(
+    () => form.billing_type !== 'subscription' && Boolean(props.checkoutGatewayUi?.card_show_installments)
+);
+const platformInstallmentMax = computed(() => {
+    const fromUi = Number(props.checkoutGatewayUi?.platform_card_installments_max);
+    const fromShared = Number(page.props.platform_card_installments?.max);
+    const raw = Number.isFinite(fromUi) && fromUi > 0 ? fromUi : fromShared;
+    return Math.min(12, Math.max(2, raw || 12));
+});
+const maxAllowedInstallments = computed(() => {
+    if (form.billing_type === 'subscription') return 1;
+    const p = priceNum.value;
+    if (!p || p < MIN_PARCELA_BRL) return 1;
+    const byAmount = Math.min(12, Math.max(1, Math.floor(p / MIN_PARCELA_BRL)));
+    return Math.min(byAmount, platformInstallmentMax.value);
+});
+const installmentMaxOptions = computed(() => {
+    const max = maxAllowedInstallments.value;
+    if (max < 2) return [];
+    const out = [];
+    for (let n = 2; n <= max; n++) out.push(n);
+    return out;
+});
+
+watch(
+    () => form.billing_type,
+    (type) => {
+        if (type === 'subscription') {
+            form.card_installments.enabled = false;
+            form.card_installments.max = 1;
+        }
+    }
+);
+
+watch(maxAllowedInstallments, (maxAllowed) => {
+    if (form.card_installments.max > maxAllowed) {
+        form.card_installments.max = Math.max(2, maxAllowed);
+    }
+});
 
 const availableTypes = computed(() =>
     props.productTypes.filter((t) => t.available)
@@ -76,7 +150,33 @@ function close() {
 }
 
 function submit() {
-    form.post('/produtos', {
+    const fd = new FormData();
+    fd.append('name', form.name);
+    fd.append('description', form.description ?? '');
+    fd.append('category', form.category || 'outros');
+    fd.append('marketplace_category_id', form.marketplace_category_id ?? '');
+    fd.append('delivery_mode', form.delivery_mode ?? 'chat');
+    fd.append('type', form.type);
+    fd.append('billing_type', form.billing_type);
+    fd.append('price', String(normalizeMoneyInput(form.price)));
+    fd.append('currency', form.currency);
+    fd.append('is_active', form.is_active ? '1' : '0');
+    if (form.deliverable_link) {
+        fd.append('deliverable_link', form.deliverable_link);
+    }
+    if (form.image instanceof File) {
+        fd.append('image', form.image);
+    }
+    if (showCardInstallments.value && form.card_installments) {
+        const enabled = form.billing_type !== 'subscription' && form.card_installments.enabled;
+        fd.append('card_installments[enabled]', enabled ? '1' : '0');
+        fd.append(
+            'card_installments[max]',
+            String(enabled ? Math.min(platformInstallmentMax.value, Math.max(2, form.card_installments.max || 2)) : 1)
+        );
+    }
+
+    form.transform(() => fd).post('/produtos', {
         forceFormData: true,
         onSuccess: () => {
             close();
@@ -97,9 +197,17 @@ watch(
             step.value = 1;
             selectedType.value = null;
             form.reset();
+        } else if (page.props.product_approval_required) {
+            form.is_active = false;
         }
     }
 );
+
+function safePluginSectionHtml(html) {
+    return sanitizeHtmlAllowlist(html, {
+        FORBID_TAGS: ['script', 'iframe', 'object', 'embed'],
+    });
+}
 </script>
 
 <template>
@@ -190,6 +298,12 @@ watch(
 
                     <!-- Step 2: Formulário -->
                     <form v-else class="space-y-4" @submit.prevent="submit">
+                        <p
+                            v-if="form.errors.image || (form.hasErrors && !form.errors.name && !form.errors.price)"
+                            class="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-300"
+                        >
+                            {{ form.errors.image || Object.values(form.errors)[0] }}
+                        </p>
                         <div>
                             <button
                                 type="button"
@@ -246,6 +360,36 @@ watch(
                                 :placeholder="t('products.create.description_placeholder', 'Breve descrição do produto')"
                             />
                         </div>
+                        <div v-if="form.type === 'anuncio'">
+                            <label class="block text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                                Categoria do marketplace *
+                            </label>
+                            <select
+                                v-model="form.marketplace_category_id"
+                                required
+                                class="mt-1 block w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-zinc-900 focus:border-[var(--color-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-primary)] dark:border-zinc-600 dark:bg-zinc-800 dark:text-white"
+                            >
+                                <option value="" disabled>Selecione a categoria</option>
+                                <option v-for="c in marketplaceCategories" :key="c.id" :value="c.id">{{ c.name }}</option>
+                            </select>
+                            <p class="mt-1 text-xs text-zinc-500">Categorias criadas pelo administrador.</p>
+                            <p v-if="form.errors.marketplace_category_id" class="mt-1 text-sm text-red-600 dark:text-red-400">
+                                {{ form.errors.marketplace_category_id }}
+                            </p>
+                        </div>
+                        <div v-if="form.type === 'anuncio'">
+                            <label class="block text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                                Modo de entrega
+                            </label>
+                            <select
+                                v-model="form.delivery_mode"
+                                class="mt-1 block w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-zinc-900 focus:border-[var(--color-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-primary)] dark:border-zinc-600 dark:bg-zinc-800 dark:text-white"
+                            >
+                                <option value="chat">Somente chat</option>
+                                <option value="automatic">Somente automático (códigos)</option>
+                                <option value="both">Chat + automático</option>
+                            </select>
+                        </div>
                         <div v-if="form.type === 'link'">
                             <label class="block text-sm font-medium text-zinc-700 dark:text-zinc-300">
                                 {{ t('products.create.deliverable_link', 'Link do entregável') }}
@@ -270,18 +414,62 @@ watch(
                             <input
                                 v-model="form.price"
                                 type="number"
-                                step="0.01"
-                                min="0"
+                                step="any"
+                                :min="platformMinCharge"
+                                inputmode="decimal"
                                 required
                                 class="mt-1 block w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-zinc-900 placeholder-zinc-400 focus:border-[var(--color-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-primary)] dark:border-zinc-600 dark:bg-zinc-800 dark:text-white dark:placeholder-zinc-500"
                                 placeholder="0,00"
                             />
+                            <p v-if="platformMinChargeLabel" class="mt-1 text-xs text-amber-700 dark:text-amber-300">
+                                Ticket mínimo da plataforma: {{ platformMinChargeLabel }}
+                            </p>
                             <p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
                                 ≈ € {{ priceEur }} · $ {{ priceUsd }}
                             </p>
                             <p v-if="form.errors.price" class="mt-1 text-sm text-red-600 dark:text-red-400">
                                 {{ form.errors.price }}
                             </p>
+                        </div>
+                        <div
+                            v-if="showCardInstallments"
+                            class="space-y-3 rounded-xl border border-zinc-200 p-4 dark:border-zinc-700"
+                        >
+                            <div class="flex items-center justify-between gap-3">
+                                <div class="min-w-0">
+                                    <p class="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                                        Permitir pagamento parcelado neste produto
+                                    </p>
+                                    <p class="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
+                                        Produto vendido à vista se estiver desmarcado
+                                    </p>
+                                </div>
+                                <Toggle
+                                    v-model="form.card_installments.enabled"
+                                    :disabled="installmentMaxOptions.length === 0"
+                                    class="shrink-0"
+                                />
+                            </div>
+                            <div v-if="form.card_installments.enabled" class="space-y-3">
+                                <div class="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-100">
+                                    <p>As vendas parceladas seguem o cronograma de cobrança das parcelas do comprador.</p>
+                                    <p class="mt-1.5">O recebimento e a liberação dos valores ocorrerão conforme o processamento das parcelas pagas.</p>
+                                    <p class="mt-1.5">Quanto maior a quantidade de parcelas escolhida pelo cliente, maior será o período total de recebimento da venda.</p>
+                                </div>
+                                <div>
+                                    <label class="mb-1.5 block text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                                        Máximo de parcelas para este produto
+                                    </label>
+                                    <select
+                                        v-model.number="form.card_installments.max"
+                                        class="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-[var(--color-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-primary)] dark:border-zinc-600 dark:bg-zinc-800 dark:text-white"
+                                    >
+                                        <option v-for="n in installmentMaxOptions" :key="'create-inst-' + n" :value="n">
+                                            {{ n }}x
+                                        </option>
+                                    </select>
+                                </div>
+                            </div>
                         </div>
                         <div>
                             <label class="block text-sm font-medium text-zinc-700 dark:text-zinc-300">
@@ -299,14 +487,30 @@ watch(
                             <p v-if="form.image" class="mt-1 text-sm text-zinc-500">
                                 {{ form.image.name }}
                             </p>
+                            <p v-if="form.errors.image" class="mt-1 text-sm text-red-600 dark:text-red-400">
+                                {{ form.errors.image }}
+                            </p>
                         </div>
                         <div class="flex items-center gap-2">
-                            <Toggle v-model="form.is_active" :label="t('products.create.active_product', 'Produto ativo')" />
+                            <Toggle
+                                v-model="form.is_active"
+                                :label="t('products.create.active_product', 'Produto ativo')"
+                                :disabled="page.props.product_approval_required === true"
+                            />
                         </div>
+                        <p
+                            v-if="page.props.product_approval_required"
+                            class="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100"
+                        >
+                            <span class="font-semibold">Entra em análise da plataforma.</span>
+                            Você poderá editar normalmente; o checkout
+                            <code class="text-[11px]">/c/…</code>
+                            só fica online após a aprovação do admin (aí o produto é ativado automaticamente).
+                        </p>
                         <!-- Área para plugins -->
                         <div v-if="pluginFormSections?.length" class="space-y-2 border-t border-zinc-200 pt-4 dark:border-zinc-700">
                             <template v-for="(section, idx) in pluginFormSections" :key="idx">
-                                <div v-if="section.html" v-html="section.html" />
+                                <div v-if="section.html" v-html="safePluginSectionHtml(section.html)" />
                                 <div v-else-if="section.slot" class="text-sm text-zinc-500">
                                     {{ section.slot }}
                                 </div>

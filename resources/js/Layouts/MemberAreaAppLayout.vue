@@ -4,7 +4,8 @@ import { Link, usePage, Head, router } from '@inertiajs/vue3';
 import PwaInstallPrompt from '@/components/member-area/PwaInstallPrompt.vue';
 import MemberAreaNotificationsPanel from '@/components/member-area/MemberAreaNotificationsPanel.vue';
 import Button from '@/components/ui/Button.vue';
-import { Bell, ChevronDown, User, X, Camera, Lock, CheckCircle, AlertCircle, Menu, Trophy } from 'lucide-vue-next';
+import { Bell, ChevronDown, User, X, Camera, Lock, CheckCircle, AlertCircle, Menu, Trophy, Award, Package } from 'lucide-vue-next';
+import { resolveMemberAreaHref as buildMemberAreaHref } from '@/utils/memberAreaHref';
 
 const page = usePage();
 const props = computed(() => page.props);
@@ -16,6 +17,8 @@ const vapid_public = computed(() => props.value?.vapid_public ?? null);
 const base_url = computed(() => props.value?.base_url ?? '');
 
 const user = computed(() => props.value?.auth?.user ?? null);
+const adminPreview = computed(() => props.value?.member_area_admin_preview ?? null);
+const isAdminPreview = computed(() => adminPreview.value?.active === true);
 const theme = computed(() => config.value?.theme ?? {});
 const sidebar = computed(() => config.value?.sidebar ?? {});
 const headerLogo = computed(() => config.value?.header?.logo_url ?? null);
@@ -23,14 +26,14 @@ const sidebarItems = computed(() => sidebar.value?.items ?? [
     { title: 'Início', icon: 'home', link: '/', open_external: false },
 ]);
 
-/** Número de itens no nav: sidebar + comunidade (se ativa). Se > 2, em mobile mostra hamburger. */
-const totalNavCount = computed(() => {
-    const items = sidebarItems.value.length;
-    const withCommunity = config.value?.community_enabled ? 1 : 0;
-    return items + withCommunity;
-});
 const certificateEnabled = computed(() => (config.value?.certificate ?? {})?.enabled ?? false);
-const showMobileHamburger = computed(() => totalNavCount.value > 2);
+const memberCertificate = computed(() => props.value?.member_certificate ?? { enabled: false });
+const certificateNavReady = computed(() => memberCertificate.value.ready === true);
+const certificateNavIssued = computed(() => memberCertificate.value.issued === true);
+const isCertificadoPage = computed(() => {
+    const url = page.url || '';
+    return url.includes('/certificado');
+});
 
 const gamificationEnabled = computed(() => (config.value?.gamification ?? {})?.enabled ?? false);
 const gamificationAchievements = computed(() => props.value?.gamification_achievements ?? []);
@@ -105,6 +108,52 @@ const accountBaseUrl = computed(() => String(baseUrl.value || '').replace(/\/$/,
 const notificationsApiBasePath = computed(() => {
     if (typeof window === 'undefined') return basePath.value;
     return window.location.pathname.startsWith('/m/') ? basePath.value : '';
+});
+
+function usesPathSlugPrefix() {
+    if (typeof window !== 'undefined') {
+        return window.location.pathname.startsWith('/m/');
+    }
+    const bu = props.value?.base_url;
+    return Boolean(bu && typeof bu === 'string' && bu.includes('/m/'));
+}
+
+/** Monta href interno da área (path /m/slug vs domínio próprio na raiz). */
+function resolveMemberAreaHref(link, openExternal = false) {
+    return buildMemberAreaHref(link, {
+        usesPathPrefix: usesPathSlugPrefix(),
+        basePath: basePath.value,
+        baseUrl: baseUrl.value,
+        openExternal,
+    });
+}
+
+function isExternalMenuLink(item) {
+    if (item?.open_external) {
+        return true;
+    }
+    const link = String(item?.link ?? '').trim();
+    if (!/^https?:\/\//i.test(link)) {
+        return false;
+    }
+    try {
+        if (typeof window !== 'undefined') {
+            return new URL(link).origin !== window.location.origin;
+        }
+        const base = String(props.value?.base_url ?? '').replace(/\/$/, '');
+        return !base || !link.startsWith(base);
+    } catch {
+        return true;
+    }
+}
+
+const memberAreaHomeHref = computed(() => resolveMemberAreaHref('/'));
+const communityHref = computed(() => resolveMemberAreaHref('/comunidade'));
+const certificadoHref = computed(() => resolveMemberAreaHref('/certificado'));
+const canOpenCustomerPanel = computed(() => Boolean(user.value && props.value?.auth?.user?.panel_switch?.customer));
+const customerPanelHref = computed(() => {
+    const appUrl = String(props.value?.app_url || '').replace(/\/$/, '');
+    return appUrl ? `${appUrl}/painel-cliente` : '/painel-cliente';
 });
 
 const initials = computed(() => {
@@ -270,7 +319,7 @@ const manifestUrl = computed(() => {
     return `${base.endsWith('/') ? base.slice(0, -1) : base}/manifest.json`;
 });
 
-const themeColor = computed(() => config.value?.pwa?.theme_color || '#8A2BE2');
+const themeColor = computed(() => config.value?.pwa?.theme_color || '#0ea5e9');
 const appName = computed(() => config.value?.pwa?.name || product.value?.name || 'App');
 const pageTitle = computed(() => product.value?.name || config.value?.pwa?.name || 'Área de Membros');
 
@@ -464,7 +513,7 @@ watch(
     <div
         class="min-h-screen transition-colors"
         :style="{
-            '--ma-primary': theme.primary || '#8A2BE2',
+            '--ma-primary': theme.primary || '#0ea5e9',
             '--ma-bg': theme.background || '#18181b',
             '--ma-sidebar-bg': theme.sidebar_bg || '#27272a',
             '--ma-text': theme.text || '#f8fafc',
@@ -477,7 +526,7 @@ watch(
             :style="{ color: 'var(--ma-text)' }"
         >
             <div class="flex min-w-0 shrink items-center gap-4 md:gap-6">
-                <Link :href="basePath" class="flex shrink-0 items-center gap-4" @click="closeMobileMenu">
+                <Link :href="memberAreaHomeHref" class="flex shrink-0 items-center gap-4" @click="closeMobileMenu">
                     <img
                         v-if="headerLogo"
                         :src="headerLogo"
@@ -488,15 +537,12 @@ watch(
                         {{ product?.name || 'Área de Membros' }}
                     </span>
                 </Link>
-                <!-- Nav: escondido em mobile quando há hamburger; visível em desktop ou quando <= 2 itens -->
-                <nav
-                    class="hidden items-center gap-1 md:flex"
-                    :class="{ '!flex': showMobileHamburger === false }"
-                >
+                <!-- Nav: apenas desktop; no mobile o menu fica no drawer (hamburger) -->
+                <nav class="hidden items-center gap-1 md:flex">
                     <template v-for="item in sidebarItems" :key="item.title">
                         <a
-                            v-if="item.open_external"
-                            :href="item.link"
+                            v-if="isExternalMenuLink(item)"
+                            :href="resolveMemberAreaHref(item.link, true)"
                             target="_blank"
                             rel="noopener"
                             class="rounded-lg px-3 py-2 text-sm font-medium text-white/90 drop-shadow hover:bg-white/10"
@@ -505,23 +551,49 @@ watch(
                         </a>
                         <Link
                             v-else
-                            :href="item.link.startsWith('/') ? basePath + item.link : basePath + '/' + item.link"
+                            :href="resolveMemberAreaHref(item.link, false)"
                             class="rounded-lg px-3 py-2 text-sm font-medium text-white/90 drop-shadow hover:bg-white/10"
                         >
                             {{ item.title }}
                         </Link>
                     </template>
                     <Link
+                        v-if="certificateEnabled"
+                        :href="certificadoHref"
+                        class="relative inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium drop-shadow transition hover:bg-white/10"
+                        :class="isCertificadoPage ? 'bg-white/15 text-white' : 'text-white/90'"
+                    >
+                        <Award class="h-4 w-4 shrink-0" />
+                        Meu certificado
+                        <span
+                            v-if="certificateNavReady"
+                            class="absolute -right-0.5 -top-0.5 flex h-2 w-2 rounded-full bg-amber-400 ring-2 ring-zinc-900 animate-pulse"
+                            aria-hidden="true"
+                        />
+                        <span
+                            v-else-if="certificateNavIssued"
+                            class="absolute -right-0.5 -top-0.5 flex h-2 w-2 rounded-full bg-emerald-400 ring-2 ring-zinc-900"
+                            aria-hidden="true"
+                        />
+                    </Link>
+                    <Link
                         v-if="config?.community_enabled"
-                        :href="`${basePath}/comunidade`"
+                        :href="communityHref"
                         class="rounded-lg px-3 py-2 text-sm font-medium text-white/90 drop-shadow hover:bg-white/10"
                     >
                         Comunidade
                     </Link>
+                    <a
+                        v-if="canOpenCustomerPanel"
+                        :href="customerPanelHref"
+                        class="inline-flex items-center gap-1.5 rounded-lg bg-white/15 px-3 py-2 text-sm font-medium text-white drop-shadow transition hover:bg-white/25"
+                    >
+                        <Package class="h-4 w-4 shrink-0" />
+                        Minhas compras
+                    </a>
                 </nav>
-                <!-- Botão hamburger: só quando mais de 2 itens E em telas pequenas (md:hidden quando showMobileHamburger) -->
+                <!-- Menu principal no mobile: sempre drawer (evita colisão logo + links + ícones) -->
                 <button
-                    v-if="showMobileHamburger"
                     type="button"
                     class="flex h-10 w-10 items-center justify-center rounded-lg text-white/90 hover:bg-white/10 md:hidden"
                     aria-label="Abrir menu"
@@ -581,7 +653,6 @@ watch(
                 <button
                     v-if="canRegisterPush && !pushRegistered"
                     class="hidden rounded-lg px-3 py-2 text-sm text-white/80 hover:bg-white/10 hover:text-white md:block"
-                    :class="{ '!block': !showMobileHamburger }"
                     :disabled="pushSubscribing"
                     @click="registerPushSubscription"
                 >
@@ -647,9 +718,19 @@ watch(
                             <User class="h-4 w-4" />
                             Minha conta
                         </button>
+                        <a
+                            v-if="canOpenCustomerPanel"
+                            :href="customerPanelHref"
+                            class="flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm font-medium text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                            role="menuitem"
+                            @click="accountMenuOpen = false"
+                        >
+                            <Package class="h-4 w-4" />
+                            Minhas compras
+                        </a>
                         <Link
                             v-if="certificateEnabled"
-                            :href="`${basePath}/certificado`"
+                            :href="certificadoHref"
                             class="flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm font-medium text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
                             role="menuitem"
                             @click="accountMenuOpen = false"
@@ -665,6 +746,7 @@ watch(
                             as="button"
                             class="flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm font-medium text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
                             role="menuitem"
+                            :on-finish="() => { window.location.href = memberAreaLoginPath; }"
                             @click="accountMenuOpen = false"
                         >
                             Sair
@@ -674,11 +756,37 @@ watch(
             </div>
         </header>
 
+        <div
+            v-if="isAdminPreview"
+            class="fixed left-0 right-0 top-14 z-20 border-b border-amber-500/40 bg-amber-500/95 px-4 py-2.5 text-amber-950 shadow-md print:hidden"
+            role="status"
+        >
+            <div class="mx-auto flex max-w-6xl flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <div class="min-w-0 text-sm leading-snug">
+                    <p class="font-semibold">Modo administrador — somente leitura</p>
+                    <p class="mt-0.5 opacity-90">
+                        {{ adminPreview.message }}
+                        <span v-if="adminPreview.seller_name" class="block sm:inline sm:before:content-['·_']">
+                            Seller: {{ adminPreview.seller_name }}
+                            <template v-if="adminPreview.seller_email">({{ adminPreview.seller_email }})</template>
+                        </span>
+                    </p>
+                </div>
+                <a
+                    v-if="adminPreview.back_url"
+                    :href="adminPreview.back_url"
+                    class="inline-flex shrink-0 items-center justify-center rounded-lg bg-amber-950/90 px-3 py-1.5 text-sm font-medium text-amber-50 hover:bg-amber-950"
+                >
+                    Voltar aos produtos
+                </a>
+            </div>
+        </div>
+
         <!-- Overlay + painel do menu mobile (hamburger) -->
         <Teleport to="body">
             <div
                 v-if="mobileMenuOpen"
-                class="fixed inset-0 z-40 md:hidden"
+                class="fixed inset-0 z-40 print:hidden md:hidden"
                 aria-hidden="true"
             >
                 <div
@@ -700,8 +808,8 @@ watch(
                     <nav class="flex flex-col gap-1 px-4 py-2">
                         <template v-for="item in sidebarItems" :key="item.title">
                             <a
-                                v-if="item.open_external"
-                                :href="item.link"
+                                v-if="isExternalMenuLink(item)"
+                                :href="resolveMemberAreaHref(item.link, true)"
                                 target="_blank"
                                 rel="noopener"
                                 class="rounded-lg px-4 py-3 text-sm font-medium text-zinc-200 hover:bg-zinc-800 hover:text-white"
@@ -711,7 +819,7 @@ watch(
                             </a>
                             <Link
                                 v-else
-                                :href="item.link.startsWith('/') ? basePath + item.link : basePath + '/' + item.link"
+                                :href="resolveMemberAreaHref(item.link, false)"
                                 class="rounded-lg px-4 py-3 text-sm font-medium text-zinc-200 hover:bg-zinc-800 hover:text-white"
                                 @click="closeMobileMenu"
                             >
@@ -719,13 +827,37 @@ watch(
                             </Link>
                         </template>
                         <Link
+                            v-if="certificateEnabled"
+                            :href="certificadoHref"
+                            class="relative flex items-center gap-2 rounded-lg px-4 py-3 text-sm font-medium text-zinc-200 hover:bg-zinc-800 hover:text-white"
+                            @click="closeMobileMenu"
+                        >
+                            <Award class="h-4 w-4 shrink-0 text-amber-400/90" />
+                            Meu certificado
+                            <span
+                                v-if="certificateNavReady"
+                                class="ml-auto rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-300"
+                            >
+                                Pronto
+                            </span>
+                        </Link>
+                        <Link
                             v-if="config?.community_enabled"
-                            :href="`${basePath}/comunidade`"
+                            :href="communityHref"
                             class="rounded-lg px-4 py-3 text-sm font-medium text-zinc-200 hover:bg-zinc-800 hover:text-white"
                             @click="closeMobileMenu"
                         >
                             Comunidade
                         </Link>
+                        <a
+                            v-if="canOpenCustomerPanel"
+                            :href="customerPanelHref"
+                            class="flex items-center gap-2 rounded-lg px-4 py-3 text-sm font-medium text-zinc-200 hover:bg-zinc-800 hover:text-white"
+                            @click="closeMobileMenu"
+                        >
+                            <Package class="h-4 w-4 shrink-0" />
+                            Minhas compras
+                        </a>
                     </nav>
                     <div v-if="canRegisterPush && !pushRegistered" class="border-t border-zinc-700 px-4 py-3">
                         <button
@@ -765,9 +897,18 @@ watch(
                                 <User class="h-4 w-4" />
                                 Minha conta
                             </button>
+                            <a
+                                v-if="canOpenCustomerPanel"
+                                :href="customerPanelHref"
+                                class="flex w-full items-center gap-2 rounded-lg px-4 py-3 text-left text-sm font-medium text-zinc-300 hover:bg-zinc-800"
+                                @click="closeMobileMenu"
+                            >
+                                <Package class="h-4 w-4" />
+                                Minhas compras
+                            </a>
                             <Link
                                 v-if="certificateEnabled"
-                                :href="`${basePath}/certificado`"
+                                :href="certificadoHref"
                                 class="flex w-full items-center gap-2 rounded-lg px-4 py-3 text-left text-sm font-medium text-zinc-300 hover:bg-zinc-800"
                                 @click="closeMobileMenu"
                             >
@@ -781,6 +922,7 @@ watch(
                                 method="post"
                                 as="button"
                                 class="flex w-full items-center gap-2 rounded-lg px-4 py-3 text-left text-sm font-medium text-zinc-300 hover:bg-zinc-800"
+                                :on-finish="() => { window.location.href = memberAreaLoginPath; }"
                                 @click="closeMobileMenu"
                             >
                                 Sair
@@ -791,12 +933,18 @@ watch(
             </div>
         </Teleport>
 
-        <div class="min-h-screen pt-14 print:pt-0" :style="{ backgroundColor: 'var(--ma-bg)', color: 'var(--ma-text)' }">
+        <div
+            class="min-h-screen print:pt-0"
+            :class="isAdminPreview ? 'pt-[7.5rem] sm:pt-[6.5rem]' : 'pt-14'"
+            :style="{ backgroundColor: 'var(--ma-bg)', color: 'var(--ma-text)' }"
+        >
             <main class="px-6 pb-6 print:p-0">
                 <slot />
             </main>
         </div>
-        <PwaInstallPrompt v-if="slug" :app-name="appName" :slug="slug" />
+        <div class="print:hidden">
+            <PwaInstallPrompt v-if="slug" :app-name="appName" :slug="slug" />
+        </div>
         <MemberAreaNotificationsPanel
             :open="notificationsPanelOpen"
             :base-path="notificationsApiBasePath"
@@ -814,7 +962,7 @@ watch(
         <Teleport to="body">
             <div
                 v-if="accountModalOpen"
-                class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+                class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm print:hidden"
                 role="dialog"
                 aria-modal="true"
                 aria-labelledby="account-modal-title"
@@ -993,7 +1141,7 @@ watch(
             >
                 <div
                     v-if="achievementModalOpen && currentAchievementModal"
-                    class="fixed inset-0 z-[100] flex items-center justify-center p-4"
+                    class="fixed inset-0 z-[100] flex items-center justify-center p-4 print:hidden"
                     aria-modal="true"
                     role="dialog"
                 >

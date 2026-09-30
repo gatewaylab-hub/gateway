@@ -1,17 +1,42 @@
 <script setup>
 import { ref, onMounted, onUnmounted, computed } from 'vue';
 import { Link, router, usePage } from '@inertiajs/vue3';
+import { panelNavPrefetch } from '@/composables/useAppSidebarNav';
+
+const props = defineProps({
+    /** header = barra superior; sidebar = rodapé da sidebar */
+    placement: { type: String, default: 'header' },
+    /** Só avatar (sidebar recolhida) */
+    compact: { type: Boolean, default: false },
+    /** Menu abre para cima */
+    dropUp: { type: Boolean, default: false },
+});
 
 const page = usePage();
 const dropdownOpen = ref(false);
-
-const panelNavPrefetch = ['hover', 'click'];
 const dropdownRef = ref(null);
+
+const isSidebar = computed(() => props.placement === 'sidebar');
 
 const user = computed(() => page.props.auth?.user ?? null);
 const isPlatformAdmin = computed(() => !!page.props.auth?.is_platform_admin);
 const customerPanel = computed(() => !!page.props.customer_panel);
 const panelSwitch = computed(() => user.value?.panel_switch ?? {});
+
+const isCustomerAreaPath = computed(() => {
+    const path = (page.url || '').replace(/^\//, '').split('?')[0];
+    return (
+        path === 'area-membros'
+        || path.startsWith('area-membros/')
+        || path === 'painel-cliente'
+        || path.startsWith('painel-cliente/')
+    );
+});
+
+const isClienteRole = computed(() => {
+    const r = user.value?.role;
+    return r === 'cliente' || r === 'aluno';
+});
 
 /** Compras/aluno: mostrar no painel do vendedor mesmo se panel_switch vier incompleto do backend. */
 const showPainelAluno = computed(() => {
@@ -22,14 +47,24 @@ const showPainelAluno = computed(() => {
     return r === 'infoprodutor' || r === 'team';
 });
 
-/** Voltar ao painel do vendedor quando está em /painel-cliente ou /area-membros. */
+/** Virar / voltar ao painel do vendedor em área de comprador. */
 const showPainelInfoprodutor = computed(() => {
     if (!user.value || isPlatformAdmin.value) return false;
-    if (!customerPanel.value) return false;
+    if (!(customerPanel.value || isCustomerAreaPath.value)) return false;
     if (panelSwitch.value?.seller) return true;
     const r = user.value.role;
     return r === 'infoprodutor' || r === 'team';
 });
+
+const sellerPanelButtonTitle = computed(() =>
+    isClienteRole.value ? 'Virar vendedor' : 'Painel do vendedor'
+);
+
+const sellerPanelButtonSubtitle = computed(() =>
+    isClienteRole.value
+        ? 'Cadastro e verificação (KYC)'
+        : 'Dashboard, vendas e anúncios'
+);
 
 function switchToCustomer() {
     router.post('/painel/trocar', { to: 'customer' });
@@ -69,13 +104,21 @@ onMounted(() => {
 onUnmounted(() => {
     document.removeEventListener('click', handleClickOutside);
 });
+
 </script>
 
 <template>
-    <div v-if="user" ref="dropdownRef" class="relative">
+    <div v-if="user" ref="dropdownRef" class="relative" :class="isSidebar && !compact ? 'w-full' : ''">
         <button
             type="button"
-            class="flex items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition-colors hover:bg-zinc-200/60 dark:hover:bg-zinc-700/50"
+            class="flex items-center gap-2 text-left text-sm transition-colors"
+            :class="[
+                isSidebar
+                    ? (compact
+                        ? 'mx-auto justify-center rounded-[12px] p-1.5 hover:bg-[#F1EAE2]'
+                        : 'w-full rounded-[12px] border border-[#EBE2D8] bg-white px-2.5 py-2 hover:bg-[#F1EAE2]')
+                    : 'rounded-lg px-2 py-1.5 hover:bg-zinc-200/60',
+            ]"
             @click.prevent="toggleDropdown"
         >
             <span
@@ -89,11 +132,16 @@ onUnmounted(() => {
                 />
                 <span v-else>{{ initials }}</span>
             </span>
-            <span class="hidden max-w-[120px] truncate font-medium text-zinc-700 dark:text-zinc-300 sm:block">
+            <span
+                v-if="!compact"
+                class="min-w-0 flex-1 truncate font-medium text-[#1A1410]"
+                :class="isSidebar ? 'block' : 'hidden sm:block max-w-[120px]'"
+            >
                 {{ user.name }}
             </span>
             <svg
-                class="h-4 w-4 shrink-0 text-zinc-500 transition-transform dark:text-zinc-400"
+                v-if="!compact"
+                class="h-4 w-4 shrink-0 text-[#8A7B6E] transition-transform"
                 :class="{ 'rotate-180': dropdownOpen }"
                 viewBox="0 0 20 20"
                 fill="currentColor"
@@ -109,7 +157,11 @@ onUnmounted(() => {
 
         <div
             v-if="dropdownOpen"
-            class="absolute right-0 z-50 mt-2 w-[min(100vw-2rem,18rem)] flex flex-col rounded-xl border border-zinc-200 bg-white p-3 shadow-[var(--shadow-theme-sm)] dark:border-zinc-800 dark:bg-zinc-900"
+            class="absolute z-[100002] flex w-[min(100vw-2rem,18rem)] flex-col rounded-xl border border-[#EBE2D8] bg-white p-3 shadow-lg"
+            :class="[
+                dropUp ? 'bottom-full mb-2' : 'top-full mt-2',
+                isSidebar && !compact ? 'left-0 right-0 w-full' : 'right-0',
+            ]"
         >
             <div class="border-b border-zinc-200 pb-3 dark:border-zinc-800">
                 <p class="truncate text-sm font-medium text-zinc-900 dark:text-zinc-100">
@@ -125,8 +177,8 @@ onUnmounted(() => {
                 class="mt-2 flex w-full flex-col items-start gap-0.5 rounded-lg px-3 py-2 text-left text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
                 @click="switchToCustomer(); closeDropdown()"
             >
-                <span>Painel do aluno</span>
-                <span class="text-xs font-normal text-zinc-500 dark:text-zinc-400">Minhas compras e área de membros</span>
+                <span>Minhas compras</span>
+                <span class="text-xs font-normal text-zinc-500 dark:text-zinc-400">Compras e chats</span>
             </button>
             <button
                 v-if="showPainelInfoprodutor"
@@ -134,8 +186,8 @@ onUnmounted(() => {
                 class="mt-2 flex w-full flex-col items-start gap-0.5 rounded-lg px-3 py-2 text-left text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
                 @click="switchToSeller(); closeDropdown()"
             >
-                <span>Painel do infoprodutor</span>
-                <span class="text-xs font-normal text-zinc-500 dark:text-zinc-400">Dashboard, vendas e produtos</span>
+                <span>{{ sellerPanelButtonTitle }}</span>
+                <span class="text-xs font-normal text-zinc-500 dark:text-zinc-400">{{ sellerPanelButtonSubtitle }}</span>
             </button>
             <Link
                 v-if="!isPlatformAdmin && (user.role === 'infoprodutor' || user.role === 'admin' || user.role === 'team')"
@@ -148,12 +200,12 @@ onUnmounted(() => {
             </Link>
             <Link
                 v-if="isPlatformAdmin"
-                href="/plataforma/conta"
+                href="/plataforma/meu-perfil"
                 :prefetch="panelNavPrefetch"
                 class="mt-2 flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
                 @click="closeDropdown"
             >
-                Minha conta
+                Meu perfil
             </Link>
             <Link
                 v-if="isPlatformAdmin"
@@ -161,6 +213,7 @@ onUnmounted(() => {
                 method="post"
                 as="button"
                 class="mt-1 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                :on-finish="() => { window.location.href = '/plataforma/login'; }"
                 @click="closeDropdown"
             >
                 Sair
@@ -171,6 +224,7 @@ onUnmounted(() => {
                 method="post"
                 as="button"
                 class="mt-1 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                :on-finish="() => { window.location.href = '/'; }"
                 @click="closeDropdown"
             >
                 Sair

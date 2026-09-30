@@ -1,7 +1,9 @@
 <script setup>
 import { computed, ref, onMounted, onUnmounted, watch, nextTick } from 'vue';
 import { getVideoProviderType } from '@/lib/utils';
-import { Maximize2, Play, Pause, Settings } from 'lucide-vue-next';
+import { iframeVideoEmbedUrl, MEMBER_IFRAME_ALLOW, vimeoVidstackSrc } from '@/lib/memberVideoEmbed';
+import { ensureVidstackLoaded } from '@/lib/vidstackLoader';
+import { Maximize2, Minimize2, Play, Pause, Monitor, Gauge } from 'lucide-vue-next';
 
 const props = defineProps({
     src: { type: String, default: '' },
@@ -25,13 +27,44 @@ const isEmbedProvider = computed(() => {
     return t === 'youtube' || t === 'vimeo';
 });
 const isYoutube = computed(() => providerType.value === 'youtube' && !!props.src);
+const iframeSrc = computed(() => iframeVideoEmbedUrl(props.src));
+const isIframeProvider = computed(() => !!iframeSrc.value);
+/** Quando a IFrame API falha (CSP, bloqueador, timeout), usa Vidstack como na referência open source. */
+const useVidstackFallback = ref(false);
+const useLegacyYoutube = computed(() => isYoutube.value && !useVidstackFallback.value);
+const showVidstackPlayer = computed(
+    () => !!props.src?.trim() && !isIframeProvider.value && (!isYoutube.value || useVidstackFallback.value),
+);
+const vidstackReady = ref(false);
+
+watch(
+    showVidstackPlayer,
+    async (show) => {
+        if (!show) {
+            return;
+        }
+        if (vidstackReady.value) {
+            return;
+        }
+        try {
+            await ensureVidstackLoaded();
+            vidstackReady.value = true;
+        } catch (_) {
+            vidstackReady.value = false;
+        }
+    },
+    { immediate: true }
+);
 const isMobile = ref(false);
-const isIphoneSafari = ref(false);
 let mobileMql = null;
 function onMobileQueryChange(e) {
     isMobile.value = !!e.matches;
 }
 const playerRef = ref(null);
+const wrapperRef = ref(null);
+const immersiveActive = ref(false);
+let bodyOverflowPrev = '';
+let onKeydownImmersive = null;
 let onFullscreenChangeHandler = null;
 
 const youtubeVideoId = computed(() => {
@@ -52,7 +85,8 @@ const hasYoutubePlaylist = computed(() => {
 });
 
 // ---------------------------------------------------------------------------
-// YouTube legacy player (IFrame API) with quality selector.
+// YouTube legacy player (IFrame API) — qualidade e velocidade via API.
+// Velocidade em embed YouTube/Vimeo via Vidstack pode ficar indisponível (limitação do provider).
 // ---------------------------------------------------------------------------
 const youtubeMountEl = ref(null);
 let ytPlayer = null;
@@ -62,18 +96,15 @@ let ytProgressTimer = null;
 let ytControlsHideTimer = null;
 
 const QUALITY_STORAGE_KEY = 'member-area-youtube-quality';
-const QUALITY_LABELS = {
-    auto: 'Auto',
-    small: '240p',
-    medium: '360p',
-    large: '480p',
-    hd720: '720p',
-    hd1080: '1080p',
-    highres: 'Alta',
-};
+const SPEED_STORAGE_KEY = 'member-area-youtube-speed';
+const DEFAULT_PLAYBACK_SPEED = 1;
+const SPEED_OPTIONS_FALLBACK = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
 
 const qualityMenuOpen = ref(false);
+const speedMenuOpen = ref(false);
 const selectedQuality = ref('auto');
+const selectedSpeed = ref(DEFAULT_PLAYBACK_SPEED);
+const availableSpeeds = ref([...SPEED_OPTIONS_FALLBACK]);
 const lastQualityError = ref(null);
 const ytIsPlaying = ref(false);
 const ytCurrentTime = ref(0);
@@ -84,6 +115,12 @@ const ytPosterVisible = ref(true);
 const ytScrubbing = ref(false);
 const ytMaskActive = ref(false);
 let ytMaskTimer = null;
+const ytReady = ref(false);
+const ytLoading = ref(false);
+const ytLoadError = ref(false);
+let ytFallbackTimer = null;
+let ytInitInFlight = false;
+const YT_LEGACY_INIT_TIMEOUT_MS = 8000;
 
 const ytMaskBranding = computed(() => {
     if (ytPosterVisible.value) return true;
@@ -135,7 +172,114 @@ function saveQuality(q) {
     } catch (_) {}
 }
 
+function getSavedSpeed() {
+    try {
+        const raw = localStorage.getItem(SPEED_STORAGE_KEY);
+        const n = parseFloat(raw);
+        return Number.isFinite(n) && n > 0 ? n : DEFAULT_PLAYBACK_SPEED;
+    } catch (_) {
+        return DEFAULT_PLAYBACK_SPEED;
+    }
+}
+
+function saveSpeed(rate) {
+    try {
+        localStorage.setItem(SPEED_STORAGE_KEY, String(rate));
+    } catch (_) {}
+}
+
+function formatSpeedLabel(rate) {
+    const r = Number(rate);
+    if (!Number.isFinite(r)) return '1x';
+    if (r === 1) return '1x';
+    const text = Number.isInteger(r) ? String(r) : String(r).replace('.', ',');
+    return `${text}x`;
+}
+
+function refreshAvailableSpeeds() {
+    if (!ytPlayer || typeof ytPlayer.getAvailablePlaybackRates !== 'function') {
+        availableSpeeds.value = [...SPEED_OPTIONS_FALLBACK];
+        return;
+    }
+    try {
+        const rates = ytPlayer.getAvailablePlaybackRates();
+        if (Array.isArray(rates) && rates.length > 0) {
+            availableSpeeds.value = rates
+                .filter((r) => Number.isFinite(Number(r)) && Number(r) > 0)
+                .map((r) => Number(r))
+                .sort((a, b) => a - b);
+            return;
+        }
+    } catch (_) {}
+    availableSpeeds.value = [...SPEED_OPTIONS_FALLBACK];
+}
+
+function resolveSpeedForVideo(requested) {
+    const rates = availableSpeeds.value;
+    if (!rates.length) return DEFAULT_PLAYBACK_SPEED;
+    const n = Number(requested);
+    if (rates.includes(n)) return n;
+    return rates.reduce((best, curr) => (Math.abs(curr - n) < Math.abs(best - n) ? curr : best), rates[0]);
+}
+
+function applyYoutubeSpeed(rate) {
+    if (!ytPlayer) return;
+    const r = resolveSpeedForVideo(rate);
+    try {
+        if (typeof ytPlayer.setPlaybackRate === 'function') {
+            ytPlayer.setPlaybackRate(r);
+            const applied = ytPlayer.getPlaybackRate?.();
+            selectedSpeed.value = Number.isFinite(applied) && applied > 0 ? applied : r;
+        }
+    } catch (_) {}
+}
+
+function setSpeed(rate) {
+    const r = resolveSpeedForVideo(rate);
+    selectedSpeed.value = r;
+    saveSpeed(r);
+    speedMenuOpen.value = false;
+    applyYoutubeSpeed(r);
+}
+
+function closeYtMenus() {
+    qualityMenuOpen.value = false;
+    speedMenuOpen.value = false;
+}
+
+function toggleQualityMenu() {
+    const next = !qualityMenuOpen.value;
+    closeYtMenus();
+    qualityMenuOpen.value = next;
+}
+
+function toggleSpeedMenu() {
+    const next = !speedMenuOpen.value;
+    closeYtMenus();
+    speedMenuOpen.value = next;
+}
+
+function clearYtFallbackTimer() {
+    if (ytFallbackTimer) {
+        clearTimeout(ytFallbackTimer);
+        ytFallbackTimer = null;
+    }
+}
+
+function enableVidstackFallback() {
+    if (useVidstackFallback.value) return;
+    clearYtFallbackTimer();
+    destroyYoutubePlayer();
+    useVidstackFallback.value = true;
+    ytLoading.value = false;
+    ytLoadError.value = true;
+}
+
 function destroyYoutubePlayer() {
+    clearYtFallbackTimer();
+    ytInitInFlight = false;
+    ytReady.value = false;
+    ytLoading.value = false;
     if (ytApplyQualityTimer) {
         clearTimeout(ytApplyQualityTimer);
         ytApplyQualityTimer = null;
@@ -152,7 +296,8 @@ function destroyYoutubePlayer() {
         if (ytPlayer && typeof ytPlayer.destroy === 'function') ytPlayer.destroy();
     } catch (_) {}
     ytPlayer = null;
-    qualityMenuOpen.value = false;
+    closeYtMenus();
+    availableSpeeds.value = [...SPEED_OPTIONS_FALLBACK];
     lastQualityError.value = null;
     ytIsPlaying.value = false;
     ytCurrentTime.value = 0;
@@ -203,15 +348,33 @@ function applyYoutubeQuality(q) {
 }
 
 async function initYoutubePlayer() {
+    if (useVidstackFallback.value) return;
     destroyYoutubePlayer();
     if (!isYoutube.value || !youtubeVideoId.value) return;
     await nextTick();
     const mount = youtubeMountEl.value;
     if (!mount) return;
 
+    ytLoading.value = true;
+    ytLoadError.value = false;
+    ytInitInFlight = true;
+    clearYtFallbackTimer();
+    ytFallbackTimer = setTimeout(() => enableVidstackFallback(), YT_LEGACY_INIT_TIMEOUT_MS);
+
     selectedQuality.value = getSavedQuality();
-    await loadYoutubeApiOnce();
-    if (!window.YT?.Player) return;
+    selectedSpeed.value = getSavedSpeed();
+    try {
+        await loadYoutubeApiOnce();
+    } catch (_) {
+        enableVidstackFallback();
+        return;
+    } finally {
+        ytInitInFlight = false;
+    }
+    if (!window.YT?.Player) {
+        enableVidstackFallback();
+        return;
+    }
 
     const mountId = `yt-legacy-${Math.random().toString(36).slice(2, 10)}`;
     mount.innerHTML = `<div id="${mountId}" class="yt-legacy-iframe"></div>`;
@@ -235,6 +398,14 @@ async function initYoutubePlayer() {
         },
         events: {
             onReady: () => {
+                ytReady.value = true;
+                ytLoading.value = false;
+                clearYtFallbackTimer();
+                refreshAvailableSpeeds();
+                const speedToApply = resolveSpeedForVideo(getSavedSpeed());
+                selectedSpeed.value = speedToApply;
+                saveSpeed(speedToApply);
+                applyYoutubeSpeed(speedToApply);
                 // Aplicar qualidade em diferentes momentos melhora a chance de pegar (como na antiga).
                 applyYoutubeQuality(selectedQuality.value);
                 ytApplyQualityTimer = setTimeout(() => applyYoutubeQuality(selectedQuality.value), 800);
@@ -256,8 +427,10 @@ async function initYoutubePlayer() {
                     ytIsPlaying.value = true;
                     ytPosterVisible.value = false;
                     scheduleHideControls();
+                    applyYoutubeSpeed(selectedSpeed.value);
                     if (ytApplyQualityTimer) clearTimeout(ytApplyQualityTimer);
                     ytApplyQualityTimer = setTimeout(() => applyYoutubeQuality(selectedQuality.value), 500);
+                    markUserPlayed();
                 }
                 if (e?.data === window.YT.PlayerState?.PAUSED) {
                     ytIsPlaying.value = false;
@@ -286,7 +459,14 @@ function setQuality(q) {
 }
 
 function togglePlay() {
-    if (!ytPlayer) return;
+    if (useVidstackFallback.value) return;
+    if (!ytPlayer) {
+        if (!ytInitInFlight && !ytLoading.value) {
+            void initYoutubePlayer();
+        }
+        return;
+    }
+    if (!ytReady.value) return;
     try {
         const state = ytPlayer.getPlayerState?.();
         if (state === window.YT?.PlayerState?.PLAYING) {
@@ -332,10 +512,14 @@ function seekToPct(pct) {
 }
 
 function onYoutubeOverlayInteract() {
-    // Mostra/fecha menu com interação no overlay (não no iframe).
-    if (qualityMenuOpen.value) {
-        qualityMenuOpen.value = false;
+    // Fecha menus com interação no overlay (não no iframe).
+    if (qualityMenuOpen.value || speedMenuOpen.value) {
+        closeYtMenus();
     }
+}
+
+function isSpeedSelected(rate) {
+    return Math.abs(Number(selectedSpeed.value) - Number(rate)) < 0.01;
 }
 
 function onScrubStart() {
@@ -364,28 +548,103 @@ function showControls() {
     scheduleHideControls();
 }
 
-async function requestYoutubeFullscreen() {
-    const el = ytRootEl.value;
-    if (!el) return;
-    try {
-        if (document.fullscreenElement || document.webkitFullscreenElement) {
-            if (document.exitFullscreen) await document.exitFullscreen();
-            else if (document.webkitExitFullscreen) await document.webkitExitFullscreen();
-            return;
-        }
-        if (el.requestFullscreen) await el.requestFullscreen();
-        else if (el.webkitRequestFullscreen) await el.webkitRequestFullscreen();
-    } catch (_) {}
-}
-
-function detectIphoneSafari() {
+function isIosTouchDevice() {
     if (typeof navigator === 'undefined') return false;
     const ua = String(navigator.userAgent || '');
-    // iPhone Safari: exclui browsers iOS com UA próprio (Chrome/Firefox/Edge) e webviews comuns.
-    const isIphone = /\biPhone\b/i.test(ua);
-    const isSafari = /Safari/i.test(ua) && !/(CriOS|FxiOS|EdgiOS|OPiOS|DuckDuckGo)/i.test(ua);
-    const isWebView = /(FBAN|FBAV|Instagram|Line|WhatsApp|GSA)/i.test(ua) || (!/Safari/i.test(ua) && /AppleWebKit/i.test(ua));
-    return isIphone && isSafari && !isWebView;
+    return /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+
+function enterImmersiveMode() {
+    if (immersiveActive.value) return;
+    immersiveActive.value = true;
+    if (typeof document !== 'undefined') {
+        bodyOverflowPrev = document.body.style.overflow;
+        document.body.style.overflow = 'hidden';
+    }
+}
+
+function exitImmersiveMode() {
+    if (!immersiveActive.value) return;
+    immersiveActive.value = false;
+    if (typeof document !== 'undefined') {
+        document.body.style.overflow = bodyOverflowPrev;
+        bodyOverflowPrev = '';
+    }
+}
+
+async function tryEnterFullscreen(el) {
+    if (!el) return false;
+    try {
+        if (el.requestFullscreen) {
+            await el.requestFullscreen();
+            return true;
+        }
+        if (el.webkitRequestFullscreen) {
+            await el.webkitRequestFullscreen();
+            return true;
+        }
+    } catch (_) {}
+    return false;
+}
+
+/**
+ * Tela cheia: Fullscreen API quando suportado; no iOS + YouTube (e fallback Vidstack) usa modo imersivo (fixed).
+ */
+async function requestMemberVideoFullscreen() {
+    if (immersiveActive.value) {
+        exitImmersiveMode();
+        return;
+    }
+
+    const wrap = wrapperRef.value;
+    if (typeof document !== 'undefined') {
+        const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+        if (fsEl && wrap && (fsEl === wrap || wrap.contains(fsEl))) {
+            try {
+                if (document.exitFullscreen) await document.exitFullscreen();
+                else if (document.webkitExitFullscreen) await document.webkitExitFullscreen();
+            } catch (_) {}
+            return;
+        }
+    }
+
+    if (useLegacyYoutube.value && wrap) {
+        if (isIosTouchDevice() && isMobile.value) {
+            enterImmersiveMode();
+            return;
+        }
+        const ok = await tryEnterFullscreen(wrap);
+        if (!ok) {
+            enterImmersiveMode();
+        }
+        return;
+    }
+
+    const el = playerRef.value;
+    if (el) {
+        try {
+            if (typeof el.enterFullscreen === 'function') {
+                await el.enterFullscreen('provider');
+                return;
+            }
+        } catch (_) {
+            if (isIosTouchDevice() && isMobile.value) {
+                enterImmersiveMode();
+            }
+            return;
+        }
+        try {
+            el.dispatchEvent(new CustomEvent('media-enter-fullscreen-request', { bubbles: true, composed: true }));
+        } catch (_) {}
+        if (isIosTouchDevice() && isMobile.value) {
+            enterImmersiveMode();
+        }
+        return;
+    }
+
+    if (isIosTouchDevice() && isMobile.value && wrap) {
+        enterImmersiveMode();
+    }
 }
 
 async function lockOrientationLandscape() {
@@ -404,10 +663,14 @@ function unlockOrientation() {
 }
 function isPlayerFullscreen() {
     if (typeof document === 'undefined') return false;
-    const el = playerRef.value;
-    if (!el) return false;
     const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
     if (!fsEl) return false;
+    const wrap = wrapperRef.value;
+    if (wrap && (fsEl === wrap || wrap.contains(fsEl))) {
+        return true;
+    }
+    const el = playerRef.value;
+    if (!el) return false;
     return fsEl === el || (typeof el.contains === 'function' && el.contains(fsEl));
 }
 
@@ -422,8 +685,7 @@ const vidstackSrc = computed(() => {
         return m ? `youtube/${m[1]}?vq=hd1080&playsinline=1&rel=0&modestbranding=1` : u;
     }
     if (type === 'vimeo') {
-        const m = u.match(/vimeo\.com\/(?:video\/)?(\d+)/);
-        return m ? `vimeo/${m[1]}` : u;
+        return vimeoVidstackSrc(u);
     }
     return u;
 });
@@ -448,8 +710,41 @@ const watermarkText = computed(() => {
     return (d.email && String(d.email).trim()) ? `${name} - ${String(d.email).trim()}` : name;
 });
 
+function isTrustedLessonEmbedOrigin(origin) {
+    try {
+        const host = new URL(origin).hostname.replace(/^www\./i, '').toLowerCase();
+        return (
+            host === 'wistia.com' ||
+            host.endsWith('.wistia.com') ||
+            host === 'wistia.net' ||
+            host.endsWith('.wistia.net') ||
+            host === 'loom.com' ||
+            host.endsWith('.loom.com')
+        );
+    } catch (_) {
+        return false;
+    }
+}
+
+function onLessonEmbedMessage(e) {
+    if (!iframeSrc.value) return;
+    if (!isTrustedLessonEmbedOrigin(e.origin)) return;
+    let data = e.data;
+    if (typeof data === 'string') {
+        try {
+            data = JSON.parse(data);
+        } catch (_) {
+            return;
+        }
+    }
+    if (!data || typeof data !== 'object') return;
+    const eventName = data.event || data.method || data.type || data.name;
+    if (eventName === 'ended' || eventName === 'end') {
+        onEnded();
+    }
+}
+
 onMounted(() => {
-    isIphoneSafari.value = detectIphoneSafari();
     if (typeof window !== 'undefined' && 'matchMedia' in window) {
         mobileMql = window.matchMedia('(max-width: 768px)');
         isMobile.value = !!mobileMql.matches;
@@ -472,6 +767,13 @@ onMounted(() => {
         };
         document.addEventListener('fullscreenchange', onFullscreenChangeHandler);
         document.addEventListener('webkitfullscreenchange', onFullscreenChangeHandler);
+        onKeydownImmersive = (e) => {
+            if (e.key === 'Escape' && immersiveActive.value) {
+                e.preventDefault();
+                exitImmersiveMode();
+            }
+        };
+        document.addEventListener('keydown', onKeydownImmersive);
     }
     if (props.watermarkEnabled && watermarkText.value) {
         watermarkInterval = setInterval(() => {
@@ -480,14 +782,25 @@ onMounted(() => {
     }
 
     initYoutubePlayer();
+    if (typeof window !== 'undefined') {
+        window.addEventListener('message', onLessonEmbedMessage);
+    }
 });
 onUnmounted(() => {
+    if (typeof window !== 'undefined') {
+        window.removeEventListener('message', onLessonEmbedMessage);
+    }
     if (watermarkInterval) clearInterval(watermarkInterval);
     destroyYoutubePlayer();
+    exitImmersiveMode();
     if (typeof document !== 'undefined' && onFullscreenChangeHandler) {
         document.removeEventListener('fullscreenchange', onFullscreenChangeHandler);
         document.removeEventListener('webkitfullscreenchange', onFullscreenChangeHandler);
         onFullscreenChangeHandler = null;
+    }
+    if (typeof document !== 'undefined' && onKeydownImmersive) {
+        document.removeEventListener('keydown', onKeydownImmersive);
+        onKeydownImmersive = null;
     }
     unlockOrientation();
     if (mobileMql) {
@@ -502,41 +815,75 @@ onUnmounted(() => {
 });
 
 watch(
-    () => [providerType.value, youtubeVideoId.value],
+    () => [props.src, providerType.value, youtubeVideoId.value],
     () => {
-        if (providerType.value === 'youtube') initYoutubePlayer();
-        else destroyYoutubePlayer();
+        hasUserPlayed = false;
+        playbackStartedAt = 0;
+        useVidstackFallback.value = false;
+        ytLoadError.value = false;
+        if (providerType.value === 'youtube') {
+            void initYoutubePlayer();
+        } else {
+            destroyYoutubePlayer();
+        }
     }
 );
 
-const effectivePlaysinline = computed(() => {
-    if (providerType.value !== 'native') return props.playsinline;
-    if (props.playsinline === false) return false;
-    return !isMobile.value;
-});
+const effectivePlaysinline = computed(() => props.playsinline !== false);
 
 const showFullscreenOverlay = computed(() => {
-    // iPhone Safari + YouTube: botão de fullscreen pode não aparecer no layout.
-    return isIphoneSafari.value && isMobile.value && providerType.value === 'youtube' && !!props.src;
+    // iOS (Safari/Chrome) + YouTube legado: overlay porque o Vidstack não está montado neste branch.
+    return isIosTouchDevice() && isMobile.value && useLegacyYoutube.value;
 });
 
-async function requestProviderFullscreen() {
-    const el = playerRef.value;
-    if (!el) return;
-    try {
-        // Vidstack 1.x: método no elemento <media-player>.
-        if (typeof el.enterFullscreen === 'function') {
-            await el.enterFullscreen('provider');
-            return;
-        }
-        // Fallback: evento (caso a instância não exponha o método).
-        el.dispatchEvent(new CustomEvent('media-enter-fullscreen-request', { bubbles: true, composed: true }));
-    } catch (_) {
-        // Silencioso: no iOS o provider pode bloquear a request fora de gesto.
+const useNativeCrossOrigin = computed(() => providerType.value === 'native');
+
+/** Taxas alinhadas ao menu YouTube legado; embeds podem ignorar algumas taxas. */
+const vidstackPlaybackRates = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
+
+const vidstackLayoutTranslations = {
+    Settings: 'Configurações',
+    Playback: 'Reprodução',
+    Speed: 'Velocidade',
+    Quality: 'Qualidade',
+    Normal: 'Normal',
+    Loop: 'Repetir',
+    Captions: 'Legendas',
+    Accessibility: 'Acessibilidade',
+    Audio: 'Áudio',
+    Auto: 'Automático',
+    'Auto Quality': 'Qualidade automática',
+    'Caption Styles': 'Estilo das legendas',
+    Chapters: 'Capítulos',
+    'Closed-Captions Off': 'Legendas desligadas',
+    'Closed-Captions On': 'Legendas ligadas',
+    Download: 'Download',
+    Mute: 'Mudo',
+    Unmute: 'Ativar som',
+    Pause: 'Pausar',
+    Play: 'Reproduzir',
+    Fullscreen: 'Tela cheia',
+    'Enter Fullscreen': 'Entrar em tela cheia',
+    'Exit Fullscreen': 'Sair da tela cheia',
+    'Seek Backward': 'Voltar',
+    'Seek Forward': 'Avançar',
+    'Playback Rate': 'Velocidade',
+};
+
+let hasUserPlayed = false;
+let playbackStartedAt = 0;
+
+function markUserPlayed() {
+    if (!hasUserPlayed) {
+        hasUserPlayed = true;
+        playbackStartedAt = Date.now();
     }
 }
 
 function onEnded() {
+    // YouTube/Vidstack disparam ended na carga/erro; só conclui após play real.
+    if (!hasUserPlayed) return;
+    if (Date.now() - playbackStartedAt < 8000) return;
     emit('ended');
 }
 
@@ -547,27 +894,42 @@ function onContextMenu(e) {
 
 <template>
     <div
+        ref="wrapperRef"
         class="member-area-video-player aspect-video w-full overflow-hidden rounded-lg bg-black relative"
+        :class="{ 'is-immersive': immersiveActive }"
         @contextmenu.prevent="onContextMenu"
     >
         <button
-            v-if="showFullscreenOverlay"
+            v-if="immersiveActive"
+            type="button"
+            class="exit-immersive-btn"
+            aria-label="Sair da tela cheia"
+            @click.stop.prevent="exitImmersiveMode"
+        >
+            <Minimize2 class="h-5 w-5" aria-hidden="true" />
+            <span class="sr-only">Sair da tela cheia</span>
+        </button>
+        <button
+            v-if="showFullscreenOverlay && !immersiveActive"
             type="button"
             class="fullscreen-overlay-btn"
             aria-label="Tela cheia"
-            @click.stop.prevent="requestProviderFullscreen"
+            @click.stop.prevent="requestMemberVideoFullscreen"
         >
             <Maximize2 class="h-4 w-4" aria-hidden="true" />
             <span class="sr-only">Tela cheia</span>
         </button>
         <div
-            v-if="isYoutube"
+            v-if="useLegacyYoutube"
             ref="ytRootEl"
             class="yt-legacy-root"
             @mousemove="showControls"
             @touchstart.passive="showControls"
         >
             <div ref="youtubeMountEl" class="yt-legacy-mount" />
+            <div v-if="ytLoading && !ytReady" class="yt-loading-overlay" aria-live="polite">
+                <span class="yt-loading-text">Carregando vídeo…</span>
+            </div>
             <!-- Poster/máscara: esconde thumb/logo do YouTube antes do primeiro play e durante scrub/seek -->
             <div v-if="ytMaskBranding" class="yt-mask" aria-hidden="true">
                 <div
@@ -618,20 +980,65 @@ function onContextMenu(e) {
                         {{ formatTime(ytCurrentTime) }} <span class="yt-time-sep">/</span> {{ formatTime(ytDuration) }}
                     </div>
 
-                    <button type="button" class="yt-icon-btn" aria-label="Tela cheia" @click="requestYoutubeFullscreen">
-                        <Maximize2 class="h-4 w-4" aria-hidden="true" />
+                    <button type="button" class="yt-icon-btn" aria-label="Tela cheia" @click="requestMemberVideoFullscreen">
+                        <Maximize2 v-if="!immersiveActive" class="h-4 w-4" aria-hidden="true" />
+                        <Minimize2 v-else class="h-4 w-4" aria-hidden="true" />
                     </button>
 
                     <div class="yt-menu-wrap">
-                        <button type="button" class="yt-icon-btn" aria-label="Qualidade" @click="qualityMenuOpen = !qualityMenuOpen">
-                            <Settings class="h-4 w-4" aria-hidden="true" />
+                        <button
+                            type="button"
+                            class="yt-icon-btn"
+                            aria-label="Qualidade do vídeo"
+                            :aria-expanded="qualityMenuOpen"
+                            @click="toggleQualityMenu"
+                        >
+                            <Monitor class="h-4 w-4" aria-hidden="true" />
                         </button>
-                        <div v-if="qualityMenuOpen" class="yt-quality-menu" role="menu" aria-label="Qualidade do vídeo">
-                            <button type="button" class="yt-quality-item" :class="{ active: selectedQuality === 'auto' }" @click="setQuality('auto')">Auto</button>
-                            <button type="button" class="yt-quality-item" :class="{ active: selectedQuality === 'medium' }" @click="setQuality('medium')">360p</button>
-                            <button type="button" class="yt-quality-item" :class="{ active: selectedQuality === 'large' }" @click="setQuality('large')">480p</button>
-                            <button type="button" class="yt-quality-item" :class="{ active: selectedQuality === 'hd720' }" @click="setQuality('hd720')">720p</button>
-                            <button type="button" class="yt-quality-item" :class="{ active: selectedQuality === 'hd1080' }" @click="setQuality('hd1080')">1080p</button>
+                        <div
+                            v-if="qualityMenuOpen"
+                            class="yt-settings-menu"
+                            role="menu"
+                            aria-label="Qualidade do vídeo"
+                            @pointerdown.stop
+                        >
+                            <button type="button" class="yt-settings-item" :class="{ active: selectedQuality === 'auto' }" role="menuitem" @click="setQuality('auto')">Auto</button>
+                            <button type="button" class="yt-settings-item" :class="{ active: selectedQuality === 'medium' }" role="menuitem" @click="setQuality('medium')">360p</button>
+                            <button type="button" class="yt-settings-item" :class="{ active: selectedQuality === 'large' }" role="menuitem" @click="setQuality('large')">480p</button>
+                            <button type="button" class="yt-settings-item" :class="{ active: selectedQuality === 'hd720' }" role="menuitem" @click="setQuality('hd720')">720p</button>
+                            <button type="button" class="yt-settings-item" :class="{ active: selectedQuality === 'hd1080' }" role="menuitem" @click="setQuality('hd1080')">1080p</button>
+                        </div>
+                    </div>
+
+                    <div class="yt-menu-wrap">
+                        <button
+                            type="button"
+                            class="yt-icon-btn yt-speed-btn"
+                            aria-label="Velocidade de reprodução"
+                            :aria-expanded="speedMenuOpen"
+                            @click="toggleSpeedMenu"
+                        >
+                            <Gauge class="h-4 w-4" aria-hidden="true" />
+                            <span class="yt-speed-btn-label">{{ formatSpeedLabel(selectedSpeed) }}</span>
+                        </button>
+                        <div
+                            v-if="speedMenuOpen"
+                            class="yt-settings-menu"
+                            role="menu"
+                            aria-label="Velocidade de reprodução"
+                            @pointerdown.stop
+                        >
+                            <button
+                                v-for="rate in availableSpeeds"
+                                :key="rate"
+                                type="button"
+                                class="yt-settings-item"
+                                :class="{ active: isSpeedSelected(rate) }"
+                                role="menuitem"
+                                @click="setSpeed(rate)"
+                            >
+                                {{ formatSpeedLabel(rate) }}
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -645,8 +1052,18 @@ function onContextMenu(e) {
             </div>
         </div>
 
+        <iframe
+            v-else-if="iframeSrc"
+            class="member-embed-iframe"
+            :src="iframeSrc"
+            title="Vídeo da aula"
+            :allow="MEMBER_IFRAME_ALLOW"
+            allowfullscreen
+            referrerpolicy="strict-origin-when-cross-origin"
+        />
+
         <media-player
-            v-else-if="src"
+            v-else-if="showVidstackPlayer && vidstackReady"
             ref="playerRef"
             class="player"
             :src="vidstackSrc"
@@ -655,14 +1072,18 @@ function onContextMenu(e) {
             :fullscreen-target="isEmbedProvider ? 'provider' : undefined"
             load="eager"
             preload="auto"
-            crossorigin
+            :crossorigin="useNativeCrossOrigin ? '' : undefined"
             @vds-ended="onEnded"
             @vds-end="onEnded"
+            @vds-play="markUserPlayed"
         >
             <media-provider>
                 <media-poster v-if="posterUrl" class="vds-poster" :src="posterUrl" alt="" />
             </media-provider>
-            <media-video-layout>
+            <media-video-layout
+                :translations="vidstackLayoutTranslations"
+                :playback-rates="vidstackPlaybackRates"
+            >
                 <media-airplay-button slot="airPlayButton">
                     <media-icon type="airplay" />
                 </media-airplay-button>
@@ -685,6 +1106,50 @@ function onContextMenu(e) {
 .member-area-video-player {
     --media-brand: #f5f5f5;
     --media-focus-ring-color: #4e9cf6;
+}
+.member-area-video-player.is-immersive {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    border-radius: 0;
+    aspect-ratio: unset;
+    display: flex;
+    flex-direction: column;
+}
+.member-area-video-player.is-immersive .yt-legacy-root {
+    flex: 1;
+    min-height: 0;
+}
+.member-area-video-player.is-immersive .player,
+.member-area-video-player.is-immersive .member-embed-iframe {
+    flex: 1;
+    min-height: 0;
+    height: 100%;
+}
+.member-embed-iframe {
+    width: 100%;
+    height: 100%;
+    border: 0;
+    display: block;
+}
+.exit-immersive-btn {
+    position: absolute;
+    top: max(10px, env(safe-area-inset-top, 0px));
+    right: max(10px, env(safe-area-inset-right, 0px));
+    z-index: 120;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 44px;
+    width: 44px;
+    border-radius: 9999px;
+    background: rgba(0, 0, 0, 0.65);
+    color: rgba(255, 255, 255, 0.95);
+    border: 1px solid rgba(255, 255, 255, 0.25);
+}
+.exit-immersive-btn:focus-visible {
+    outline: 2px solid rgba(78, 156, 246, 0.9);
+    outline-offset: 2px;
 }
 .player {
     width: 100%;
@@ -759,6 +1224,20 @@ function onContextMenu(e) {
     background-size: cover;
     background-position: center;
     opacity: 0.98;
+}
+.yt-loading-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 4;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.72);
+    pointer-events: none;
+}
+.yt-loading-text {
+    font-size: 14px;
+    color: rgba(255, 255, 255, 0.9);
 }
 .yt-veil {
     position: absolute;
@@ -847,9 +1326,11 @@ function onContextMenu(e) {
 .yt-menu-wrap {
     position: relative;
 }
-.yt-quality-menu {
+.yt-settings-menu {
     pointer-events: auto;
     width: 180px;
+    max-height: min(70vh, 280px);
+    overflow-y: auto;
     border-radius: 12px;
     background: rgba(0, 0, 0, 0.72);
     border: 1px solid rgba(255, 255, 255, 0.18);
@@ -861,7 +1342,23 @@ function onContextMenu(e) {
     right: 0;
     bottom: calc(100% + 10px);
 }
-.yt-quality-item {
+.yt-speed-btn {
+    width: auto;
+    min-width: 34px;
+    padding: 0 8px;
+    gap: 4px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+.yt-speed-btn-label {
+    font-size: 11px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+    user-select: none;
+}
+.yt-settings-item {
     width: 100%;
     text-align: left;
     padding: 8px 10px;
@@ -872,9 +1369,13 @@ function onContextMenu(e) {
     background: transparent;
     border: 1px solid transparent;
 }
-.yt-quality-item.active {
+.yt-settings-item.active {
     background: rgba(255, 255, 255, 0.12);
     border-color: rgba(255, 255, 255, 0.18);
+}
+.yt-settings-item:focus-visible {
+    outline: 2px solid rgba(78, 156, 246, 0.9);
+    outline-offset: 1px;
 }
 .yt-quality-error {
     pointer-events: none;

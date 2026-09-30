@@ -4,7 +4,7 @@ namespace App\Http\Controllers\Webhooks;
 
 use App\Gateways\GatewayRegistry;
 use App\Http\Controllers\Controller;
-use App\Jobs\ProcessPaymentWebhook;
+use App\Support\PaymentWebhookDispatcher;
 use App\Models\GatewayCredential;
 use App\Models\Order;
 use Illuminate\Http\JsonResponse;
@@ -39,14 +39,17 @@ class PagarmeWebhookController extends Controller
 
         $credential = GatewayCredential::resolveForPayment($order->tenant_id, self::SLUG);
 
-        if ($credential && ! $this->verifyHubSignature($raw, $request->header('X-Hub-Signature'), $credential)) {
-            return response()->json(['message' => 'Unauthorized'], 401);
+        if ($credential) {
+            $secret = trim((string) ($credential->getDecryptedCredentials()['secret_key'] ?? ''));
+            if ($secret !== '' && ! $this->verifyHubSignature($raw, $request->header('X-Hub-Signature'), $credential)) {
+                return response()->json(['message' => 'Unauthorized'], 401);
+            }
         }
 
         $type = (string) ($payload['type'] ?? '');
 
         if (str_contains($type, 'refunded')) {
-            ProcessPaymentWebhook::dispatchSync(self::SLUG, $chargeId, 'order.refunded', 'refunded', is_array($payload) ? $payload : []);
+            PaymentWebhookDispatcher::dispatch(self::SLUG, $chargeId, 'order.refunded', 'refunded', is_array($payload) ? $payload : []);
 
             return response()->json(['received' => true]);
         }
@@ -74,7 +77,7 @@ class PagarmeWebhookController extends Controller
             $status = 'rejected';
         }
 
-        ProcessPaymentWebhook::dispatchSync(self::SLUG, $chargeId, $event, $status, is_array($payload) ? $payload : []);
+        PaymentWebhookDispatcher::dispatch(self::SLUG, $chargeId, $event, $status, is_array($payload) ? $payload : []);
 
         return response()->json(['received' => true]);
     }
@@ -114,17 +117,18 @@ class PagarmeWebhookController extends Controller
     }
 
     /**
-     * HMAC-SHA1 do corpo bruto com a Secret Key (comportamento legado documentado para postbacks Pagar.me).
+     * API v5 não envia assinatura HMAC. X-Hub-Signature existe só nos postbacks v3/v4;
+     * se vier, valida HMAC-SHA1 com a Secret Key. A confirmação real é GET /charges/{id}.
      */
     private function verifyHubSignature(string $rawBody, mixed $header, GatewayCredential $credential): bool
     {
-        if (! is_string($header) || trim($header) === '') {
-            return true;
-        }
-
         $credentials = $credential->getDecryptedCredentials();
         $secret = trim((string) ($credentials['secret_key'] ?? ''));
         if ($secret === '') {
+            return true;
+        }
+
+        if (! is_string($header) || trim($header) === '') {
             return true;
         }
 

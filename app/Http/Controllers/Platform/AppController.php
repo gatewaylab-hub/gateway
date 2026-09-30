@@ -5,11 +5,12 @@ namespace App\Http\Controllers\Platform;
 use App\Http\Controllers\Controller;
 use App\Models\BrandingSetting;
 use App\Models\PanelPushSubscription;
-use App\Plugins\PluginRegistry;
 use App\Services\PanelPushService;
+use App\Services\StorageService;
+use App\Support\BrandingAssetUrls;
+use App\Support\PanelPushSettings;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rule;
 use Inertia\Inertia;
 use Inertia\Response;
@@ -30,19 +31,19 @@ class AppController extends Controller
 
     public function index(): Response
     {
-        $pluginEnabled = PluginRegistry::isEnabled('pwa');
         $row = BrandingSetting::query()->whereNull('tenant_id')->first();
         $data = is_array($row?->data) ? $row->data : [];
+        $app = [
+            'app_name' => (string) ($data['app_name'] ?? config('getfy.app_name', 'Getfy')),
+            'pwa_theme_color' => (string) ($data['pwa_theme_color'] ?? config('getfy.pwa_theme_color', config('getfy.theme_primary', '#0ea5e9'))),
+            'pwa_icon_192' => (string) ($data['pwa_icon_192'] ?? config('getfy.pwa_icon_192', '')),
+            'pwa_icon_512' => (string) ($data['pwa_icon_512'] ?? config('getfy.pwa_icon_512', '')),
+        ];
+        $app = BrandingAssetUrls::resolveData($app);
 
         return Inertia::render('Platform/App/Index', [
-            'app' => [
-                'app_name' => (string) ($data['app_name'] ?? config('getfy.app_name', 'gatewayLab')),
-                'pwa_theme_color' => (string) ($data['pwa_theme_color'] ?? config('getfy.pwa_theme_color', config('getfy.theme_primary', '#8A2BE2'))),
-                'pwa_icon_192' => (string) ($data['pwa_icon_192'] ?? config('getfy.pwa_icon_192', '')),
-                'pwa_icon_512' => (string) ($data['pwa_icon_512'] ?? config('getfy.pwa_icon_512', '')),
-            ],
-            'push_subscriptions_count' => $pluginEnabled ? PanelPushSubscription::query()->count() : 0,
-            'plugin_enabled' => $pluginEnabled,
+            'app' => $app,
+            'push_subscriptions_count' => PanelPushSubscription::query()->count(),
         ]);
     }
 
@@ -50,14 +51,15 @@ class AppController extends Controller
     {
         $row = BrandingSetting::query()->whereNull('tenant_id')->first();
         $data = is_array($row?->data) ? $row->data : [];
+        $app = [
+            'app_name' => (string) ($data['app_name'] ?? config('getfy.app_name', 'Getfy')),
+            'pwa_theme_color' => (string) ($data['pwa_theme_color'] ?? config('getfy.pwa_theme_color', config('getfy.theme_primary', '#0ea5e9'))),
+            'pwa_icon_192' => (string) ($data['pwa_icon_192'] ?? config('getfy.pwa_icon_192', '')),
+            'pwa_icon_512' => (string) ($data['pwa_icon_512'] ?? config('getfy.pwa_icon_512', '')),
+        ];
 
         return response()->json([
-            'app' => [
-                'app_name' => (string) ($data['app_name'] ?? config('getfy.app_name', 'gatewayLab')),
-                'pwa_theme_color' => (string) ($data['pwa_theme_color'] ?? config('getfy.pwa_theme_color', config('getfy.theme_primary', '#8A2BE2'))),
-                'pwa_icon_192' => (string) ($data['pwa_icon_192'] ?? config('getfy.pwa_icon_192', '')),
-                'pwa_icon_512' => (string) ($data['pwa_icon_512'] ?? config('getfy.pwa_icon_512', '')),
-            ],
+            'app' => BrandingAssetUrls::resolveData($app),
         ]);
     }
 
@@ -83,7 +85,11 @@ class AppController extends Controller
             if ($v === null || trim((string) $v) === '') {
                 unset($data[$key]);
             } else {
-                $data[$key] = trim((string) $v);
+                $v = trim((string) $v);
+                if (in_array($key, self::UPLOAD_FIELDS, true)) {
+                    $v = app(StorageService::class)->toStoragePath($v) ?? $v;
+                }
+                $data[$key] = $v;
             }
         }
         $row->update(['data' => $data]);
@@ -98,21 +104,22 @@ class AppController extends Controller
             'file' => ['required', 'file', 'max:4096', 'mimes:jpg,jpeg,png,webp,gif,ico,svg'],
         ]);
 
-        $path = $request->file('file')->store('white-label/global', 'public');
-        $url = Storage::disk('public')->url($path);
-        if (! str_starts_with($url, 'http')) {
-            $url = rtrim((string) config('app.url'), '/').'/'.ltrim($url, '/');
-        }
+        $uploaded = app(StorageService::class)->storeUploadedPublicFile(
+            $request->file('file'),
+            'white-label/global'
+        );
+        $stored = $uploaded['path'];
+        $publicUrl = $uploaded['url'];
 
         $row = BrandingSetting::query()->firstOrCreate(
             ['tenant_id' => null],
             ['data' => []]
         );
         $data = is_array($row->data) ? $row->data : [];
-        $data[$validated['field']] = $url;
+        $data[$validated['field']] = $stored;
         $row->update(['data' => $data]);
 
-        return response()->json(['ok' => true, 'url' => $url, 'field' => $validated['field']]);
+        return response()->json(['ok' => true, 'url' => $publicUrl, 'field' => $validated['field']]);
     }
 
     public function clearField(Request $request): JsonResponse
@@ -133,24 +140,9 @@ class AppController extends Controller
         return response()->json(['ok' => true]);
     }
 
+    /** @deprecated Use AppPushController::sendBroadcast — rota mantida por compatibilidade */
     public function sendPush(Request $request, PanelPushService $panelPushService): JsonResponse
     {
-        $validated = $request->validate([
-            'title' => ['required', 'string', 'max:120'],
-            'body' => ['required', 'string', 'max:500'],
-            'url' => ['nullable', 'string', 'max:2048'],
-        ]);
-
-        $result = $panelPushService->sendAndPersistToAll(
-            'system',
-            trim($validated['title']),
-            trim($validated['body']),
-            isset($validated['url']) && trim((string) $validated['url']) !== '' ? trim((string) $validated['url']) : null
-        );
-
-        return response()->json([
-            'ok' => true,
-            'result' => $result,
-        ]);
+        return app(AppPushController::class)->sendBroadcast($request, $panelPushService);
     }
 }

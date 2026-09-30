@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Events\OrderCompleted;
+use App\Models\CheckoutSession;
 use App\Models\Order;
 use App\Models\Product;
 use App\Models\ProductAffiliateEnrollment;
@@ -10,6 +11,7 @@ use App\Models\ProductCoproducer;
 use App\Models\User;
 use App\Models\WalletTransaction;
 use App\Services\AffiliateConversionPixels;
+use App\Support\AffiliateOrderMetadata;
 use Illuminate\Support\Facades\Schema;
 use Tests\TestCase;
 
@@ -123,6 +125,50 @@ class ProductAffiliateTest extends TestCase
         $this->assertEquals(100.0, $sellerGross + $affiliateGross);
         $this->assertEqualsWithDelta(25.0, $affiliateGross, 0.02);
         $this->assertEqualsWithDelta(75.0, $sellerGross, 0.02);
+    }
+
+    public function test_affiliate_metadata_merged_from_checkout_session_without_request_ref(): void
+    {
+        if (! Schema::hasTable('checkout_sessions') || ! Schema::hasTable('product_affiliate_enrollments')) {
+            $this->markTestSkipped('checkout sessions or affiliate enrollments');
+        }
+
+        $seller = User::factory()->create(['role' => User::ROLE_INFOPRODUTOR]);
+        $seller->forceFill(['tenant_id' => $seller->id])->save();
+
+        $affiliate = User::factory()->create(['role' => User::ROLE_INFOPRODUTOR]);
+        $affiliate->forceFill(['tenant_id' => $affiliate->id])->save();
+
+        $product = $this->createTestProduct([
+            'tenant_id' => $seller->id,
+            'affiliate_enabled' => true,
+            'affiliate_commission_percent' => 30,
+            'affiliate_manual_approval' => false,
+            'affiliate_show_in_showcase' => false,
+        ]);
+
+        $ref = 'sessref'.substr(uniqid('', true), 0, 8);
+        $enrollment = ProductAffiliateEnrollment::query()->create([
+            'product_id' => $product->id,
+            'affiliate_user_id' => $affiliate->id,
+            'status' => ProductAffiliateEnrollment::STATUS_APPROVED,
+            'public_ref' => $ref,
+        ]);
+
+        $session = CheckoutSession::query()->create([
+            'tenant_id' => $seller->id,
+            'product_id' => $product->id,
+            'checkout_slug' => (string) ($product->checkout_slug ?? 'test-checkout'),
+            'session_token' => (string) \Illuminate\Support\Str::uuid(),
+            'step' => CheckoutSession::STEP_VISIT,
+            'affiliate_ref' => $ref,
+        ]);
+
+        $metadata = AffiliateOrderMetadata::merge([], $product, null, $session);
+
+        $this->assertSame($affiliate->id, $metadata['affiliate_user_id'] ?? null);
+        $this->assertSame($enrollment->id, $metadata['affiliate_enrollment_id'] ?? null);
+        $this->assertSame($ref, $metadata['affiliate_ref'] ?? null);
     }
 
     public function test_showcase_lists_only_marked_products(): void
@@ -434,5 +480,100 @@ class ProductAffiliateTest extends TestCase
         $pixels = AffiliateConversionPixels::forProductAndRef($fresh, $ref);
 
         $this->assertSame('AFFILIATE_CHECKOUT', $pixels['meta']['entries'][0]['pixel_id'] ?? null);
+    }
+
+    public function test_seller_can_share_offer_links_with_affiliates(): void
+    {
+        if (! Schema::hasColumn('products', 'affiliate_enabled')
+            || ! Schema::hasTable('product_offers')
+            || ! Schema::hasColumn('product_offers', 'affiliate_share_enabled')) {
+            $this->markTestSkipped('affiliate share offers');
+        }
+
+        $this->withoutMiddleware([
+            \App\Http\Middleware\EnsureInstalled::class,
+            \Illuminate\Foundation\Http\Middleware\ValidateCsrfToken::class,
+        ]);
+
+        $sellerAttrs = ['role' => User::ROLE_INFOPRODUTOR];
+        if (Schema::hasColumn('users', 'kyc_status')) {
+            $sellerAttrs['kyc_status'] = User::KYC_APPROVED;
+        }
+        if (Schema::hasColumn('users', 'account_status')) {
+            $sellerAttrs['account_status'] = 'approved';
+        }
+
+        $seller = User::factory()->create($sellerAttrs);
+        $seller->forceFill(['tenant_id' => $seller->id])->save();
+
+        $affiliateAttrs = ['role' => User::ROLE_INFOPRODUTOR];
+        if (Schema::hasColumn('users', 'kyc_status')) {
+            $affiliateAttrs['kyc_status'] = User::KYC_APPROVED;
+        }
+        if (Schema::hasColumn('users', 'account_status')) {
+            $affiliateAttrs['account_status'] = 'approved';
+        }
+
+        $affiliate = User::factory()->create($affiliateAttrs);
+        $affiliate->forceFill(['tenant_id' => $affiliate->id])->save();
+
+        $product = $this->createTestProduct([
+            'tenant_id' => $seller->id,
+            'is_active' => true,
+            'checkout_slug' => 'mainchk'.substr(uniqid('', true), 0, 6),
+            'affiliate_enabled' => true,
+            'affiliate_commission_percent' => 10,
+        ]);
+
+        $shared = \App\Models\ProductOffer::query()->create([
+            'product_id' => $product->id,
+            'name' => 'Oferta compartilhada',
+            'price' => 97,
+            'currency' => 'BRL',
+            'checkout_slug' => 'sh'.substr(uniqid('', true), 0, 10),
+            'position' => 0,
+            'affiliate_share_enabled' => false,
+        ]);
+        $hidden = \App\Models\ProductOffer::query()->create([
+            'product_id' => $product->id,
+            'name' => 'Oferta oculta',
+            'price' => 47,
+            'currency' => 'BRL',
+            'checkout_slug' => 'hd'.substr(uniqid('', true), 0, 10),
+            'position' => 1,
+            'affiliate_share_enabled' => false,
+        ]);
+
+        $this->actingAs($seller)->put(route('produtos.affiliate-settings.update', $product), [
+            'affiliate_enabled' => true,
+            'affiliate_commission_percent' => 10,
+            'affiliate_manual_approval' => true,
+            'affiliate_show_in_showcase' => false,
+            'affiliate_hide_customer_data' => false,
+            'affiliate_shared_offer_ids' => [$shared->id],
+        ])->assertRedirect()->assertSessionHasNoErrors();
+
+        $this->assertTrue((bool) $shared->fresh()->affiliate_share_enabled);
+        $this->assertFalse((bool) $hidden->fresh()->affiliate_share_enabled);
+
+        $ref = 'offref'.substr(uniqid('', true), 0, 8);
+        ProductAffiliateEnrollment::query()->create([
+            'product_id' => $product->id,
+            'affiliate_user_id' => $affiliate->id,
+            'status' => ProductAffiliateEnrollment::STATUS_APPROVED,
+            'public_ref' => $ref,
+        ]);
+
+        $this->actingAs($affiliate)->get(route('produtos.painel-afiliado.show', $product->id))
+            ->assertOk()
+            ->assertInertia(fn ($page) => $page
+                ->component('Produtos/PainelAfiliado')
+                ->has('enrollment.offer_links', 2)
+                ->where('enrollment.offer_links.0.type', 'main')
+                ->where('enrollment.offer_links.1.type', 'offer')
+                ->where('enrollment.offer_links.1.id', $shared->id)
+                ->where('enrollment.offer_links.1.url', fn ($url) => is_string($url)
+                    && str_contains($url, (string) $shared->checkout_slug)
+                    && str_contains($url, 'ref='.$ref)));
     }
 }

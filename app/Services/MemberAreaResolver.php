@@ -4,7 +4,10 @@ namespace App\Services;
 
 use App\Models\MemberAreaDomain;
 use App\Models\Product;
+use App\Models\User;
+use App\Support\PublicAppUrl;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\URL;
 
 class MemberAreaResolver
 {
@@ -36,9 +39,9 @@ class MemberAreaResolver
         // Subdomain: {slug}.members.xxx
         if (config('members.subdomain_enabled')) {
             $base = config('members.subdomain_base', '');
-            if ($base && str_ends_with($host, $base) && $host !== $base) {
-                $prefix = str_replace('.'.$base, '', $host);
-                if ($prefix !== $host) {
+            if ($base && str_ends_with($hostRaw, $base) && $hostRaw !== $base) {
+                $prefix = str_replace('.'.$base, '', $hostRaw);
+                if ($prefix !== $hostRaw) {
                     $slug = $prefix;
                     $product = Product::where('checkout_slug', $slug)
                         ->where('type', Product::TYPE_AREA_MEMBROS)
@@ -120,18 +123,25 @@ class MemberAreaResolver
     public function baseUrlForProduct(Product $product): string
     {
         $domain = $product->memberAreaDomain;
-        $appUrl = rtrim(config('app.url'), '/');
+        $appUrl = rtrim(PublicAppUrl::base(), '/');
         $protocol = str_starts_with($appUrl, 'https') ? 'https' : 'http';
 
         if ($domain) {
             if ($domain->type === MemberAreaDomain::TYPE_CUSTOM && $domain->value) {
-                return $protocol.'://'.$domain->value;
+                return $protocol.'://'.self::hostOnly((string) $domain->value);
             }
-            if ($domain->type === MemberAreaDomain::TYPE_SUBDOMAIN && config('members.subdomain_enabled')) {
-                $base = config('members.subdomain_base');
-                $slug = $domain->value ?: $product->checkout_slug;
-
-                return $protocol.'://'.$slug.'.'.$base;
+            if ($domain->type === MemberAreaDomain::TYPE_SUBDOMAIN) {
+                $raw = trim((string) ($domain->value ?: $product->checkout_slug));
+                // Valor já é host completo (ex.: area.loja.com) — comum quando o front trata subdomain como "custom".
+                if ($raw !== '' && str_contains($raw, '.')) {
+                    return $protocol.'://'.self::hostOnly($raw);
+                }
+                if (config('members.subdomain_enabled')) {
+                    $base = trim((string) config('members.subdomain_base', ''));
+                    if ($base !== '') {
+                        return $protocol.'://'.$raw.'.'.$base;
+                    }
+                }
             }
             if ($domain->type === MemberAreaDomain::TYPE_PATH && $domain->value !== null && $domain->value !== '') {
                 return $appUrl.'/m/'.$domain->value;
@@ -139,5 +149,72 @@ class MemberAreaResolver
         }
 
         return $appUrl.'/m/'.$product->checkout_slug;
+    }
+
+    private static function hostOnly(string $value): string
+    {
+        $value = preg_replace('#^https?://#i', '', trim($value)) ?? '';
+        $value = explode('/', $value)[0] ?? $value;
+
+        return rtrim(strtolower($value), '.');
+    }
+
+    /**
+     * Link mágico assinado para o e-mail/WhatsApp de acesso (sempre com host público).
+     */
+    public function signedMagicAccessUrl(Product $product, User $user, ?\DateTimeInterface $expiresAt = null): string
+    {
+        $base = $this->baseUrlForProduct($product);
+        $expiresAt = $expiresAt ?? now()->addDays(7);
+
+        $useHostAccess = true;
+        $path = parse_url($base, PHP_URL_PATH);
+        if (is_string($path) && str_starts_with(trim($path, '/'), 'm/')) {
+            $useHostAccess = false;
+        }
+
+        $slugForSignedPathAccess = null;
+        if (! $useHostAccess) {
+            $basePath = parse_url($base, PHP_URL_PATH);
+            if (is_string($basePath) && $basePath !== '') {
+                $segments = explode('/', trim($basePath, '/'));
+                if (($segments[0] ?? null) === 'm' && ! empty($segments[1])) {
+                    $slugForSignedPathAccess = (string) $segments[1];
+                }
+            }
+            if ($slugForSignedPathAccess === null || $slugForSignedPathAccess === '') {
+                $slugForSignedPathAccess = (string) ($product->checkout_slug ?? '');
+            }
+        }
+
+        $previousRoot = rtrim((string) config('app.url'), '/') ?: 'http://localhost';
+        $previousScheme = parse_url($previousRoot, PHP_URL_SCHEME) ?: null;
+
+        try {
+            if ($useHostAccess) {
+                PublicAppUrl::forceRoot($base);
+            } else {
+                // Path /m/{slug}: força origem pública (não o Host do request/queue).
+                PublicAppUrl::forceRoot(PublicAppUrl::origin($base));
+            }
+
+            if ($useHostAccess) {
+                return URL::temporarySignedRoute('member-area.magic-access.host', $expiresAt, [
+                    'u' => $user->id,
+                    'p' => $product->id,
+                ]);
+            }
+
+            return URL::temporarySignedRoute('member-area.magic-access', $expiresAt, [
+                'slug' => $slugForSignedPathAccess,
+                'u' => $user->id,
+                'p' => $product->id,
+            ]);
+        } finally {
+            URL::forceRootUrl($previousRoot);
+            if (is_string($previousScheme) && $previousScheme !== '') {
+                URL::forceScheme($previousScheme);
+            }
+        }
     }
 }

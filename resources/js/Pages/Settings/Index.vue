@@ -1,6 +1,6 @@
 <script setup>
-import { ref, computed, defineAsyncComponent } from 'vue';
-import { useForm, router } from '@inertiajs/vue3';
+import { ref, computed, defineAsyncComponent, watch } from 'vue';
+import { useForm, usePage } from '@inertiajs/vue3';
 import LayoutPlatform from '@/Layouts/LayoutPlatform.vue';
 import Button from '@/components/ui/Button.vue';
 import {
@@ -13,16 +13,38 @@ import {
     Trash2,
     RefreshCw,
     Upload,
-    Download,
+    Tag,
     Palette,
     Images,
+    LayoutGrid,
+    Truck,
+    Shield,
+    Scale,
+    PlayCircle,
+    Headset,
+    DatabaseBackup,
+    Puzzle,
+    Globe,
+    Building2,
+    BadgeCheck,
+    Cable,
 } from 'lucide-vue-next';
 import IntegrationCard from '@/components/IntegrationCard.vue';
 import EmailProviderSidebar from '@/components/EmailProviderSidebar.vue';
+import PlatformStepUpModal from '@/components/platform/PlatformStepUpModal.vue';
 import BrandingTab from '@/Pages/Settings/Tabs/BrandingTab.vue';
 import DashboardBannersTab from '@/Pages/Settings/Tabs/DashboardBannersTab.vue';
+import DashboardTemplateTab from '@/Pages/Settings/Tabs/DashboardTemplateTab.vue';
 import LanguagesTab from '@/Pages/Settings/Tabs/LanguagesTab.vue';
-
+import SecurityTab from '@/Pages/Settings/Tabs/SecurityTab.vue';
+import KycTab from '@/Pages/Settings/Tabs/KycTab.vue';
+import DemoTab from '@/Pages/Settings/Tabs/DemoTab.vue';
+import LegalTab from '@/Pages/Settings/Tabs/LegalTab.vue';
+import SellerPanelSupportTab from '@/Pages/Settings/Tabs/SellerPanelSupportTab.vue';
+import BackupTab from '@/Pages/Settings/Tabs/BackupTab.vue';
+import PublicUrlTab from '@/Pages/Settings/Tabs/PublicUrlTab.vue';
+import PlatformDataTab from '@/Pages/Settings/Tabs/PlatformDataTab.vue';
+import SellerIntegrationsTab from '@/Pages/Settings/Tabs/SellerIntegrationsTab.vue';
 defineOptions({ layout: LayoutPlatform });
 
 const props = defineProps({
@@ -33,14 +55,6 @@ const props = defineProps({
     current_version: {
         type: String,
         default: '1.0.0',
-    },
-    updates_enabled: {
-        type: Boolean,
-        default: true,
-    },
-    git_available: {
-        type: Boolean,
-        default: false,
     },
     cloud_mode: {
         type: Boolean,
@@ -54,6 +68,26 @@ const props = defineProps({
         type: String,
         default: '',
     },
+    public_url: {
+        type: String,
+        default: '',
+    },
+    resolved_public_url: {
+        type: String,
+        default: '',
+    },
+    webhook_public_url: {
+        type: String,
+        default: '',
+    },
+    public_url_meta: {
+        type: Object,
+        default: () => ({}),
+    },
+    container_restart: {
+        type: Object,
+        default: () => ({}),
+    },
     base_path: {
         type: String,
         default: '',
@@ -66,10 +100,30 @@ const props = defineProps({
         type: Array,
         default: () => [],
     },
+    legal_defaults: {
+        type: Object,
+        default: () => ({}),
+    },
+    seller_integrations_catalog: {
+        type: Array,
+        default: () => [],
+    },
+    backup_files: {
+        type: Array,
+        default: () => [],
+    },
+    backup_status: {
+        type: Object,
+        default: null,
+    },
+    backup_storage: {
+        type: Object,
+        default: () => ({}),
+    },
 });
 
 function allAllowedTabIds() {
-    const core = ['email', 'storage', 'personalizacao', 'banners_dashboard', 'idiomas', 'traducoes', 'moedas', 'cron', 'update'];
+    const core = ['email', 'storage', 'backup', 'personalizacao', 'banners_dashboard', 'template_dashboard', 'idiomas', 'traducoes', 'moedas', 'recursos', 'suporte_painel', 'seguranca', 'kyc', 'lgpd', 'integracoes', 'dados_plataforma', 'url_publica', 'cron', 'update', 'demo'];
     const extra = (props.settings_plugin_tabs || []).map((t) => t.id).filter(Boolean);
     return [...core, ...extra];
 }
@@ -120,6 +174,16 @@ const defaultTranslations = () => ({
 });
 const defaultCurrencies = () => [...(props.settings.currencies ?? [])];
 
+function sellerIntegrationFormFields(source) {
+    const catalog = props.seller_integrations_catalog || [];
+    const fields = {};
+    for (const item of catalog) {
+        const key = `integration_${item.id}_enabled`;
+        fields[key] = Boolean(source?.[key]);
+    }
+    return fields;
+}
+
 const form = useForm({
     smtp_host: props.settings.smtp_host ?? '',
     smtp_port: props.settings.smtp_port ?? '587',
@@ -148,6 +212,53 @@ const form = useForm({
     storage_s3_region: props.settings.storage_provider === 'r2' ? 'auto' : (props.settings.storage_s3_region ?? 'us-east-1'),
     storage_s3_endpoint: props.settings.storage_s3_endpoint ?? '',
     storage_s3_url: props.settings.storage_s3_url ?? '',
+    backup_enabled: props.settings.backup_enabled ?? '0',
+    backup_daily_at: props.settings.backup_daily_at ?? '03:00',
+    backup_retention_days: Number(props.settings.backup_retention_days ?? 7) || 7,
+    backup_destination_provider: props.settings.backup_destination_provider ?? 'local',
+    backup_destination_s3_key: props.settings.backup_destination_s3_key ?? '',
+    backup_destination_s3_secret: '',
+    backup_destination_s3_bucket: props.settings.backup_destination_s3_bucket ?? '',
+    backup_destination_s3_region: props.settings.backup_destination_provider === 'r2'
+        ? 'auto'
+        : (props.settings.backup_destination_s3_region ?? 'us-east-1'),
+    backup_destination_s3_endpoint: props.settings.backup_destination_s3_endpoint ?? '',
+    backup_destination_prefix: props.settings.backup_destination_prefix ?? 'backups/db',
+    backup_destination_secret_configured: Boolean(props.settings.backup_destination_secret_configured),
+    physical_products_enabled: Boolean(props.settings.physical_products_enabled),
+    ...sellerIntegrationFormFields(props.settings),
+    checkout_turnstile_site_key: props.settings.checkout_turnstile_site_key ?? '',
+    checkout_turnstile_secret_key: '',
+    checkout_turnstile_secret_configured: Boolean(props.settings.checkout_turnstile_secret_configured),
+    turnstile_keys_configured: Boolean(props.settings.turnstile_keys_configured),
+    login_turnstile_enabled: props.settings.login_turnstile_enabled ?? '0',
+    registration_turnstile_enabled: props.settings.registration_turnstile_enabled ?? '0',
+    registration_email_verification_enabled: props.settings.registration_email_verification_enabled ?? '0',
+    allow_new_infoproducers: props.settings.allow_new_infoproducers ?? '1',
+    auto_approve_products: props.settings.auto_approve_products ?? '1',
+    account_manager_auto_assign_mode: props.settings.account_manager_auto_assign_mode ?? 'least_load',
+    legal_privacy_policy_html: props.settings.legal_privacy_policy_html ?? '',
+    legal_terms_of_use_html: props.settings.legal_terms_of_use_html ?? '',
+    legal_privacy_contact_email: props.settings.legal_privacy_contact_email ?? '',
+    legal_cookie_banner_enabled: props.settings.legal_cookie_banner_enabled !== false,
+    seller_panel_support_enabled: props.settings.seller_panel_support_enabled ?? '0',
+    seller_panel_support_destination: props.settings.seller_panel_support_destination ?? 'whatsapp',
+    seller_panel_support_whatsapp: props.settings.seller_panel_support_whatsapp ?? '',
+    seller_panel_support_url: props.settings.seller_panel_support_url ?? '',
+    seller_panel_support_icon: props.settings.seller_panel_support_icon ?? 'whatsapp',
+    seller_panel_support_icon_image: props.settings.seller_panel_support_icon_image ?? '',
+    seller_panel_support_color: props.settings.seller_panel_support_color ?? '#25D366',
+    platform_legal_name: props.settings.platform_legal_name ?? '',
+    platform_cnpj: props.settings.platform_cnpj ?? '',
+    platform_checkout_notice_enabled: props.settings.platform_checkout_notice_enabled ?? '0',
+    platform_checkout_notice: props.settings.platform_checkout_notice ?? '',
+    kyc_allowed_identity_types: Array.isArray(props.settings.kyc_allowed_identity_types)
+        ? [...props.settings.kyc_allowed_identity_types]
+        : ['rg', 'cnh', 'passport'],
+    kyc_require_address_proof: props.settings.kyc_require_address_proof ?? '1',
+    kyc_require_selfie_with_document: props.settings.kyc_require_selfie_with_document ?? '1',
+    kyc_require_company_address_proof: props.settings.kyc_require_company_address_proof ?? '1',
+    kyc_require_company_constitution: props.settings.kyc_require_company_constitution ?? '1',
 });
 
 const showCloudR2Override = ref(false);
@@ -163,126 +274,87 @@ const connectionTesting = vueRef(false);
 const sendTestSending = vueRef(false);
 
 const coreTabsStatic = [
-    { id: 'email', label: 'E‑MAIL', icon: Mail },
-    { id: 'storage', label: 'Storage', icon: HardDrive },
-    { id: 'personalizacao', label: 'Personalização', icon: Palette },
-    { id: 'banners_dashboard', label: 'Banners Dashboard', icon: Images },
-    { id: 'idiomas', label: 'Idiomas', icon: Languages },
-    { id: 'traducoes', label: 'Traduções', icon: Languages },
-    { id: 'moedas', label: 'Moedas', icon: Banknote },
-    { id: 'cron', label: 'Cron', icon: Clock },
-    { id: 'update', label: 'Update', icon: Download },
+    { id: 'email', label: 'E-mail', icon: Mail, group: 'comunicacao' },
+    { id: 'storage', label: 'Storage', icon: HardDrive, group: 'operacao' },
+    { id: 'backup', label: 'Backup', icon: DatabaseBackup, group: 'operacao' },
+    { id: 'personalizacao', label: 'Personalização', icon: Palette, group: 'aparencia' },
+    { id: 'banners_dashboard', label: 'Banners do dashboard', icon: Images, group: 'aparencia' },
+    { id: 'template_dashboard', label: 'Template do dashboard', icon: LayoutGrid, group: 'aparencia' },
+    { id: 'idiomas', label: 'Idiomas', icon: Languages, group: 'internacional' },
+    { id: 'traducoes', label: 'Traduções', icon: Languages, group: 'internacional', hideOnMobile: true },
+    { id: 'moedas', label: 'Moedas', icon: Banknote, group: 'internacional' },
+    { id: 'recursos', label: 'Recursos', icon: Truck, group: 'operacao' },
+    { id: 'suporte_painel', label: 'Suporte do painel', icon: Headset, group: 'operacao' },
+    { id: 'seguranca', label: 'Segurança', icon: Shield, group: 'seguranca' },
+    { id: 'kyc', label: 'KYC', icon: BadgeCheck, group: 'seguranca' },
+    { id: 'lgpd', label: 'LGPD', icon: Scale, group: 'seguranca' },
+    { id: 'integracoes', label: 'Integrações', icon: Cable, group: 'sistema' },
+    { id: 'dados_plataforma', label: 'Dados da plataforma', icon: Building2, group: 'sistema' },
+    { id: 'url_publica', label: 'URL pública', icon: Globe, group: 'sistema' },
+    { id: 'cron', label: 'Cron', icon: Clock, group: 'sistema' },
+    { id: 'update', label: 'Versão', icon: Tag, group: 'sistema' },
+    { id: 'demo', label: 'Demo', icon: PlayCircle, group: 'sistema' },
+];
+
+const tabGroups = [
+    { id: 'comunicacao', label: 'Comunicação' },
+    { id: 'aparencia', label: 'Aparência' },
+    { id: 'internacional', label: 'Idiomas e moedas' },
+    { id: 'operacao', label: 'Operação' },
+    { id: 'seguranca', label: 'Segurança e legal' },
+    { id: 'sistema', label: 'Sistema' },
+    { id: 'plugins', label: 'Plugins' },
 ];
 
 const tabs = computed(() => {
     const plug = (props.settings_plugin_tabs || []).map((t) => ({
         id: t.id,
         label: t.label,
-        icon: Palette,
+        icon: Puzzle,
+        group: 'plugins',
     }));
     return [...coreTabsStatic, ...plug];
 });
 
-const updateCheckLoading = ref(false);
-const updateCheckResult = ref(null);
-const updateRunLoading = ref(false);
-const integrityLoading = ref(false);
-const integrityResult = ref(null);
-const migrateLoading = ref(false);
-const migrateResult = ref(null);
+const tabsByGroup = computed(() => {
+    return tabGroups
+        .map((group) => ({
+            ...group,
+            items: tabs.value.filter((tab) => tab.group === group.id),
+        }))
+        .filter((group) => group.items.length > 0);
+});
 
-async function checkForUpdate() {
-    updateCheckLoading.value = true;
-    updateCheckResult.value = null;
-    try {
-        const res = await window.axios.get('/plataforma/configuracoes/update/check');
-        updateCheckResult.value = res.data;
-    } catch (e) {
-        updateCheckResult.value = {
-            current: props.current_version,
-            latest: null,
-            available: false,
-            error: e?.response?.data?.message || 'Erro ao verificar atualizações.',
-            changelog_remote: null,
-        };
-    } finally {
-        updateCheckLoading.value = false;
+const mobileTabsByGroup = computed(() => {
+    return tabsByGroup.value
+        .map((group) => ({
+            ...group,
+            items: group.items.filter((tab) => !tab.hideOnMobile),
+        }))
+        .filter((group) => group.items.length > 0);
+});
+
+const activeTabMeta = computed(() => tabs.value.find((t) => t.id === activeTab.value) || null);
+
+function setActiveTab(tabId) {
+    if (!allAllowedTabIds().includes(tabId)) return;
+    const isMobile = typeof window !== 'undefined'
+        && window.matchMedia
+        && window.matchMedia('(max-width: 639px)').matches;
+    if (isMobile && tabId === 'traducoes') {
+        activeTab.value = 'email';
+        return;
     }
+    activeTab.value = tabId;
 }
 
-async function runUpdate() {
-    updateRunLoading.value = true;
-    try {
-        const res = await window.axios.post('/plataforma/configuracoes/update/run', {}, {
-            headers: { Accept: 'application/json' },
-            maxRedirects: 0,
-            validateStatus: (status) => status >= 200 && status < 400,
-        });
-        if (res.data?.success) {
-            window.location.href = res.data.redirect || '/plataforma/configuracoes?tab=update';
-            return;
-        }
-        const msg = res.data?.message || 'Falha na atualização.';
-        if (typeof window.router !== 'undefined') {
-            window.router.visit('/plataforma/configuracoes?tab=update', { preserveState: false });
-        } else {
-            window.location.href = '/plataforma/configuracoes?tab=update';
-        }
-        setTimeout(() => { alert(msg); }, 100);
-    } catch (e) {
-        const status = e?.response?.status;
-        const msg =
-            status === 429
-                ? 'Muitas tentativas em pouco tempo. Aguarde e tente novamente.'
-                : (e?.response?.data?.message || e?.response?.data?.error || e?.message || 'Falha na atualização.');
-        alert(msg);
-    } finally {
-        updateRunLoading.value = false;
-    }
-}
-
-async function checkIntegrity() {
-    integrityLoading.value = true;
-    integrityResult.value = null;
-    try {
-        const res = await window.axios.post('/plataforma/configuracoes/update/run', { action: 'integrity' }, {
-            headers: { Accept: 'application/json' },
-        });
-        integrityResult.value = res.data;
-    } catch (e) {
-        integrityResult.value = {
-            repository_exists: null,
-            total_migrations: 0,
-            ran_count: 0,
-            pending_count: 0,
-            pending: [],
-            pending_truncated: false,
-            error: e?.response?.data?.message || e?.response?.data?.error || 'Erro ao verificar integridade.',
-        };
-    } finally {
-        integrityLoading.value = false;
-    }
-}
-
-async function runMigrations() {
-    migrateLoading.value = true;
-    migrateResult.value = null;
-    try {
-        const res = await window.axios.post('/plataforma/configuracoes/update/run', { action: 'migrate' }, {
-            headers: { Accept: 'application/json' },
-        });
-        migrateResult.value = res.data;
-    } catch (e) {
-        const status = e?.response?.status;
-        const msg =
-            status === 429
-                ? 'Muitas tentativas em pouco tempo. Aguarde e tente novamente.'
-                : (e?.response?.data?.message || e?.response?.data?.error || e?.message || 'Falha ao rodar migrations.');
-        migrateResult.value = { success: false, message: msg, output: '' };
-    } finally {
-        migrateLoading.value = false;
-    }
-}
+watch(activeTab, (id) => {
+    if (typeof window === 'undefined') return;
+    const url = new URL(window.location.href);
+    if (url.searchParams.get('tab') === id) return;
+    url.searchParams.set('tab', id);
+    window.history.replaceState({}, '', url.toString());
+});
 
 const translationKeys = computed(() => {
     const t = form.checkout_translations ?? {};
@@ -396,22 +468,8 @@ async function testConnection() {
     connectionResult.value.status = null;
     connectionResult.value.message = '';
     connectionTesting.value = true;
-    const provider = form.email_provider || 'smtp';
-    const payload = { email_provider: provider };
-    if (provider === 'hostinger') {
-        payload.hostinger_smtp_username = form.hostinger_smtp_username;
-        payload.hostinger_smtp_password = form.hostinger_smtp_password;
-    } else if (provider === 'sendgrid') {
-        payload.sendgrid_api_key = form.sendgrid_api_key;
-        payload.sendgrid_mail_from_address = form.sendgrid_mail_from_address;
-        payload.sendgrid_mail_from_name = form.sendgrid_mail_from_name;
-    } else {
-        payload.smtp_host = form.smtp_host;
-        payload.smtp_port = form.smtp_port;
-        payload.smtp_username = form.smtp_username;
-        payload.smtp_password = form.smtp_password;
-        payload.smtp_encryption = form.smtp_encryption;
-    }
+    const payload = buildEmailSettingsPayload();
+    delete payload.kyc_notification_emails;
     try {
         await window.axios.post('/plataforma/configuracoes/email/connection-test', payload);
         connectionResult.value.status = 'success';
@@ -433,22 +491,8 @@ async function testConnection() {
 async function sendTestEmail() {
     testForm.clearErrors();
     sendTestSending.value = true;
-    const provider = form.email_provider || 'smtp';
-    const payload = { test_to: testForm.test_to, email_provider: provider };
-    if (provider === 'hostinger') {
-        payload.hostinger_smtp_username = form.hostinger_smtp_username;
-        payload.hostinger_smtp_password = form.hostinger_smtp_password;
-    } else if (provider === 'sendgrid') {
-        payload.sendgrid_api_key = form.sendgrid_api_key;
-        payload.sendgrid_mail_from_address = form.sendgrid_mail_from_address;
-        payload.sendgrid_mail_from_name = form.sendgrid_mail_from_name;
-    } else {
-        payload.smtp_host = form.smtp_host;
-        payload.smtp_port = form.smtp_port;
-        payload.smtp_username = form.smtp_username;
-        payload.smtp_password = form.smtp_password;
-        payload.smtp_encryption = form.smtp_encryption;
-    }
+    const payload = { test_to: testForm.test_to, ...buildEmailSettingsPayload() };
+    delete payload.kyc_notification_emails;
     try {
         await window.axios.post('/plataforma/configuracoes/email/send-test', payload);
         sendResult.value.status = 'success';
@@ -510,13 +554,21 @@ async function testStorageConnection() {
             storage_s3_bucket: form.storage_s3_bucket ?? '',
             storage_s3_region: region,
             storage_s3_endpoint: form.storage_s3_endpoint ?? '',
+            storage_s3_url: (form.storage_s3_url ?? '').trim(),
         };
     try {
         const res = await window.axios.post('/plataforma/configuracoes/storage/test', payload);
         storageTestResult.value = { status: 'success', message: res.data.message || 'Conexão estabelecida com sucesso.' };
     } catch (e) {
         const data = e?.response?.data;
+        const status = e?.response?.status;
         let message = data?.message || data?.error || 'Erro ao testar conexão.';
+        if (status === 500) {
+            const hint = data?.message || data?.error;
+            message = hint
+                ? `Erro interno (${status}): ${hint}`
+                : `Erro interno (${status}). Rode update.sh, abra /up/storage-check e /plataforma/configuracoes/storage/ping (version deve ser storage-v5-inline-test).`;
+        }
         if (data?.errors && typeof data.errors === 'object') {
             const firstError = Object.values(data.errors).flat().find(Boolean);
             if (firstError) message = firstError;
@@ -605,16 +657,251 @@ const providers = [
     },
 ];
 
-const selectedProviderId = ref(form.email_provider || 'smtp');
+const page = usePage();
 const sidebarOpen = ref(false);
 const selectedProvider = ref(null);
 
+/** Provedor ativo = única fonte de verdade (cartão + envio ao servidor). */
+const activeEmailProvider = computed({
+    get: () => {
+        const v = form.email_provider;
+        return v === 'hostinger' || v === 'sendgrid' || v === 'smtp' ? v : 'smtp';
+    },
+    set: (id) => {
+        form.email_provider = id;
+    },
+});
+
+function applyEmailPublicFieldsFromSettings(s) {
+    if (!s || typeof s !== 'object') {
+        return;
+    }
+    const provider = s.email_provider;
+    form.email_provider =
+        provider === 'hostinger' || provider === 'sendgrid' || provider === 'smtp' ? provider : 'smtp';
+    form.smtp_host = s.smtp_host ?? '';
+    form.smtp_port = s.smtp_port ?? '587';
+    form.smtp_username = s.smtp_username ?? '';
+    form.smtp_encryption = s.smtp_encryption ?? 'tls';
+    form.mail_from_address = s.mail_from_address ?? '';
+    form.mail_from_name = s.mail_from_name ?? '';
+    form.reply_to = s.reply_to ?? '';
+    form.hostinger_smtp_username = s.hostinger_smtp_username ?? '';
+    form.hostinger_mail_from_address = s.hostinger_mail_from_address ?? '';
+    form.hostinger_mail_from_name = s.hostinger_mail_from_name ?? '';
+    form.hostinger_reply_to = s.hostinger_reply_to ?? '';
+    form.sendgrid_mail_from_address = s.sendgrid_mail_from_address ?? '';
+    form.sendgrid_mail_from_name = s.sendgrid_mail_from_name ?? '';
+    form.kyc_notification_emails = s.kyc_notification_emails ?? '';
+}
+
+function syncEmailSettingsFromProps() {
+    applyEmailPublicFieldsFromSettings(page.props.settings);
+}
+
+function applyLegalSettingsFromSettings(s) {
+    if (!s) return;
+    form.legal_privacy_policy_html = s.legal_privacy_policy_html ?? '';
+    form.legal_terms_of_use_html = s.legal_terms_of_use_html ?? '';
+    form.legal_privacy_contact_email = s.legal_privacy_contact_email ?? '';
+    form.legal_cookie_banner_enabled = s.legal_cookie_banner_enabled !== false;
+}
+
+function syncLegalSettingsFromProps() {
+    applyLegalSettingsFromSettings(page.props.settings);
+}
+
+function applySecuritySettingsFromSettings(s) {
+    if (!s) return;
+    form.checkout_turnstile_site_key = s.checkout_turnstile_site_key ?? '';
+    form.checkout_turnstile_secret_configured = Boolean(s.checkout_turnstile_secret_configured);
+    form.turnstile_keys_configured = Boolean(s.turnstile_keys_configured);
+    form.login_turnstile_enabled = s.login_turnstile_enabled ?? '0';
+    form.registration_turnstile_enabled = s.registration_turnstile_enabled ?? '0';
+    form.registration_email_verification_enabled = s.registration_email_verification_enabled ?? '0';
+    form.allow_new_infoproducers = s.allow_new_infoproducers ?? '1';
+    form.auto_approve_products = s.auto_approve_products ?? '1';
+    form.account_manager_auto_assign_mode = s.account_manager_auto_assign_mode ?? 'least_load';
+}
+
+function syncSecuritySettingsFromProps() {
+    applySecuritySettingsFromSettings(page.props.settings);
+}
+
+function applyKycSettingsFromSettings(s) {
+    if (!s) return;
+    form.kyc_allowed_identity_types = Array.isArray(s.kyc_allowed_identity_types)
+        ? [...s.kyc_allowed_identity_types]
+        : ['rg', 'cnh', 'passport'];
+    form.kyc_require_address_proof = s.kyc_require_address_proof ?? '1';
+    form.kyc_require_selfie_with_document = s.kyc_require_selfie_with_document ?? '1';
+    form.kyc_require_company_address_proof = s.kyc_require_company_address_proof ?? '1';
+    form.kyc_require_company_constitution = s.kyc_require_company_constitution ?? '1';
+}
+
+function syncKycSettingsFromProps() {
+    applyKycSettingsFromSettings(page.props.settings);
+}
+
+function applySupportSettingsFromSettings(s) {
+    if (!s) return;
+    form.seller_panel_support_enabled = s.seller_panel_support_enabled ?? '0';
+    form.seller_panel_support_destination = s.seller_panel_support_destination ?? 'whatsapp';
+    form.seller_panel_support_whatsapp = s.seller_panel_support_whatsapp ?? '';
+    form.seller_panel_support_url = s.seller_panel_support_url ?? '';
+    form.seller_panel_support_icon = s.seller_panel_support_icon ?? 'whatsapp';
+    form.seller_panel_support_icon_image = s.seller_panel_support_icon_image ?? '';
+    form.seller_panel_support_color = s.seller_panel_support_color ?? '#25D366';
+}
+
+function syncSupportSettingsFromProps() {
+    applySupportSettingsFromSettings(page.props.settings);
+}
+
+function applyPlatformCompanySettingsFromSettings(s) {
+    if (!s) return;
+    form.platform_legal_name = s.platform_legal_name ?? '';
+    form.platform_cnpj = s.platform_cnpj ?? '';
+    form.platform_checkout_notice_enabled = s.platform_checkout_notice_enabled ?? '0';
+    form.platform_checkout_notice = s.platform_checkout_notice ?? '';
+}
+
+function syncPlatformCompanySettingsFromProps() {
+    applyPlatformCompanySettingsFromSettings(page.props.settings);
+}
+
+function buildSettingsPayload() {
+    const data = form.data();
+    if (activeTab.value === 'lgpd') {
+        return {
+            legal_privacy_policy_html: data.legal_privacy_policy_html,
+            legal_terms_of_use_html: data.legal_terms_of_use_html,
+            legal_privacy_contact_email: data.legal_privacy_contact_email,
+            legal_cookie_banner_enabled: data.legal_cookie_banner_enabled,
+        };
+    }
+    if (activeTab.value === 'backup') {
+        return {
+            backup_enabled: data.backup_enabled,
+            backup_daily_at: data.backup_daily_at,
+            backup_retention_days: data.backup_retention_days,
+            backup_destination_provider: data.backup_destination_provider,
+            backup_destination_s3_key: data.backup_destination_s3_key,
+            backup_destination_s3_secret: data.backup_destination_s3_secret,
+            backup_destination_s3_bucket: data.backup_destination_s3_bucket,
+            backup_destination_s3_region: data.backup_destination_s3_region,
+            backup_destination_s3_endpoint: data.backup_destination_s3_endpoint,
+            backup_destination_prefix: data.backup_destination_prefix,
+        };
+    }
+    if (activeTab.value === 'recursos') {
+        return {
+            physical_products_enabled: data.physical_products_enabled,
+            auto_approve_products: data.auto_approve_products,
+        };
+    }
+    if (activeTab.value === 'integracoes') {
+        return sellerIntegrationFormFields(data);
+    }
+    if (activeTab.value === 'seguranca') {
+        return {
+            checkout_turnstile_site_key: data.checkout_turnstile_site_key,
+            checkout_turnstile_secret_key: data.checkout_turnstile_secret_key,
+            login_turnstile_enabled: data.login_turnstile_enabled,
+            registration_turnstile_enabled: data.registration_turnstile_enabled,
+            registration_email_verification_enabled: data.registration_email_verification_enabled,
+            allow_new_infoproducers: data.allow_new_infoproducers,
+            account_manager_auto_assign_mode: data.account_manager_auto_assign_mode,
+        };
+    }
+    if (activeTab.value === 'kyc') {
+        return {
+            kyc_allowed_identity_types: data.kyc_allowed_identity_types,
+            kyc_require_address_proof: data.kyc_require_address_proof,
+            kyc_require_selfie_with_document: data.kyc_require_selfie_with_document,
+            kyc_require_company_address_proof: data.kyc_require_company_address_proof,
+            kyc_require_company_constitution: data.kyc_require_company_constitution,
+        };
+    }
+    if (activeTab.value === 'suporte_painel') {
+        return {
+            seller_panel_support_enabled: data.seller_panel_support_enabled,
+            seller_panel_support_destination: data.seller_panel_support_destination,
+            seller_panel_support_whatsapp: data.seller_panel_support_whatsapp,
+            seller_panel_support_url: data.seller_panel_support_url,
+            seller_panel_support_icon: data.seller_panel_support_icon,
+            seller_panel_support_color: data.seller_panel_support_color,
+        };
+    }
+    if (activeTab.value === 'dados_plataforma') {
+        return {
+            platform_legal_name: data.platform_legal_name,
+            platform_cnpj: data.platform_cnpj,
+            platform_checkout_notice_enabled: data.platform_checkout_notice_enabled,
+            platform_checkout_notice: data.platform_checkout_notice,
+        };
+    }
+    return {
+        ...data,
+        email_provider: activeEmailProvider.value,
+    };
+}
+
+function buildEmailSettingsPayload() {
+    const provider = activeEmailProvider.value;
+    const payload = {
+        email_provider: provider,
+        kyc_notification_emails: form.kyc_notification_emails ?? '',
+    };
+    if (provider === 'hostinger') {
+        payload.hostinger_smtp_username = form.hostinger_smtp_username ?? '';
+        payload.hostinger_smtp_password = form.hostinger_smtp_password ?? '';
+        payload.hostinger_mail_from_address = form.hostinger_mail_from_address ?? '';
+        payload.hostinger_mail_from_name = form.hostinger_mail_from_name ?? '';
+        payload.hostinger_reply_to = form.hostinger_reply_to ?? '';
+    } else if (provider === 'sendgrid') {
+        payload.sendgrid_api_key = form.sendgrid_api_key ?? '';
+        payload.sendgrid_mail_from_address = form.sendgrid_mail_from_address ?? '';
+        payload.sendgrid_mail_from_name = form.sendgrid_mail_from_name ?? '';
+    } else {
+        payload.smtp_host = form.smtp_host ?? '';
+        payload.smtp_port = form.smtp_port ?? '587';
+        payload.smtp_username = form.smtp_username ?? '';
+        payload.smtp_password = form.smtp_password ?? '';
+        payload.smtp_encryption = form.smtp_encryption ?? 'tls';
+        payload.mail_from_address = form.mail_from_address ?? '';
+        payload.mail_from_name = form.mail_from_name ?? '';
+        payload.reply_to = form.reply_to ?? '';
+    }
+    return payload;
+}
+
+function payloadTouchesEmailSettings(payload) {
+    if (!payload || typeof payload !== 'object') return false;
+    const keys = [
+        'email_provider',
+        'smtp_password', 'smtp_host', 'smtp_port', 'smtp_username', 'smtp_encryption',
+        'mail_from_address', 'mail_from_name', 'reply_to',
+        'hostinger_smtp_password', 'hostinger_smtp_username', 'hostinger_mail_from_address',
+        'hostinger_mail_from_name', 'hostinger_reply_to',
+        'sendgrid_api_key', 'sendgrid_mail_from_address', 'sendgrid_mail_from_name',
+        'kyc_notification_emails',
+    ];
+    return keys.some((k) => Object.prototype.hasOwnProperty.call(payload, k));
+}
+
+const platformTotpEnabled = computed(() => Boolean(page.props.auth?.user?.totp_enabled));
+const stepUpOpen = ref(false);
+const stepUpLoading = ref(false);
+/** @type {import('vue').Ref<null | { kind: 'sidebar' | 'settings' | 'provider', payload: Record<string, unknown> }>} */
+const pendingEmailSave = ref(null);
+
 function selectProvider(provider) {
-    selectedProviderId.value = provider.id;
-    form.email_provider = provider.id;
+    activeEmailProvider.value = provider.id;
 }
 
 function openProviderConfig(provider) {
+    selectProvider(provider);
     selectedProvider.value = provider;
     sidebarOpen.value = true;
 }
@@ -623,11 +910,76 @@ function closeSidebar() {
     sidebarOpen.value = false;
 }
 
+function putSettings(payload, { onSuccess } = {}) {
+    form
+        .transform(() => payload)
+        .post('/plataforma/configuracoes', {
+            preserveScroll: true,
+            onSuccess: () => {
+                onSuccess?.();
+                syncEmailSettingsFromProps();
+                syncLegalSettingsFromProps();
+                syncSecuritySettingsFromProps();
+                syncKycSettingsFromProps();
+                syncSupportSettingsFromProps();
+                syncPlatformCompanySettingsFromProps();
+            },
+            onFinish: () => {
+                form.transform((data) => data);
+                stepUpLoading.value = false;
+                stepUpOpen.value = false;
+                pendingEmailSave.value = null;
+            },
+        });
+}
+
+function requestSettingsSave(payload, kind, { onSuccess } = {}) {
+    if (platformTotpEnabled.value && payloadTouchesEmailSettings(payload)) {
+        pendingEmailSave.value = { kind, payload, onSuccess };
+        stepUpOpen.value = true;
+        return;
+    }
+    putSettings(payload, { onSuccess });
+}
+
 function saveFromSidebar() {
-    form.put('/plataforma/configuracoes', {
-        preserveScroll: true,
+    requestSettingsSave(buildEmailSettingsPayload(), 'sidebar', {
         onSuccess: () => closeSidebar(),
     });
+}
+
+function submitSettings() {
+    form.email_provider = activeEmailProvider.value;
+    requestSettingsSave(buildSettingsPayload(), 'settings');
+}
+
+function persistSelectedProvider() {
+    requestSettingsSave(
+        {
+            email_provider: activeEmailProvider.value,
+            kyc_notification_emails: form.kyc_notification_emails ?? '',
+        },
+        'provider'
+    );
+}
+
+function onStepUpConfirm({ totp_code: totpCode }) {
+    const pending = pendingEmailSave.value;
+    if (!pending) {
+        stepUpOpen.value = false;
+        return;
+    }
+    stepUpLoading.value = true;
+    putSettings(
+        { ...pending.payload, totp_code: totpCode || undefined },
+        { onSuccess: pending.onSuccess }
+    );
+}
+
+function closeStepUp() {
+    stepUpOpen.value = false;
+    stepUpLoading.value = false;
+    pendingEmailSave.value = null;
 }
 
 function isProviderConfigured(providerId) {
@@ -667,44 +1019,80 @@ const selectClass =
 
 <template>
     <div class="space-y-6">
-        <!-- Header -->
         <div>
             <h1 class="text-xl font-semibold text-zinc-900 dark:text-white">Configurações</h1>
             <p class="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-                Gerencie e-mail, traduções do checkout e moedas disponíveis.
+                Gerencie e-mail, aparência, segurança e demais opções da plataforma.
             </p>
         </div>
 
-        <!-- Tabs pill style -->
-        <div class="w-full overflow-x-auto [-webkit-overflow-scrolling:touch]">
-            <nav
-                class="inline-flex w-max rounded-xl bg-zinc-100/80 p-1 dark:bg-zinc-800/80"
-                aria-label="Abas de configurações"
+        <!-- Mobile: seletor de seção -->
+        <div class="lg:hidden">
+            <label class="mb-1.5 block text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                Seção
+            </label>
+            <select
+                :value="activeTab"
+                class="w-full rounded-xl border border-zinc-300 bg-white px-3 py-2.5 text-sm text-zinc-900 dark:border-zinc-600 dark:bg-zinc-800 dark:text-white"
+                @change="setActiveTab($event.target.value)"
             >
-                <button
-                    v-for="tab in tabs"
-                    :key="tab.id"
-                    type="button"
-                    :aria-current="activeTab === tab.id ? 'page' : undefined"
-                    :class="[
-                        'items-center gap-2 whitespace-nowrap rounded-lg px-4 py-2.5 text-sm font-medium transition-all duration-200',
-                        tab.id === 'traducoes' ? 'hidden sm:flex' : 'flex',
-                        activeTab === tab.id
-                            ? 'bg-white text-[var(--color-primary)] shadow-sm dark:bg-zinc-700 dark:text-[var(--color-primary)]'
-                            : 'text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-white',
-                    ]"
-                    @click="activeTab = tab.id"
-                >
-                    <component :is="tab.icon" class="h-4 w-4 shrink-0" aria-hidden="true" />
-                    {{ tab.label }}
-                </button>
-            </nav>
+                <optgroup v-for="group in mobileTabsByGroup" :key="group.id" :label="group.label">
+                    <option v-for="tab in group.items" :key="tab.id" :value="tab.id">
+                        {{ tab.label }}
+                    </option>
+                </optgroup>
+            </select>
         </div>
 
+        <div class="flex flex-col gap-6 lg:flex-row lg:items-start lg:gap-8">
+            <!-- Sidebar interno (desktop) -->
+            <aside
+                class="hidden w-56 shrink-0 lg:block xl:w-60"
+                aria-label="Navegação das configurações"
+            >
+                <nav class="sticky top-20 space-y-5">
+                    <div v-for="group in tabsByGroup" :key="group.id">
+                        <p class="mb-1.5 px-2.5 text-[11px] font-semibold uppercase tracking-wider text-zinc-400 dark:text-zinc-500">
+                            {{ group.label }}
+                        </p>
+                        <ul class="space-y-0.5">
+                            <li v-for="tab in group.items" :key="tab.id">
+                                <button
+                                    type="button"
+                                    :aria-current="activeTab === tab.id ? 'page' : undefined"
+                                    class="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm font-medium transition-colors"
+                                    :class="
+                                        activeTab === tab.id
+                                            ? 'bg-[var(--color-primary)]/15 text-zinc-900 dark:text-white'
+                                            : 'text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800/80'
+                                    "
+                                    @click="setActiveTab(tab.id)"
+                                >
+                                    <component
+                                        :is="tab.icon"
+                                        class="h-4 w-4 shrink-0"
+                                        :class="activeTab === tab.id ? 'text-[var(--color-primary)]' : 'text-zinc-400'"
+                                        aria-hidden="true"
+                                    />
+                                    <span class="truncate">{{ tab.label }}</span>
+                                </button>
+                            </li>
+                        </ul>
+                    </div>
+                </nav>
+            </aside>
+
+            <!-- Conteúdo -->
+            <div class="min-w-0 flex-1">
+                <div v-if="activeTabMeta" class="mb-4 lg:hidden">
+                    <h2 class="text-base font-semibold text-zinc-900 dark:text-white">{{ activeTabMeta.label }}</h2>
+                </div>
+
         <form
-            v-show="activeTab !== 'update' && activeTab !== 'cron' && activeTab !== 'banners_dashboard' && activeTab !== 'idiomas' && !isPluginTab(activeTab)"
+            v-show="activeTab !== 'update' && activeTab !== 'cron' && activeTab !== 'banners_dashboard' && activeTab !== 'template_dashboard' && activeTab !== 'idiomas' && activeTab !== 'demo' && !isPluginTab(activeTab)"
             class="w-full max-w-full space-y-6"
-            @submit.prevent="form.put('/plataforma/configuracoes')"
+            novalidate
+            @submit.prevent="submitSettings"
         >
             <!-- Aba E-MAIL -->
             <Transition
@@ -728,27 +1116,41 @@ const selectClass =
                                 :title="prov.title"
                                 :logo="prov.logo"
                                 :description="prov.description"
-                                :selected="prov.id === selectedProviderId"
+                                :selected="prov.id === activeEmailProvider"
                                 :configured="isProviderConfigured(prov.id)"
                                 @select="selectProvider(prov)"
                                 @configure="openProviderConfig(prov)"
                             />
                         </div>
+                        <p
+                            v-if="form.errors.totp_code || form.errors.email_provider"
+                            class="mt-4 text-sm text-red-600 dark:text-red-400"
+                        >
+                            {{ form.errors.totp_code || form.errors.email_provider }}
+                        </p>
                         <div
-                            v-if="selectedProviderId && !isProviderConfigured(selectedProviderId)"
+                            v-if="activeEmailProvider && !isProviderConfigured(activeEmailProvider)"
                             class="mt-5 flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 dark:border-amber-800/50 dark:bg-amber-900/20"
                         >
                             <AlertCircle class="h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" />
                             <p class="text-sm text-amber-800 dark:text-amber-200">
-                                Clique no ícone de engrenagem para configurar o provedor selecionado.
+                                Clique no ícone de engrenagem para configurar o provedor selecionado e depois em Salvar.
+                            </p>
+                        </div>
+                        <div class="mt-5 flex flex-wrap items-center gap-3">
+                            <Button type="button" size="sm" :disabled="form.processing" @click="persistSelectedProvider">
+                                Salvar provedor selecionado
+                            </Button>
+                            <p class="text-xs text-zinc-500 dark:text-zinc-400">
+                                A seleção só vale após salvar. Com 2FA ativo, será pedido o código do autenticador.
                             </p>
                         </div>
                     </section>
 
                     <section class="overflow-hidden rounded-xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-700 dark:bg-zinc-800/50">
-                        <h2 class="mb-2 text-base font-semibold text-zinc-900 dark:text-white">Alertas de verificação (KYC)</h2>
+                        <h2 class="mb-2 text-base font-semibold text-zinc-900 dark:text-white">Alertas por e-mail do operador</h2>
                         <p class="mb-3 text-sm text-zinc-600 dark:text-zinc-400">
-                            E-mails que recebem aviso automático quando um infoprodutor envia documentos para análise. Um endereço por linha ou separados por vírgula. Deixe em branco para não enviar alertas.
+                            E-mails que recebem avisos automáticos da plataforma: KYC pendente, falha em saque, erro ao processar payout, nova solicitação de reembolso, etc. Um endereço por linha ou separados por vírgula. Deixe em branco para não enviar alertas.
                         </p>
                         <label class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Destinatários</label>
                         <textarea
@@ -807,7 +1209,7 @@ const selectClass =
                                 >
                                     <div class="min-w-0">
                                         <p class="text-sm font-medium text-emerald-900 dark:text-emerald-100">
-                                            Parabéns, você está usando o gatewayLab Cloud com Cloudflare R2.
+                                            Parabéns, você está usando o Getfy Cloud com Cloudflare R2.
                                         </p>
                                         <p class="mt-1 text-sm text-emerald-800 dark:text-emerald-200">
                                             As credenciais foram provisionadas automaticamente.
@@ -873,13 +1275,30 @@ const selectClass =
                                             />
                                         </div>
                                         <div class="sm:col-span-2">
-                                            <label class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">URL pública opcional (CDN ou domínio customizado)</label>
+                                            <label class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">
+                                                URL pública
+                                                <span v-if="form.storage_provider === 'r2'" class="text-red-600 dark:text-red-400">*</span>
+                                                <span v-else class="text-zinc-400">(opcional)</span>
+                                            </label>
                                             <input
                                                 v-model="form.storage_s3_url"
                                                 type="text"
+                                                inputmode="url"
                                                 :class="inputClass"
-                                                placeholder="https://cdn.exemplo.com"
+                                                :placeholder="form.storage_provider === 'r2'
+                                                    ? 'https://pub-xxxx.r2.dev (R2 → bucket → Public access)'
+                                                    : 'https://cdn.exemplo.com'"
                                             />
+                                            <p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                                                <template v-if="form.storage_provider === 'r2'">
+                                                    Obrigatório no R2: use a URL <strong>pub-….r2.dev</strong> ou domínio customizado com acesso público.
+                                                    Não use o endpoint <code class="rounded bg-zinc-200 px-1 dark:bg-zinc-700">*.r2.cloudflarestorage.com</code> — ele não abre imagens no site.
+                                                </template>
+                                                <template v-else>
+                                                    CDN ou domínio público do bucket (recomendado para exibir arquivos no navegador).
+                                                </template>
+                                                Sempre com <strong>https://</strong> (ex.: <code class="rounded bg-zinc-200 px-1 dark:bg-zinc-700">https://media.seudominio.com</code>).
+                                            </p>
                                         </div>
                                     </div>
                                 </template>
@@ -925,6 +1344,25 @@ const selectClass =
                             </div>
                         </div>
                     </section>
+                </div>
+            </Transition>
+
+            <!-- Aba Backup -->
+            <Transition
+                enter-active-class="transition duration-200 ease-out"
+                enter-from-class="opacity-0"
+                enter-to-class="opacity-100"
+                leave-active-class="transition duration-150 ease-in"
+                leave-from-class="opacity-100"
+                leave-to-class="opacity-0"
+            >
+                <div v-show="activeTab === 'backup'" class="space-y-6">
+                    <BackupTab
+                        :form="form"
+                        :files="backup_files"
+                        :status="backup_status"
+                        :storage="backup_storage"
+                    />
                 </div>
             </Transition>
 
@@ -1172,10 +1610,185 @@ const selectClass =
                 </div>
             </Transition>
 
-            <div
-                class="flex items-center gap-3 pt-4 sm:pt-2 md:pt-4 sticky bottom-4 z-10 -mx-2 rounded-xl border border-zinc-200 bg-white/95 px-4 py-3 shadow-lg backdrop-blur sm:static sm:mx-0 sm:rounded-none sm:border-0 sm:bg-transparent sm:px-0 sm:py-0 sm:shadow-none dark:border-zinc-700 dark:bg-zinc-800/95 sm:dark:bg-transparent sm:dark:border-0"
+            <!-- Aba Recursos -->
+            <Transition
+                enter-active-class="transition duration-200 ease-out"
+                enter-from-class="opacity-0"
+                enter-to-class="opacity-100"
+                leave-active-class="transition duration-150 ease-in"
+                leave-from-class="opacity-100"
+                leave-to-class="opacity-0"
             >
-                <Button type="submit" :disabled="form.processing">Salvar alterações</Button>
+                <div v-show="activeTab === 'recursos'" class="space-y-6">
+                    <section class="overflow-hidden rounded-xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-700 dark:bg-zinc-800/50">
+                        <h2 class="text-base font-semibold text-zinc-900 dark:text-white">Produto físico e frete</h2>
+                        <p class="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+                            Quando desativado, infoprodutores não veem o tipo produto físico, o menu Taxas e frete nem campos de entrega no checkout.
+                        </p>
+                        <label class="mt-5 flex cursor-pointer items-start gap-3 rounded-xl border border-zinc-200 bg-zinc-50/80 p-4 dark:border-zinc-600 dark:bg-zinc-800/80">
+                            <input
+                                v-model="form.physical_products_enabled"
+                                type="checkbox"
+                                class="mt-0.5 h-4 w-4 rounded border-zinc-300 text-[var(--color-primary)] focus:ring-[var(--color-primary)]"
+                            />
+                            <span>
+                                <span class="block text-sm font-medium text-zinc-900 dark:text-white">Habilitar produto físico na plataforma</span>
+                                <span class="mt-0.5 block text-xs text-zinc-500 dark:text-zinc-400">
+                                    Inclui cadastro de lojas/regras de frete, tipo de produto físico e cálculo de frete no checkout.
+                                </span>
+                            </span>
+                        </label>
+                    </section>
+
+                    <section class="overflow-hidden rounded-xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-700 dark:bg-zinc-800/50">
+                        <div class="flex items-start justify-between gap-4">
+                            <div>
+                                <h2 class="text-base font-semibold text-zinc-900 dark:text-white">Aprovação de produtos</h2>
+                                <p class="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+                                    Controle se novos produtos de infoprodutores precisam de análise da plataforma antes do checkout ir ao ar.
+                                </p>
+                            </div>
+                            <span
+                                class="inline-flex shrink-0 rounded-full px-2.5 py-1 text-xs font-medium"
+                                :class="
+                                    form.auto_approve_products === '0'
+                                        ? 'bg-amber-100 text-amber-900 dark:bg-amber-950/50 dark:text-amber-200'
+                                        : 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-200'
+                                "
+                            >
+                                {{
+                                    form.auto_approve_products === '0'
+                                        ? 'Análise manual'
+                                        : 'Liberação automática'
+                                }}
+                            </span>
+                        </div>
+                        <label class="mt-5 flex cursor-pointer items-start gap-3 rounded-xl border border-zinc-200 bg-zinc-50/80 p-4 dark:border-zinc-600 dark:bg-zinc-800/80">
+                            <input
+                                type="checkbox"
+                                class="mt-0.5 h-4 w-4 rounded border-zinc-300 text-[var(--color-primary)] focus:ring-[var(--color-primary)]"
+                                :checked="form.auto_approve_products === '0'"
+                                @change="form.auto_approve_products = $event.target.checked ? '0' : '1'"
+                            />
+                            <span>
+                                <span class="block text-sm font-medium text-zinc-900 dark:text-white">Exigir aprovação de novos produtos</span>
+                                <span class="mt-0.5 block text-xs text-zinc-500 dark:text-zinc-400">
+                                    Com esta opção ativa, cada produto novo fica em análise: o infoprodutor pode editar à vontade, mas o link de checkout
+                                    <code class="text-[11px]">/c/…</code> só fica online depois da aprovação do admin (e é ativado no mesmo momento).
+                                    Se a plataforma rejeitar, o seller vê o motivo e pode reenviar.
+                                </span>
+                            </span>
+                        </label>
+                        <ul class="mt-4 space-y-1.5 text-xs text-zinc-500 dark:text-zinc-400">
+                            <li>• Fila de análise em <strong class="font-medium text-zinc-700 dark:text-zinc-300">Plataforma → Produtos</strong></li>
+                            <li>• Desativada: produtos novos são liberados automaticamente (comportamento padrão)</li>
+                        </ul>
+                    </section>
+                </div>
+            </Transition>
+
+            <!-- Aba LGPD -->
+            <Transition
+                enter-active-class="transition duration-200 ease-out"
+                enter-from-class="opacity-0"
+                enter-to-class="opacity-100"
+                leave-active-class="transition duration-150 ease-in"
+                leave-from-class="opacity-100"
+                leave-to-class="opacity-0"
+            >
+                <div v-show="activeTab === 'lgpd'" class="space-y-6">
+                    <LegalTab :form="form" :legal-defaults="legal_defaults" />
+                </div>
+            </Transition>
+
+            <!-- Aba Segurança -->
+            <Transition
+                enter-active-class="transition duration-200 ease-out"
+                enter-from-class="opacity-0"
+                enter-to-class="opacity-100"
+                leave-active-class="transition duration-150 ease-in"
+                leave-from-class="opacity-100"
+                leave-to-class="opacity-0"
+            >
+                <div v-show="activeTab === 'suporte_painel'" class="space-y-6">
+                    <SellerPanelSupportTab :form="form" />
+                </div>
+            </Transition>
+
+            <Transition
+                enter-active-class="transition duration-200 ease-out"
+                enter-from-class="opacity-0"
+                enter-to-class="opacity-100"
+                leave-active-class="transition duration-150 ease-in"
+                leave-from-class="opacity-100"
+                leave-to-class="opacity-0"
+            >
+                <div v-show="activeTab === 'dados_plataforma'" class="space-y-6">
+                    <PlatformDataTab
+                        :form="form"
+                        :notice-default="settings.platform_checkout_notice_default || ''"
+                        :placeholders="settings.platform_checkout_notice_placeholders || []"
+                    />
+                </div>
+            </Transition>
+
+            <Transition
+                enter-active-class="transition duration-200 ease-out"
+                enter-from-class="opacity-0"
+                enter-to-class="opacity-100"
+                leave-active-class="transition duration-150 ease-in"
+                leave-from-class="opacity-100"
+                leave-to-class="opacity-0"
+            >
+                <div v-show="activeTab === 'integracoes'" class="space-y-6">
+                    <SellerIntegrationsTab :form="form" :catalog="seller_integrations_catalog" />
+                </div>
+            </Transition>
+
+            <Transition
+                enter-active-class="transition duration-200 ease-out"
+                enter-from-class="opacity-0"
+                enter-to-class="opacity-100"
+                leave-active-class="transition duration-150 ease-in"
+                leave-from-class="opacity-100"
+                leave-to-class="opacity-0"
+            >
+                <div v-show="activeTab === 'seguranca'" class="space-y-6">
+                    <SecurityTab :form="form" />
+                </div>
+            </Transition>
+
+            <Transition
+                enter-active-class="transition duration-200 ease-out"
+                enter-from-class="opacity-0"
+                enter-to-class="opacity-100"
+                leave-active-class="transition duration-150 ease-in"
+                leave-from-class="opacity-100"
+                leave-to-class="opacity-0"
+            >
+                <div v-show="activeTab === 'kyc'" class="space-y-6">
+                    <KycTab :form="form" />
+                </div>
+            </Transition>
+
+            <div
+                class="flex flex-col gap-2 pt-4 sm:pt-2 md:pt-4 sticky bottom-4 z-10 -mx-2 rounded-xl border border-zinc-200 bg-white/95 px-4 py-3 shadow-lg backdrop-blur sm:static sm:mx-0 sm:rounded-none sm:border-0 sm:bg-transparent sm:px-0 sm:py-0 sm:shadow-none dark:border-zinc-700 dark:bg-zinc-800/95 sm:dark:bg-transparent sm:dark:border-0"
+            >
+                <p
+                    v-if="form.errors.totp_code"
+                    class="text-sm text-red-600 dark:text-red-400"
+                >
+                    {{ form.errors.totp_code }}
+                </p>
+                <p
+                    v-else-if="Object.keys(form.errors || {}).length"
+                    class="text-sm text-red-600 dark:text-red-400"
+                >
+                    Não foi possível salvar. Verifique os campos e tente novamente.
+                </p>
+                <div class="flex items-center gap-3">
+                    <Button type="button" :disabled="form.processing" @click="submitSettings">Salvar alterações</Button>
+                </div>
             </div>
         </form>
 
@@ -1200,6 +1813,19 @@ const selectClass =
             leave-from-class="opacity-100"
             leave-to-class="opacity-0"
         >
+            <div v-show="activeTab === 'template_dashboard'" class="w-full max-w-full space-y-6">
+                <DashboardTemplateTab />
+            </div>
+        </Transition>
+
+        <Transition
+            enter-active-class="transition duration-200 ease-out"
+            enter-from-class="opacity-0"
+            enter-to-class="opacity-100"
+            leave-active-class="transition duration-150 ease-in"
+            leave-from-class="opacity-100"
+            leave-to-class="opacity-0"
+        >
             <div v-show="activeTab === 'idiomas'" class="w-full max-w-full space-y-6">
                 <LanguagesTab />
             </div>
@@ -1213,6 +1839,26 @@ const selectClass =
                 </p>
             </div>
         </template>
+
+        <Transition
+            enter-active-class="transition duration-200 ease-out"
+            enter-from-class="opacity-0"
+            enter-to-class="opacity-100"
+            leave-active-class="transition duration-150 ease-in"
+            leave-from-class="opacity-100"
+            leave-to-class="opacity-0"
+        >
+            <div v-show="activeTab === 'url_publica'" class="w-full max-w-full space-y-6">
+                <PublicUrlTab
+                    :public_url="public_url || app_url"
+                    :resolved_public_url="resolved_public_url || app_url"
+                    :webhook_public_url="webhook_public_url"
+                    :public_url_meta="public_url_meta"
+                    :container_restart="container_restart"
+                    :docker_mode="docker_mode"
+                />
+            </div>
+        </Transition>
 
         <Transition
             enter-active-class="transition duration-200 ease-out"
@@ -1308,7 +1954,7 @@ const selectClass =
             </div>
         </Transition>
 
-        <!-- Aba Update (fora do form) -->
+        <!-- Aba Versão (somente leitura do arquivo VERSION) -->
         <Transition
             enter-active-class="transition duration-200 ease-out"
             enter-from-class="opacity-0"
@@ -1320,127 +1966,40 @@ const selectClass =
             <div v-show="activeTab === 'update'" class="w-full max-w-full space-y-6">
                 <section class="overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-700 dark:bg-zinc-800/50">
                     <div class="border-b border-zinc-200 bg-zinc-50 px-6 py-5 dark:border-zinc-700 dark:bg-zinc-800">
-                        <h2 class="text-base font-semibold text-zinc-900 dark:text-white">Versão e atualizações</h2>
+                        <h2 class="text-base font-semibold text-zinc-900 dark:text-white">Versão instalada</h2>
                         <p class="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-                            Versão atual instalada e verificação de atualizações a partir do repositório oficial.
+                            O número exibido é o conteúdo do arquivo <code class="rounded bg-zinc-200 px-1 font-mono text-xs dark:bg-zinc-700">VERSION</code> na raiz do projeto (fallback: configuração interna).
                         </p>
                     </div>
-                    <div class="space-y-6 p-6">
-                        <div class="flex flex-wrap items-center gap-4">
-                            <div>
-                                <span class="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Versão atual</span>
-                                <p class="mt-0.5 text-lg font-semibold text-zinc-900 dark:text-white">{{ current_version }}</p>
-                            </div>
-                            <div class="flex flex-wrap items-center gap-2">
-                                <button
-                                    type="button"
-                                    :disabled="updateCheckLoading"
-                                    class="inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2.5 text-sm font-medium text-zinc-600 transition hover:border-[var(--color-primary)] hover:text-[var(--color-primary)] disabled:opacity-60 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:border-[var(--color-primary)]"
-                                    @click="checkForUpdate"
-                                >
-                                    <RefreshCw class="h-4 w-4" :class="{ 'animate-spin': updateCheckLoading }" />
-                                    {{ updateCheckLoading ? 'Verificando...' : 'Verificar atualização' }}
-                                </button>
-                                <button
-                                    v-if="updateCheckResult?.available && updates_enabled"
-                                    type="button"
-                                    :disabled="updateRunLoading"
-                                    class="inline-flex items-center gap-2 rounded-xl bg-[var(--color-primary)] px-4 py-2.5 text-sm font-medium text-white transition hover:opacity-90 disabled:opacity-60"
-                                    @click="runUpdate"
-                                >
-                                    <Download class="h-4 w-4" :class="{ 'animate-pulse': updateRunLoading }" />
-                                    {{ updateRunLoading ? 'Atualizando... Aguarde.' : 'Atualizar' }}
-                                </button>
-                            </div>
+                    <div class="space-y-4 p-6">
+                        <div class="rounded-xl border border-zinc-200 bg-zinc-50/80 p-6 dark:border-zinc-600 dark:bg-zinc-900/40">
+                            <p class="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Versão atual</p>
+                            <p class="mt-2 font-mono text-3xl font-semibold tracking-tight text-zinc-900 dark:text-white">{{ current_version }}</p>
                         </div>
-                        <div
-                            v-if="!git_available"
-                            class="rounded-xl border border-amber-200 bg-amber-50 p-4 dark:border-amber-800/50 dark:bg-amber-900/20"
-                        >
-                            <p class="text-sm font-medium text-amber-800 dark:text-amber-200">Git não detectado</p>
-                            <p class="mt-1 text-sm text-amber-700 dark:text-amber-300">
-                                O painel tentará atualizar baixando um pacote do GitHub e aplicando os arquivos por cima, preservando <code class="rounded bg-amber-100 px-1 dark:bg-amber-900/40">.env</code>, <code class="rounded bg-amber-100 px-1 dark:bg-amber-900/40">storage/</code>, <code class="rounded bg-amber-100 px-1 dark:bg-amber-900/40">database/</code> e <code class="rounded bg-amber-100 px-1 dark:bg-amber-900/40">plugins/</code>.
-                            </p>
-                        </div>
-                        <div v-if="updateCheckResult" class="rounded-xl border border-zinc-200 bg-zinc-50/50 p-4 dark:border-zinc-600 dark:bg-zinc-800/50">
-                            <p v-if="updateCheckResult.error" class="text-sm text-amber-600 dark:text-amber-400">{{ updateCheckResult.error }}</p>
-                            <p v-else-if="updateCheckResult.available" class="text-sm font-medium text-emerald-600 dark:text-emerald-400">
-                                Nova versão disponível: {{ updateCheckResult.latest }}
-                            </p>
-                            <p v-else-if="updateCheckResult.latest" class="text-sm text-zinc-600 dark:text-zinc-400">
-                                Você está na versão mais recente ({{ updateCheckResult.latest }}).
-                            </p>
-                            <p v-else class="text-sm text-zinc-600 dark:text-zinc-400">
-                                Nenhuma release encontrada no repositório.
-                            </p>
-                            <div
-                                v-if="updateCheckResult.changelog_remote"
-                                class="mt-3 rounded-lg border border-zinc-200 bg-white p-3 text-sm text-zinc-700 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
-                            >
-                                <p class="mb-2 font-medium">O que há de novo na versão {{ updateCheckResult.latest }}</p>
-                                <pre class="whitespace-pre-wrap font-sans">{{ updateCheckResult.changelog_remote }}</pre>
-                            </div>
-                        </div>
-                        <div class="rounded-xl border border-zinc-200 bg-zinc-50/50 p-4 dark:border-zinc-600 dark:bg-zinc-800/50">
-                            <div class="flex flex-wrap items-center justify-between gap-3">
-                                <p class="text-sm font-medium text-zinc-900 dark:text-zinc-100">Integridade</p>
-                                <button
-                                    type="button"
-                                    :disabled="integrityLoading"
-                                    class="inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2.5 text-sm font-medium text-zinc-600 transition hover:border-[var(--color-primary)] hover:text-[var(--color-primary)] disabled:opacity-60 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:border-[var(--color-primary)]"
-                                    @click="checkIntegrity"
-                                >
-                                    <AlertCircle class="h-4 w-4" :class="{ 'animate-spin': integrityLoading }" />
-                                    {{ integrityLoading ? 'Verificando...' : 'Verificar integridade' }}
-                                </button>
-                            </div>
-                            <div v-if="integrityResult" class="mt-3 text-sm">
-                                <p v-if="integrityResult.error" class="text-amber-600 dark:text-amber-400">{{ integrityResult.error }}</p>
-                                <template v-else>
-                                    <p v-if="integrityResult.pending_count > 0" class="text-amber-700 dark:text-amber-300">
-                                        Existem {{ integrityResult.pending_count }} migrations pendentes para rodar.
-                                    </p>
-                                    <p v-else class="text-emerald-700 dark:text-emerald-400">
-                                        Nenhuma migration pendente.
-                                    </p>
-                                    <div v-if="(integrityResult.pending ?? []).length" class="mt-2 rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-700 dark:bg-zinc-900/30">
-                                        <pre class="whitespace-pre-wrap font-mono text-xs text-zinc-700 dark:text-zinc-300">{{ (integrityResult.pending ?? []).join('\n') }}</pre>
-                                        <p v-if="integrityResult.pending_truncated" class="mt-2 text-xs text-zinc-500 dark:text-zinc-400">Lista truncada.</p>
-                                    </div>
-                                    <p class="mt-3 text-xs text-zinc-500 dark:text-zinc-400">
-                                        Observação: ao atualizar pelo painel, o sistema já tenta rodar as migrations automaticamente.
-                                    </p>
-                                </template>
-                            </div>
-                        </div>
-                        <div class="rounded-xl border border-zinc-200 bg-zinc-50/50 p-4 dark:border-zinc-600 dark:bg-zinc-800/50">
-                            <div class="flex flex-wrap items-center justify-between gap-3">
-                                <p class="text-sm font-medium text-zinc-900 dark:text-zinc-100">Migrations</p>
-                                <button
-                                    type="button"
-                                    :disabled="migrateLoading"
-                                    class="inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2.5 text-sm font-medium text-zinc-600 transition hover:border-[var(--color-primary)] hover:text-[var(--color-primary)] disabled:opacity-60 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:border-[var(--color-primary)]"
-                                    @click="runMigrations"
-                                >
-                                    <RefreshCw class="h-4 w-4" :class="{ 'animate-spin': migrateLoading }" />
-                                    {{ migrateLoading ? 'Rodando...' : 'Rodar migrations' }}
-                                </button>
-                            </div>
-                            <div v-if="migrateResult" class="mt-3 text-sm">
-                                <p v-if="migrateResult.success" class="text-emerald-700 dark:text-emerald-400">{{ migrateResult.message }}</p>
-                                <p v-else class="text-amber-700 dark:text-amber-300">{{ migrateResult.message }}</p>
-                                <div v-if="(migrateResult.output ?? '').trim() !== ''" class="mt-2 rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-700 dark:bg-zinc-900/30">
-                                    <pre class="whitespace-pre-wrap font-mono text-xs text-zinc-700 dark:text-zinc-300">{{ migrateResult.output }}</pre>
-                                </div>
-                            </div>
-                        </div>
-                        <div v-if="!updates_enabled" class="rounded-xl border border-amber-200 bg-amber-50 p-4 dark:border-amber-800/50 dark:bg-amber-900/20">
-                            <p class="text-sm text-amber-800 dark:text-amber-200">Atualizações pela interface estão desativadas (GETFY_UPDATES_ENABLED).</p>
-                        </div>
+                        <p class="text-sm text-zinc-600 dark:text-zinc-400">
+                            Atualizações de código não são feitas por esta tela. Use o seu fluxo habitual (deploy no servidor, Git, imagem Docker, etc.) e mantenha o arquivo
+                            <code class="rounded bg-zinc-200 px-1 font-mono text-xs dark:bg-zinc-700">VERSION</code> alinhado à release instalada.
+                        </p>
                     </div>
                 </section>
             </div>
         </Transition>
+
+        <Transition
+            enter-active-class="transition duration-200 ease-out"
+            enter-from-class="opacity-0"
+            enter-to-class="opacity-100"
+            leave-active-class="transition duration-150 ease-in"
+            leave-from-class="opacity-100"
+            leave-to-class="opacity-0"
+        >
+            <div v-show="activeTab === 'demo'" class="w-full max-w-full space-y-6">
+                <DemoTab />
+            </div>
+        </Transition>
+
+            </div>
+        </div>
 
         <Teleport to="body">
             <EmailProviderSidebar
@@ -1457,5 +2016,15 @@ const selectClass =
                 @save="saveFromSidebar"
             />
         </Teleport>
+
+        <PlatformStepUpModal
+            :open="stepUpOpen"
+            title="Confirmar alteração de e-mail"
+            description="Informe o código 2FA para salvar o provedor ou as credenciais de e-mail da plataforma."
+            confirm-label="Salvar"
+            :loading="stepUpLoading"
+            @close="closeStepUp"
+            @confirm="onStepUpConfirm"
+        />
     </div>
 </template>

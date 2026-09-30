@@ -1,237 +1,475 @@
-API de Pagamentos
-Integre pagamentos (PIX, cartão, boleto) na sua plataforma usando os gateways configurados na Getfy. Checkout hospedado ou transparente - você escolhe.
+# API de Pagamentos e Saques
 
-REST
-Bearer / X-API-Key
-JSON
-Base URL
-https://pay.getfy.cloud/api/v1
-Autenticação: Authorization: Bearer <sua_api_key> ou header X-API-Key.
+Integre **PIX**, consulte pagamentos, solicite **saques** e receba **webhooks** em tempo real. Destinada a marketplaces, ERPs, SaaS e parceiros que precisam cobrar e movimentar saldo via REST.
 
-Ver detalhes da autenticação →
-Início rápido
-Base URL: Todas as rotas estão sob /api/v1.
+**REST** · **JSON** · **Base URL:** `https://seudominio.com/api/v1` (substitua pelo domínio da instalação).
 
-Autenticação: Envie a API key no header Authorization: Bearer <sua_api_key> ou X-API-Key: <sua_api_key>.
+**Autenticação (recomendado):** headers `X-Public-Key` e `X-Secret-Key` (par obtido no painel em **Chaves da API** → `/aplicacoes-api`). Legado: `Authorization: Bearer …` ou `X-API-Key`.
 
-Resumo dos endpoints
-Método	Endpoint	Descrição
-POST	/api/v1/checkout/sessions	Criar sessão Checkout Pro (retorna link)
-POST	/api/v1/payments/pix	Criar pagamento PIX
-POST	/api/v1/payments/card	Criar pagamento com cartão
-POST	/api/v1/payments/boleto	Criar pagamento com boleto
-GET	/api/v1/payments/{order_id}	Consultar status do pedido
-Visão geral
-Checkout Pro (hospedado)
-Sua plataforma envia os dados do cliente e do valor para a API.
-A API devolve um link de checkout que o usuário final abre no navegador.
-Na Getfy o usuário só escolhe o método (PIX, boleto) e conclui o pagamento; não preenche nome, e-mail, CPF (já vêm da sessão).
-Ideal quando você quer delegar toda a tela de pagamento à Getfy.
-Checkout Transparente
-Sua plataforma mantém a própria UI (formulário de cartão, exibição de PIX, etc.).
-Você chama a API para criar a cobrança e recebe os dados (QR code PIX, link do boleto, resultado do cartão, etc.).
-Pode consultar o status do pagamento via GET /api/v1/payments/{order_id}.
-Ideal quando o fluxo de compra e a identidade visual ficam no seu site/app.
-Quando usar cada um
-Cenário	Sugestão
-Redirecionar o cliente para uma página de pagamento da Getfy	Checkout Pro
-Manter checkout no seu site (iframe, SPA, app)	Checkout Transparente
-Apenas processar pagamento (sem produto Getfy)	Ambos suportam amount/currency sem product_id
-Envio da API key
-Todas as requisições à API devem incluir a API key da aplicação.
+- Documentação interativa: `/docs/api-pagamentos`
+- **Playground de testes (PIX e saques):** `/docs/api-pagamentos/testar`
+- Hub para IAs (LLMs): `/docs/api-pagamentos/ia`
+- Download pacote Markdown para IA: `/docs/api-pagamentos/llm/full.md`
 
-Header preferido: Authorization: Bearer <sua_api_key>
-Alternativa: X-API-Key: <sua_api_key>
-Exemplo:
+---
 
-http
- POST /api/v1/checkout/sessions HTTP/1.1 Host: pay.getfy.cloud Authorization: Bearer getfy_xxxxxxxx_yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy Content-Type: application/json 
-Obtenção da API key
-No painel Getfy, acesse API Pagamentos (ou Aplicações).
-Crie uma nova aplicação ou edite uma existente.
-Na criação, a API key é exibida uma única vez; copie e guarde em local seguro.
-Em edição, use Gerar nova API key se precisar de uma nova (a anterior deixa de funcionar).
-Segurança
-Nunca exponha a API key em frontend público (JavaScript, apps móveis sem proteção). Use sempre um backend seu para chamar a API.
-Em produção, utilize HTTPS em todas as requisições.
-A API key é armazenada apenas como hash no servidor; não é possível recuperá-la depois. Se perder, gere uma nova.
-O que é uma aplicação
-Cada Aplicação representa um cliente da API (ex.: sua loja, seu SaaS). A API atua como roteador de pagamentos: você autentica com uma aplicação (API key), escolhe o modo de checkout e os pagamentos são processados com a ordem e redundância de gateways definidas por aplicação.
+## Pré-requisitos
 
-Configuração
-Na aplicação você configura:
+- Conta de vendedor ativa e aprovada
+- **API PIX** habilitada para a conta
+- Integração criada em `/aplicacoes-api` com status **ativo**
+- Par Public key + Secret key copiado (secret apenas no backend)
+- Webhook provisionado via `PUT /api/v1/webhook` (recomendado para parceiros) ou configurado manualmente no painel
+- IPs permitidos vazio ou IP do seu servidor na lista
 
-Nome e identificação (slug).
-Gateways por método: PIX, cartão, boleto (e opcionalmente PIX automático, cripto), com redundância (ordem de fallback).
-Webhook URL (opcional): URL que receberá notificações de pagamento (order.completed, order.pending, order.refunded).
-URL de retorno padrão (opcional): usada no Checkout Pro quando a sessão não enviar return_url.
-Webhook secret (opcional): usado para assinar o body do webhook (header X-Getfy-Signature). Recomendado em produção.
-IPs permitidos (opcional): lista de IPs que podem usar a API key; vazio = todos permitidos.
-Ativo: aplicações inativas retornam 403.
-A ordem e redundância dos gateways são aplicadas a todos os pagamentos criados por essa aplicação (Checkout Pro e Transparente).
+---
 
-POST
-/api/v1/checkout/sessions
-Cria uma sessão e retorna a URL para o usuário final concluir o pagamento.
+## Integração para parceiros (recomendado)
 
-Body (JSON)
-Campo	Tipo	Obrigatório	Descrição
-customer	objeto	Sim	Dados do cliente
-customer.email	string	Sim	E-mail
-customer.name	string	Não	Nome (default: email)
-customer.cpf	string	Não	CPF
-customer.phone	string	Não	Telefone
-amount	number	Sim	Valor (ex.: 97.90)
-currency	string	Não	BRL, USD ou EUR (default: BRL)
-product_id	string (UUID)	Não	ID do produto Getfy; se informado, o pedido fica vinculado e o acesso é concedido ao concluir
-product_offer_id	integer	Não	ID da oferta do produto
-subscription_plan_id	integer	Não	ID do plano de assinatura
-metadata	objeto	Não	Dados livres (ex.: external_id) para uso no webhook
-return_url	string	Não	URL final para voltar ao seu site após concluir; se omitida, usa a URL de retorno padrão da aplicação
-expires_in	integer	Não	Minutos até expirar a sessão (5–1440; default: 30)
-Resposta 201
-json
+Fluxo automático quando o vendedor conecta as credenciais na sua plataforma:
+
+1. Vendedor habilita **API PIX** e copia Public key + Secret key em `/aplicacoes-api`
+2. Vendedor informa as credenciais na sua plataforma
+3. **Seu backend chama `PUT /api/v1/webhook`** com a URL HTTPS de recebimento
+4. Guarde o `webhook_secret` retornado (exibido apenas na primeira configuração ou com `rotate_secret: true`)
+5. Use `POST /api/v1/payments/pix` e valide webhooks com HMAC
+
+### Provisionar webhook via API
+
+```bash
+curl -X PUT 'https://seudominio.com/api/v1/webhook' \
+  -H 'Content-Type: application/json' \
+  -H 'X-Public-Key: gpk_sua_public_key' \
+  -H 'X-Secret-Key: gsk_sua_secret_key' \
+  -d '{
+    "webhook_url": "https://sua-plataforma.com/webhooks/getfy/{merchant_id}"
+  }'
+```
+
+**Resposta 200 (primeira configuração):**
+
+```json
 {
-  "session_id": "123",
-  "checkout_url": "https://pay.getfy.cloud/api-checkout/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-  "expires_at": "2026-03-09T12:30:00.000000Z"
+  "webhook_url": "https://sua-plataforma.com/webhooks/getfy/123",
+  "webhook_enabled": true,
+  "webhook_events": null,
+  "events_mode": "all",
+  "webhook_secret": "abc123...",
+  "has_secret": true
 }
-checkout_url: link que o usuário final deve abrir. Na página, ele verá valor e método de pagamento (PIX, boleto); não preenche dados de cliente. A sessão expira no horário indicado em expires_at.
+```
 
-Fluxo do usuário final
-Sua plataforma redireciona o cliente para checkout_url ou abre em nova aba.
-Na Getfy o cliente vê valor, produto (se houver) e escolhe PIX ou boleto.
-Após a confirmação do pagamento, a Getfy exibe uma página de confirmação e redireciona o cliente de volta para return_url (ou para a URL de retorno padrão da aplicação).
-Dados comuns (customer)
-Em todos os endpoints de criação de pagamento, use o objeto customer. Campos opcionais comuns em todos: amount, currency, product_id, product_offer_id, subscription_plan_id, metadata, idempotency_key (ou header Idempotency-Key).
+Todos os eventos de pagamento e saque são habilitados automaticamente (`webhook_events: null` = todos).
 
-Campo	Tipo	Obrigatório	Descrição
-customer	objeto	Sim	Dados do cliente
-customer.email	string	Sim	E-mail
-customer.name	string	Não	Nome
-customer.cpf	string	Não	CPF
-customer.phone	string	Não	Telefone
-POST
-/api/v1/payments/pix
-Cria um pedido e uma cobrança PIX. Retorna QR code e copia e cola. Os campos de cliente seguem os dados comuns (customer).
+| Campo | Obrigatório | Descrição |
+|-------|-------------|-----------|
+| `webhook_url` | Sim | URL HTTPS de recebimento |
+| `webhook_enabled` | Não | Default `true` |
+| `rotate_secret` | Não | `true` gera e retorna novo secret (reconexão) |
 
-Body (JSON)
-Campo	Tipo	Obrigatório	Descrição
-customer	objeto	Sim	Ver dados comuns acima
-amount	number	Sim	Valor
-currency	string	Não	BRL, USD ou EUR (default: BRL)
-product_id	string (UUID)	Não	ID do produto Getfy
-product_offer_id	integer	Não	ID da oferta
-subscription_plan_id	integer	Não	ID do plano de assinatura
-metadata	objeto	Não	Dados livres para webhook
-idempotency_key	string	Não	Ou header Idempotency-Key (até 128 caracteres)
-Resposta 201
-json
-{ "order_id": 456, "transaction_id": "abc123", "qrcode": "data:image/png;base64,...", "copy_paste": "00020126...", "status": "pending" }
-Use qrcode (imagem) ou copy_paste (código PIX) na sua UI. O status pode ser consultado em GET /api/v1/payments/{order_id} ou via webhook.
+**Reconexão:** chamadas repetidas com a mesma URL **não** devolvem o secret. Use `rotate_secret: true` ou `POST /api/v1/webhook/rotate-secret`.
 
-POST
-/api/v1/payments/card
-Cria um pedido e processa o pagamento com cartão. Campos de cliente e valor seguem os dados comuns (customer).
+**Permissão necessária:** `webhooks:write` (chave principal legada tem acesso total).
 
-Body (JSON)
-Campo	Tipo	Obrigatório	Descrição
-customer	objeto	Sim	Ver dados comuns acima
-amount	number	Sim	Valor
-currency	string	Não	Default BRL
-product_id, product_offer_id, subscription_plan_id, metadata	—	Não	Opcionais
-card	objeto	Sim	Dados do cartão
-card.payment_token	string	Sim	Token do cartão (gateway/JS Getfy ou sua tokenização)
-card.card_mask	string	Não	Máscara (ex.: **** 1234)
-idempotency_key	string	Não	Ou header Idempotency-Key
-Resposta 201
-json
-{ "order_id": 456, "transaction_id": "xyz", "status": "paid", "client_secret": "..." }
-status pode ser pending, paid, approved, completed ou outro conforme o gateway. client_secret aparece quando o gateway exige (ex.: 3DS).
+Configuração manual no painel (`/aplicacoes-api` → Webhooks) permanece disponível como alternativa.
 
-POST
-/api/v1/payments/boleto
-Cria um pedido e gera um boleto. Campos de cliente seguem os dados comuns (customer).
+---
 
-Body (JSON)
-Campo	Tipo	Obrigatório	Descrição
-customer	objeto	Sim	Ver dados comuns acima
-amount	number	Sim	Valor
-currency	string	Não	Default BRL
-product_id, product_offer_id, subscription_plan_id, metadata	—	Não	Opcionais
-idempotency_key	string	Não	Ou header Idempotency-Key
-Resposta 201
-json
-{ "order_id": 456, "transaction_id": "bol_xxx", "barcode": "12345.67890 12345.678901 12345.678901 1 12340012345678", "pdf_url": "https://...", "expire_at": "2026-03-12", "amount": 97.90, "status": "pending" }
-Exiba barcode, pdf_url e expire_at na sua UI. O cliente paga e o status é atualizado (consulta ou webhook).
+## Integração em 5 passos (PIX)
 
-GET
-/api/v1/payments/{order_id}
-Consulta o status de um pedido criado pela sua aplicação.
+1. Copie Public key e Secret key em `/aplicacoes-api`
+2. Provisione o webhook com `PUT /api/v1/webhook` (parceiros) ou configure no painel
+3. `POST /api/v1/payments/pix` com `customer.email` e valor
+4. Exiba `copy_paste` e/ou `qrcode` ao cliente
+5. Confirme via webhook `order.completed` ou `GET /api/v1/payments/{order_id}`
 
-Resposta 200
-json
-{ "order_id": 456, "status": "completed", "amount": 97.90, "email": "cliente@email.com", "gateway": "efi", "gateway_id": "tx_xxx", "metadata": {}, "created_at": "2026-03-09T10:00:00.000000Z", "updated_at": "2026-03-09T10:05:00.000000Z" }
-Se o pedido não existir ou não pertencer à aplicação autenticada: 404.
+---
 
-Idempotência
-Para evitar criar o mesmo pagamento duas vezes (ex.: retry após timeout), use idempotency key:
+## Autenticação e chaves
 
-Envie no body: "idempotency_key": "seu-uuid-ou-string-unica" ou no header: Idempotency-Key: seu-uuid-ou-string-unica
-Máximo 128 caracteres.
-Para a mesma aplicação e mesma chave, a API retorna a mesma resposta (cache por até 24h) sem criar novo pedido.
-Recomendado
+### Chave principal
 
-Use idempotency key em todos os endpoints de criação de pagamento (PIX, cartão, boleto).
-Eventos
-Se a aplicação tiver webhook_url configurada, a Getfy envia um POST para essa URL quando certos eventos ocorrem em pedidos criados por essa aplicação.
+A chave principal da integração tem acesso total (pagamentos, saques, consultas). Integrações existentes continuam funcionando sem alteração.
 
-Evento	Descrição
-order.completed	Pagamento concluído (pedido pago)
-order.pending	Pedido criado ou aguardando pagamento (ex.: PIX/boleto gerados)
-order.refunded	Pedido estornado
-Formato do payload
-O body é JSON, por exemplo:
+### Chaves adicionais e permissões
 
-json
-{ "event": "order.completed", "order_id": 456, "amount": 97.90, "status": "completed", "email": "cliente@email.com", "metadata": { "external_id": "ref-123" }, "created_at": "2026-03-09T10:00:00.000000Z", "updated_at": "2026-03-09T10:05:00.000000Z" }
-Assinatura (X-Getfy-Signature)
-Se a aplicação tiver webhook secret configurado, cada POST inclui o header X-Getfy-Signature: HMAC-SHA256 do body bruto (string JSON) usando o webhook secret como chave.
+No painel é possível criar **chaves adicionais** com permissões limitadas (least-privilege):
 
-Como validar no seu servidor:
+| Permissão | Descrição |
+|-----------|-----------|
+| `payments:read` | Consultar pedidos e status |
+| `payments:write` | Criar pagamentos (PIX, cartão, boleto) |
+| `payments:refund` | Cancelar e estornar PIX |
+| `withdrawals:read` | Consultar saldo e saques |
+| `withdrawals:write` | Solicitar saques e configurar chave PIX de destino |
+| `webhooks:read` | Consultar configuração do webhook |
+| `webhooks:write` | Provisionar webhook via API (`PUT /api/v1/webhook`) |
 
-Ler o body bruto da requisição (antes de parsear JSON).
-Calcular HMAC-SHA256(body_bruto, webhook_secret).
-Comparar com o valor do header X-Getfy-Signature (comparação constante para evitar timing attacks).
-Produção
+**Chave de parceiro recomendada:** `payments:read`, `payments:write`, `payments:refund`, `webhooks:write` (+ scopes de saque se necessário).
 
-Se não houver webhook secret configurado, o header não é enviado. Em produção, é recomendado configurar o secret e validar a assinatura.
-Boas práticas (webhooks)
-Responder com 2xx rapidamente; processar o evento de forma assíncrona se necessário.
-Não confiar no conteúdo sem validar a assinatura quando o secret estiver configurado.
-Tratar eventos duplicados (mesmo order_id/evento pode ser reenviado em retentativas).
-Códigos de erro
-Código	Significado
-401	Chave de API ausente ou inválida (header Bearer / X-API-Key).
-403	Aplicação inativa ou IP não permitido.
-404	Recurso não encontrado (ex.: pedido que não pertence à aplicação).
-422	Validação falhou (dados inválidos, produto não encontrado, etc.). O body pode incluir message e detalhes.
-429	Muitas requisições (rate limit). Tente novamente após o tempo indicado nos headers de resposta.
-500	Erro interno do servidor.
-Respostas de erro costumam ser JSON, por exemplo: { "message": "Missing or invalid API key." }
+---
 
-Boas práticas gerais
-Idempotency key: use em todas as criações de pagamento (PIX, cartão, boleto) para evitar cobranças duplicadas em retentativas.
-Webhook: configure webhook_url e webhook_secret; valide sempre o header X-Getfy-Signature quando o secret estiver definido.
-API key: nunca inclua a API key em código frontend ou em repositórios; use variáveis de ambiente no backend.
-HTTPS: em produção, utilize apenas HTTPS.
-Tratamento de erros: trate 4xx e 5xx e implemente retry com backoff para 5xx e 429 (respeitando o rate limit).
-Logs: não registre a API key em logs; use apenas identificadores da aplicação (ex.: id ou nome).
-Resumo de endpoints
-Método	Endpoint	Descrição
-POST	/api/v1/checkout/sessions	Criar sessão Checkout Pro (retorna link)
-POST	/api/v1/payments/pix	Criar pagamento PIX (transparente)
-POST	/api/v1/payments/card	Criar pagamento com cartão
-POST	/api/v1/payments/boleto	Criar pagamento com boleto
-GET	/api/v1/payments/{order_id}	Consultar status do pedido
-Base URL: a raiz da sua instalação Getfy. Todas as rotas da API estão sob o prefixo /api/v1.
+## Regra importante: amount vs product_id
+
+| Cenário | Comportamento |
+|---------|---------------|
+| **Sem** `product_id` | Valor cobrado = `amount` enviado no body |
+| **Com** `product_id` | Valor = preço do produto, oferta ou plano — **`amount` do body é ignorado** |
+
+---
+
+## PIX — criar cobrança
+
+### Exemplo curl
+
+```bash
+curl -X POST 'https://seudominio.com/api/v1/payments/pix' \
+  -H 'Content-Type: application/json' \
+  -H 'X-Public-Key: gpk_sua_public_key' \
+  -H 'X-Secret-Key: gsk_sua_secret_key' \
+  -H 'Idempotency-Key: pedido-123-pix' \
+  -d '{
+    "customer": {
+      "email": "cliente@exemplo.com",
+      "name": "Cliente Teste",
+      "cpf": "52998224725"
+    },
+    "amount": 97.90,
+    "currency": "BRL",
+    "partner_checkout_url": "https://loja.exemplo.com/checkout/ped-1001",
+    "metadata": { "external_id": "ped-1001" }
+  }'
+```
+
+### Resposta 201 (modo síncrono — padrão)
+
+```json
+{
+  "order_id": 456,
+  "transaction_id": "tx-abc123",
+  "qrcode": "data:image/png;base64,...",
+  "copy_paste": "00020126580014br.gov.bcb.pix...",
+  "status": "pending"
+}
+```
+
+Por padrão, `POST /payments/pix` responde **201** com QR e copia e cola na mesma requisição.
+
+### Modo assíncrono (opcional)
+
+Para alto volume, envie o header `X-Async: true` e receba **202**:
+
+```json
+{
+  "order_id": 456,
+  "status": "processing"
+}
+```
+
+Consulte `GET /payments/{order_id}` ou aguarde o webhook `pix.generated`.
+
+### Campos do request
+
+| Campo | Obrigatório | Descrição |
+|-------|-------------|-----------|
+| `customer.email` | Sim | E-mail do comprador |
+| `customer.name` | Não | Nome (default: e-mail) |
+| `customer.cpf` | Não | CPF |
+| `amount` | Sim* | Valor em reais (*ignorado se `product_id` definir preço). Deve ser ≥ ticket mínimo da API PIX configurado pelo admin |
+| `currency` | Não | BRL (default), USD ou EUR |
+| `product_id` | Não | UUID do produto no catálogo |
+| `metadata` | Não | Objeto livre — devolvido no webhook |
+| `partner_checkout_url` | Não | URL HTTPS do checkout no site do parceiro (recomendado em produção) |
+| `idempotency_key` | Não | Ou header `Idempotency-Key` (máx. 128 chars) |
+
+### Ticket mínimo (API PIX)
+
+O administrador da plataforma define o **ticket mínimo** em **Plataforma → Financeiro → Limites**. Cobranças via API REST e checkout hospedado da API devem ter valor final (incluindo frete, quando aplicável) **igual ou superior** a esse mínimo. O ticket mínimo pode variar por conta se o admin configurar override individual em **Infoprodutores → Editar**.
+
+- Sem `product_id`: o campo `amount` do request deve respeitar o mínimo.
+- Com `product_id`: o preço efetivo do produto/oferta/plano (e frete) também deve respeitar o mínimo — o `amount` do body continua sendo ignorado para cálculo, mas o valor cobrado é validado.
+- Em violação: HTTP **422** com mensagem indicando o valor mínimo (ex.: *"Valor mínimo para cobrança via API PIX é R$ 5,00."*).
+
+---
+
+## Consultar pagamentos
+
+| Método | Endpoint | Descrição |
+|--------|----------|-----------|
+| GET | `/api/v1/payments` | Lista pedidos da integração (query: `status`, `per_page`) |
+| GET | `/api/v1/payments/{order_id}` | Status de um pedido |
+
+Retorna pedidos **somente da mesma aplicação** autenticada.
+
+Status comuns: `pending`, `processing`, `completed`, `cancelled`, `refunded`, `disputed`.
+
+---
+
+## Cancelar e estornar PIX
+
+| Método | Endpoint | Descrição |
+|--------|----------|-----------|
+| POST | `/api/v1/pix/{order_id}/cancel` | Cancelar PIX pendente |
+| POST | `/api/v1/pix/{order_id}/refund` | Estornar PIX pago ou em disputa |
+
+---
+
+## Saques
+
+### Consultar saldo
+
+`GET /api/v1/balance`
+
+```json
+{
+  "available_pix": 1500.00,
+  "available_card": 0.00,
+  "available_boleto": 0.00,
+  "available_balance": 1500.00,
+  "pending_balance": 320.50
+}
+```
+
+Valores em `pending_balance` ainda não estão disponíveis para saque.
+
+### Configurar / validar destino PIX
+
+`PUT /api/v1/payout-destination`
+
+```json
+{
+  "pix_key": "cliente@exemplo.com",
+  "pix_key_type": "email",
+  "key_owner_document": "52998224725"
+}
+```
+
+| Campo | Obrigatório | Descrição |
+|-------|-------------|-----------|
+| `pix_key` | Sim | Chave PIX a validar |
+| `pix_key_type` | Sim | `cpf`, `cnpj`, `email`, `phone`, `evp` ou `random` (alias de chave aleatória) |
+| `key_owner_document` | Condicional | CPF ou CNPJ do titular (somente dígitos) |
+
+**Regras por tipo de chave:**
+
+| `pix_key_type` | `key_owner_document` |
+|----------------|----------------------|
+| `email`, `phone`, `evp`, `random` | **Obrigatório** — CPF ou CNPJ do titular real |
+| `cpf`, `cnpj` | Opcional — se omitido, usamos os dígitos da própria chave |
+
+Este endpoint **apenas valida** o destino e **não altera** a chave master do infoprodutor (painel Financeiro).
+A resposta inclui `persisted_to_merchant: false` e `key_owner_document_masked` (últimos 4 dígitos).
+
+### Solicitar saque
+
+`POST /api/v1/withdrawals`
+
+```json
+{
+  "amount": 500.00,
+  "bucket": "pix",
+  "notes": "Saque semanal",
+  "pix_key": "cliente@exemplo.com",
+  "pix_key_type": "email",
+  "key_owner_document": "52998224725"
+}
+```
+
+| Campo | Obrigatório | Descrição |
+|-------|-------------|-----------|
+| `amount` | Sim | Valor bruto em reais |
+| `pix_key` | Sim | Chave PIX de recebimento **deste** saque (gravada na transação) |
+| `pix_key_type` | Sim | `cpf`, `cnpj`, `email`, `phone`, `evp` ou `random` |
+| `key_owner_document` | Condicional | CPF/CNPJ do titular — obrigatório para email/phone/evp/random |
+| `bucket` | Não | `pix` (padrão), `card` ou `boleto` — carteira de origem |
+| `notes` | Não | Observação opcional |
+| `idempotency_key` | Não* | Ou header `Idempotency-Key` — **recomendado** para evitar duplicatas |
+
+A chave informada fica no saque (`payout_meta.destination_snapshot`) e **não sobrescreve** a chave master do infoprodutor.
+
+**Resposta 201:**
+
+```json
+{
+  "withdrawal_id": 12,
+  "status": "pending",
+  "amount": 500.00,
+  "fee_amount": 5.00,
+  "net_amount": 495.00,
+  "bucket": "pix",
+  "pix_key_type": "email",
+  "pix_key_masked": "****************.com"
+}
+```
+
+### Listar e consultar saques
+
+| Método | Endpoint | Descrição |
+|--------|----------|-----------|
+| GET | `/api/v1/withdrawals` | Lista saques (query: `status`, `per_page`) |
+| GET | `/api/v1/withdrawals/{id}` | Detalhe de um saque |
+
+---
+
+## Resumo dos endpoints
+
+| Método | Endpoint | Descrição |
+|--------|----------|-----------|
+| POST | /api/v1/payments/pix | Criar cobrança PIX |
+| GET | /api/v1/payments | Listar pedidos |
+| GET | /api/v1/payments/{order_id} | Consultar status do pedido |
+| POST | /api/v1/pix/{order_id}/cancel | Cancelar PIX pendente |
+| POST | /api/v1/pix/{order_id}/refund | Estornar PIX |
+| GET | /api/v1/balance | Consultar saldo |
+| POST | /api/v1/withdrawals | Solicitar saque |
+| GET | /api/v1/withdrawals | Listar saques |
+| GET | /api/v1/withdrawals/{id} | Consultar saque |
+| PUT | /api/v1/payout-destination | Validar chave PIX (não altera chave master) |
+| GET | /api/v1/webhook | Consultar configuração do webhook |
+| PUT | /api/v1/webhook | Provisionar/atualizar webhook (parceiros) |
+| POST | /api/v1/webhook/rotate-secret | Rotacionar secret do webhook |
+
+---
+
+## Webhooks
+
+### Provisionamento via API (recomendado para parceiros)
+
+Use `PUT /api/v1/webhook` ao conectar as credenciais do vendedor — veja seção **Integração para parceiros** acima.
+
+### Entrega de eventos
+
+Configure `webhook_url` na integração (via API ou painel). Cada entrega inclui headers:
+
+- `X-Webhook-Signature` — HMAC-SHA256 do body bruto
+- `X-Webhook-Id` — ID único do evento (use para deduplicar)
+- `X-Webhook-Timestamp` — Unix timestamp do envio
+
+Em caso de falha na entrega (endpoint offline ou não-2xx), reenviamos automaticamente com backoff exponencial. Responda **HTTP 2xx** rapidamente.
+
+### Eventos de pagamento
+
+| Evento | Descrição |
+|--------|-----------|
+| `order.pending` | Pedido criado; aguardando pagamento |
+| `pix.generated` | QR e copia e cola disponíveis (útil no modo assíncrono) |
+| `order.completed` | Pagamento confirmado — libere produto/serviço |
+| `order.refunded` | Estorno concluído |
+| `order.cancelled` | Pedido cancelado |
+| `order.expired` | PIX expirou sem pagamento |
+
+**Payload exemplo (`order.completed`):**
+
+```json
+{
+  "event": "order.completed",
+  "event_id": "550e8400-e29b-41d4-a716-446655440000",
+  "order_id": 456,
+  "amount": 97.90,
+  "status": "completed",
+  "transaction_id": "tx-abc123",
+  "payment_method": "pix",
+  "paid_at": "2026-06-13T14:05:12.000000Z",
+  "email": "cliente@exemplo.com",
+  "metadata": { "external_id": "ped-1001", "source": "api" },
+  "customer": { "name": "Cliente", "email": "cliente@exemplo.com", "document": "52998224725" },
+  "created_at": "2026-06-13T14:00:00.000000Z",
+  "updated_at": "2026-06-13T14:05:12.000000Z"
+}
+```
+
+### Eventos de saque
+
+| Evento | Descrição |
+|--------|-----------|
+| `withdrawal.created` | Saque solicitado; valor reservado |
+| `withdrawal.processing` | Saque enviado para processamento |
+| `withdrawal.completed` | Saque concluído |
+| `withdrawal.failed` | Falha; saldo restaurado |
+| `withdrawal.rejected` | Rejeitado; saldo restaurado |
+| `withdrawal.cancelled` | Cancelado antes da conclusão |
+
+**Assinatura:** compare `X-Webhook-Signature` com HMAC-SHA256 do body bruto (string JSON exata) usando o webhook secret da integração.
+
+---
+
+## Confirmação de pagamento e fallbacks
+
+Não confie em um único canal para saber se o PIX foi pago. Implemente **três camadas** complementares:
+
+| Camada | Onde roda | Função |
+|--------|-----------|--------|
+| **1. Webhook** | Seu backend | Canal **primário** — `order.completed` com HMAC; responda 2xx rápido; idempotente por `event_id` |
+| **2. Reconciliação** | Job/cron no servidor | **Fallback obrigatório** — `GET /payments` a cada **60–120 s** por **6–12 h**; mesmo pipeline do webhook |
+| **3. Polling na UI** | Browser (checkout) | Apenas UX — **não** libere produto só com polling do frontend |
+
+### Fluxo
+
+```
+POST /payments/pix → salvar order_id no pedido interno
+       ↓
+Webhook order.completed (HMAC) → marcar pago + liberar produto (idempotente)
+       ↓ (se falhar / atrasar)
+Job reconciliação (1–2 min) → GET /payments → mesmo handler idempotente
+       ↓ (paralelo, só UX)
+Polling no checkout (opcional) → atualiza tela
+```
+
+### Reconciliação em background
+
+Mesmo com webhook configurado, rode um **job no servidor** (scheduler, queue ou cron):
+
+- **Individual:** `GET /api/v1/payments/{order_id}`
+- **Em lote:** `GET /api/v1/payments?status=pending&per_page=100`
+- **Condição:** `status === "completed"` → chame o mesmo handler idempotente do webhook
+
+Polling **somente na tela do QR** não cobre o caso em que o comprador paga e fecha a aba.
+
+### Checklist
+
+- Webhook provisionado (`PUT /api/v1/webhook`) com URL HTTPS
+- `webhook_secret` armazenado com segurança
+- Validação HMAC em todo POST recebido
+- Deduplicação por `event_id`
+- Job de reconciliação em produção (60–120 s)
+- Mesmo handler idempotente para webhook e reconciliação
+- Secret key apenas no servidor
+
+Pacote completo para IAs: `/docs/api-pagamentos/llm/full.md`
+
+---
+
+## Idempotência
+
+Use `idempotency_key` no body ou header `Idempotency-Key` (máx. 128 caracteres). A mesma chave devolve a resposta original sem duplicar a operação. Recomendado em criações de pagamento e saques.
+
+---
+
+## Erros frequentes
+
+| HTTP | Mensagem | Ação |
+|------|----------|------|
+| 401 | Missing or invalid API key. | Envie `X-Public-Key` + `X-Secret-Key` |
+| 401 | Invalid API key. | Verifique o par em `/aplicacoes-api` |
+| 403 | API application is disabled. | Ative a integração |
+| 403 | IP not allowed. | Adicione IP ou deixe lista vazia |
+| 403 | Insufficient API key permissions. | Use chave principal ou chave com scope correto |
+| 403 | API PIX disabled for this tenant. | Habilite API PIX |
+| 404 | Pedido não encontrado. | Use `order_id` da mesma app |
+| 422 | Não foi possível gerar o PIX. | Verifique amount, customer e status da conta |
+| 422 | Valor mínimo para cobrança via API PIX… | `amount` ou preço do produto abaixo do ticket mínimo configurado |
+| 429 | Too Many Attempts. | Aguarde; use idempotency em retentativas |
+
+---
+
+## Boas práticas
+
+- Chame a API **apenas do servidor**; não exponha a Secret no frontend
+- Use **HTTPS** e **Idempotency-Key** em pagamentos e saques
+- Use `metadata` para correlacionar com o pedido no seu sistema
+- Valide assinatura do webhook em produção
+- Deduplique webhooks por `event_id`
+- Implemente job de reconciliação (60–120 s) como fallback do webhook
+- Informe destino PIX em cada `POST /withdrawals` (`pix_key`, `pix_key_type`, `key_owner_document` quando exigido) — a chave master do infoprodutor não é alterada
+
+Detalhes completos, exemplos Node.js e tabelas: `/docs/api-pagamentos`

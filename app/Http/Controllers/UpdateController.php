@@ -368,11 +368,32 @@ class UpdateController extends Controller
         ];
     }
 
+    private static function stackerRemoteUpdatesEnabled(): bool
+    {
+        if (filter_var(config('getfy.stacker.license_disabled', false), FILTER_VALIDATE_BOOLEAN)) {
+            return false;
+        }
+
+        return trim((string) config('getfy.stacker.agent_token', '')) !== ''
+            && trim((string) config('getfy.stacker.api_url', '')) !== '';
+    }
+
     /**
      * Check for updates (GitHub Releases API, fallback to Tags API).
      */
     public function check(): JsonResponse
     {
+        if (self::stackerRemoteUpdatesEnabled()) {
+            return response()->json([
+                'current' => self::readInstalledVersion(),
+                'latest' => null,
+                'available' => false,
+                'error' => null,
+                'changelog_remote' => 'Atualizações remotas são gerenciadas pelo agente Stacker.',
+                'stacker_managed' => true,
+            ]);
+        }
+
         $current = self::readInstalledVersion();
         $response = [
             'current' => $current,
@@ -534,6 +555,15 @@ class UpdateController extends Controller
      */
     public function run(Request $request): JsonResponse|RedirectResponse
     {
+        if (self::stackerRemoteUpdatesEnabled()) {
+            $message = 'Atualizações são aplicadas automaticamente pelo agente Stacker. Use o portal Stacker para enfileirar updates.';
+            if ($request->wantsJson()) {
+                return response()->json(['success' => false, 'message' => $message, 'stacker_managed' => true], 403);
+            }
+
+            return redirect()->back()->with('info', $message);
+        }
+
         if (! config('getfy.updates_enabled', true)) {
             if ($request->wantsJson()) {
                 return response()->json(['success' => false, 'message' => 'Atualizações pela interface estão desativadas.'], 403);
@@ -605,7 +635,7 @@ class UpdateController extends Controller
         $hasGitRepo = is_dir($basePath . DIRECTORY_SEPARATOR . '.git');
 
         if ($hasGitRepo && self::canRunProcess()) {
-            $runStep($git . ' config user.email "gatewaylab-update@localhost" && ' . $git . ' config user.name "gatewayLab Update"', 'Git config');
+            $runStep($git . ' config user.email "getfy-update@localhost" && ' . $git . ' config user.name "Getfy Update"', 'Git config');
             $runStep($git . ' stash push -m "getfy-update"', 'Git stash');
 
             if (! $runStep($git . " fetch origin && " . $git . " pull origin {$branch}", 'Git pull')) {

@@ -2,10 +2,13 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Controllers\Concerns\LogsSellerActivity;
 use App\Models\Coupon;
 use App\Models\Product;
 use App\Models\ProductOffer;
+use App\Services\SellerActivityLogService;
 use App\Services\StorageService;
+use App\Support\CheckoutConfigUrlSanitizer;
 use App\Models\SubscriptionPlan;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
@@ -17,6 +20,7 @@ use Symfony\Component\HttpFoundation\Response as HttpResponse;
 
 class CheckoutConfigController extends Controller
 {
+    use LogsSellerActivity;
     public function edit(Request $request, Product $produto): Response
     {
         $this->authorizeProduct($produto);
@@ -103,6 +107,8 @@ class CheckoutConfigController extends Controller
 
         unset($merged['advanced']);
 
+        $merged = CheckoutConfigUrlSanitizer::sanitize($merged);
+
         // Downsell só pode estar ativo se upsell estiver ativo
         if (!($merged['upsell']['enabled'] ?? false)) {
             $merged['downsell']['enabled'] = false;
@@ -115,6 +121,12 @@ class CheckoutConfigController extends Controller
                 unset($merged[$inheritKey]);
             }
         }
+
+        $this->logSellerActivity(SellerActivityLogService::PRODUCT_CHECKOUT_UPDATED, $produto, [
+            'name' => $produto->name,
+            'offer_id' => $offerId,
+            'plan_id' => $planId,
+        ]);
 
         if ($offerId) {
             $offer->update(['checkout_config' => $merged]);
@@ -140,7 +152,7 @@ class CheckoutConfigController extends Controller
         $this->authorizeProduct($produto);
 
         $request->validate([
-            'image' => ['required', 'image', 'max:5120'],
+            'image' => ['required', 'file', 'mimes:jpg,jpeg,png,webp,gif', 'max:5120'],
         ]);
 
         $storage = app(StorageService::class);

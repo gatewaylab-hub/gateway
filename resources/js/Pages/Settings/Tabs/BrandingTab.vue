@@ -1,8 +1,9 @@
 <script setup>
-import { ref, reactive, onMounted } from 'vue';
+import { ref, reactive, onMounted, watch } from 'vue';
 import { router } from '@inertiajs/vue3';
 import Button from '@/components/ui/Button.vue';
 import { Upload, Trash2, Copy } from 'lucide-vue-next';
+import { normalizeThemePrimary } from '@/lib/emailCampaignBody';
 
 const loading = ref(true);
 const saving = ref(false);
@@ -17,7 +18,11 @@ const form = reactive({
     app_logo_dark: '',
     app_logo_icon: '',
     app_logo_icon_dark: '',
+    pwa_nav_logo: '',
+    pwa_nav_logo_dark: '',
     login_hero_image: '',
+    login_hero_tagline: '',
+    login_hero_subtagline: '',
     favicon_url: '',
 });
 
@@ -32,10 +37,9 @@ function api(path) {
 }
 
 const fieldLabels = {
-    app_logo: 'Logo (tema claro)',
-    app_logo_dark: 'Logo (tema escuro)',
-    app_logo_icon: 'Logo colapsada (claro)',
-    app_logo_icon_dark: 'Logo colapsada (escuro)',
+    app_logo: 'Logo (header da home e painéis)',
+    app_logo_icon: 'Ícone / logo colapsada (sidebar)',
+    pwa_nav_logo: 'PWA — botão central do menu',
     login_hero_image: 'Imagem da tela de login',
     favicon_url: 'Favicon (aba do navegador)',
 };
@@ -124,14 +128,26 @@ onMounted(() => {
     load();
 });
 
+watch(
+    () => form.theme_primary,
+    (color) => {
+        const normalized = normalizeThemePrimary(color, null);
+        if (normalized && typeof document !== 'undefined') {
+            document.documentElement.style.setProperty('--color-primary', normalized);
+        }
+    },
+    { immediate: true },
+);
+
 const imageFields = [
     'app_logo',
-    'app_logo_dark',
     'app_logo_icon',
-    'app_logo_icon_dark',
+    'pwa_nav_logo',
     'login_hero_image',
     'favicon_url',
 ];
+
+const pwaNavHint = 'Recomendado: PNG ou SVG quadrado (ex.: 96×96 px). Se vazio, usa o ícone da sidebar.';
 </script>
 
 <template>
@@ -139,7 +155,7 @@ const imageFields = [
         <section class="overflow-hidden rounded-xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-700 dark:bg-zinc-800/50">
             <h2 class="text-base font-semibold text-zinc-900 dark:text-white">Personalização</h2>
             <p class="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-                Ajuste nome da aplicação, cores e imagens. Valores vazios voltam ao padrão da plataforma ou ao registro global (login público).
+                Nome, cor primária, logo e ícone usados na home, checkout, login e painéis. Valores vazios voltam ao padrão da plataforma.
             </p>
 
             <p v-if="error" class="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200">
@@ -158,6 +174,7 @@ const imageFields = [
                             class="mt-1.5 block w-full rounded-xl border border-zinc-300 bg-white px-4 py-2.5 text-zinc-900 dark:border-zinc-600 dark:bg-zinc-900 dark:text-white"
                             placeholder="Ex.: Minha marca"
                         />
+                        <p class="mt-1 text-xs text-zinc-500">Aparece no header da home, checkout, login e painéis.</p>
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-zinc-700 dark:text-zinc-300">Cor primária</label>
@@ -166,9 +183,36 @@ const imageFields = [
                                 v-model="form.theme_primary"
                                 type="text"
                                 class="block min-w-0 flex-1 rounded-xl border border-zinc-300 bg-white px-4 py-2.5 font-mono text-sm text-zinc-900 dark:border-zinc-600 dark:bg-zinc-900 dark:text-white"
-                                placeholder="#00cc00"
+                                placeholder="#0050fc"
                             />
                             <input v-model="form.theme_primary" type="color" class="h-11 w-14 cursor-pointer rounded-lg border border-zinc-300 dark:border-zinc-600" />
+                        </div>
+                    </div>
+                </div>
+
+                <div class="space-y-4">
+                    <h3 class="text-sm font-semibold text-zinc-800 dark:text-zinc-200">Textos do login (template Spotlight)</h3>
+                    <p class="text-xs text-zinc-500 dark:text-zinc-400">
+                        Exibidos no painel direito da tela de login no desktop. Vazio usa o padrão da plataforma.
+                    </p>
+                    <div class="grid gap-4">
+                        <div>
+                            <label class="block text-sm font-medium text-zinc-700 dark:text-zinc-300">Título principal</label>
+                            <input
+                                v-model="form.login_hero_tagline"
+                                type="text"
+                                class="mt-1.5 block w-full rounded-xl border border-zinc-300 bg-white px-4 py-2.5 text-zinc-900 dark:border-zinc-600 dark:bg-zinc-900 dark:text-white"
+                                placeholder="Sua plataforma para vender mais."
+                            />
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-zinc-700 dark:text-zinc-300">Subtítulo</label>
+                            <input
+                                v-model="form.login_hero_subtagline"
+                                type="text"
+                                class="mt-1.5 block w-full rounded-xl border border-zinc-300 bg-white px-4 py-2.5 text-zinc-900 dark:border-zinc-600 dark:bg-zinc-900 dark:text-white"
+                                placeholder="Feita para quem escala de verdade."
+                            />
                         </div>
                     </div>
                 </div>
@@ -202,6 +246,12 @@ const imageFields = [
                                 <input type="file" accept="image/*" class="hidden" @change="(e) => onFileChange(e, field)" />
                             </label>
                             <p v-if="uploading && uploadField === field" class="mt-2 text-xs text-zinc-500">Enviando...</p>
+                            <p
+                                v-if="field === 'pwa_nav_logo'"
+                                class="mt-2 text-xs text-zinc-500 dark:text-zinc-400"
+                            >
+                                {{ pwaNavHint }}
+                            </p>
                         </div>
                     </div>
                 </div>

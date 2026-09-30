@@ -2,9 +2,6 @@
     RewriteEngine On
     RewriteBase /
 
-    # Raiz (/) – redireciona diretamente para /login (evita 404)
-    RewriteRule ^/?$ /login [R=302,L]
-
     # /storage/* – servir de public/storage/ (link simbólico do Laravel)
     RewriteRule ^storage/(.*)$ public/storage/$1 [L]
 

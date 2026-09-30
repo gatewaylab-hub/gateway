@@ -12,16 +12,29 @@ return [
             'slug' => 'cajupay',
             'name' => 'CajuPay',
             'image' => 'images/gateways/cajupay.png',
-            'methods' => ['pix'],
+            'methods' => ['pix', 'card'],
             'scope' => 'national',
             'country' => 'br',
             'country_name' => 'Brasil',
             'country_flag' => 'brasil.png',
             'signup_url' => 'https://cajupay.com.br',
+            'support_contacts' => [
+                [
+                    'name' => '55 11 93621-2771',
+                    'role' => 'Suporte',
+                    'whatsapp' => '5511936212771',
+                ],
+                [
+                    'name' => '55 71 92750-7071',
+                    'role' => 'Gerente de contas',
+                    'whatsapp' => '5571927507071',
+                ],
+            ],
             'driver' => \App\Gateways\CajuPay\CajuPayDriver::class,
             'credential_keys' => [
                 ['key' => 'public_key', 'label' => 'Chave pública', 'type' => 'text'],
                 ['key' => 'secret_key', 'label' => 'Chave secreta', 'type' => 'password'],
+                ['key' => 'checkout_webhook_signing_secret', 'label' => 'Signing secret do webhook (cwhsec_… — checkout cartão/wallets no painel CajuPay)', 'type' => 'password', 'optional' => true],
                 ['key' => 'cajupay_payout_min_brl', 'label' => 'Mínimo líquido de payout (R$)', 'type' => 'text', 'optional' => true],
                 ['key' => 'cajupay_admin_fee_pix_brl', 'label' => 'Taxa PIX paga à CajuPay (R$)', 'type' => 'text', 'optional' => true],
                 ['key' => 'cajupay_admin_fee_payout_brl', 'label' => 'Taxa de saque paga à CajuPay (R$)', 'type' => 'text', 'optional' => true],
@@ -45,6 +58,36 @@ return [
                 ['key' => 'spacepag_admin_fee_pix_brl', 'label' => 'Taxa PIX paga à Spacepag (R$)', 'type' => 'text', 'optional' => true],
                 ['key' => 'spacepag_admin_fee_payout_brl', 'label' => 'Taxa de saque paga à Spacepag (R$)', 'type' => 'text', 'optional' => true],
                 ['key' => 'webhook_postback_base_url', 'label' => 'URL base pública para webhooks (HTTPS, sem barra final)', 'type' => 'text', 'optional' => true],
+            ],
+        ],
+        'bspay' => [
+            'slug' => 'bspay',
+            'name' => 'BSPay',
+            'image' => 'images/gateways/bspay.png',
+            'methods' => ['pix'],
+            'scope' => 'national',
+            'country' => 'br',
+            'country_name' => 'Brasil, México',
+            'country_flag' => 'brasil.png',
+            'countries' => [
+                ['flag' => 'brasil.png', 'name' => 'Brasil'],
+                ['flag' => 'mexico.png', 'name' => 'México'],
+            ],
+            'signup_url' => 'https://app.bspay.co/register/216dc66c430a1958147578a14e73cda4ba903873d1ff5e962c0f20b7be2184be',
+            'support_contacts' => [
+                [
+                    'name' => 'Bruno',
+                    'role' => 'Gerente de contas',
+                    'whatsapp' => '5547920034513',
+                ],
+            ],
+            'driver' => \App\Gateways\Bspay\BspayDriver::class,
+            'credential_keys' => [
+                ['key' => 'client_id', 'label' => 'Client ID', 'type' => 'text'],
+                ['key' => 'client_secret', 'label' => 'Client Secret', 'type' => 'password'],
+                ['key' => 'bspay_payout_min_brl', 'label' => 'Mínimo líquido de payout (R$)', 'type' => 'text', 'optional' => true],
+                ['key' => 'bspay_admin_fee_pix_brl', 'label' => 'Taxa PIX paga à BSPay (R$)', 'type' => 'text', 'optional' => true],
+                ['key' => 'bspay_admin_fee_payout_brl', 'label' => 'Taxa de saque paga à BSPay (R$)', 'type' => 'text', 'optional' => true],
             ],
         ],
         'woovi' => [
@@ -106,6 +149,44 @@ return [
                 ['key' => 'link_enabled', 'label' => 'Habilitar Stripe Link no checkout', 'type' => 'boolean'],
             ],
         ],
+        'paypal' => [
+            'slug' => 'paypal',
+            'name' => 'PayPal',
+            'image' => 'images/gateways/paypal.png',
+            'methods' => ['paypal'],
+            'scope' => 'international',
+            'country_flag' => 'global.png',
+            'country_name' => 'Global',
+            'signup_url' => 'https://developer.paypal.com/dashboard/',
+            'driver' => \App\Gateways\PayPal\PayPalDriver::class,
+            'checkout_payload_keys' => ['client_id'],
+            'credential_keys' => [
+                [
+                    'key' => 'client_id',
+                    'label' => 'Client ID',
+                    'type' => 'text',
+                    'hint' => 'Client ID do app REST no PayPal Developer Dashboard (sandbox ou live).',
+                ],
+                [
+                    'key' => 'client_secret',
+                    'label' => 'Client Secret',
+                    'type' => 'password',
+                    'hint' => 'Client Secret do mesmo app. Nunca é exposto no checkout.',
+                ],
+                [
+                    'key' => 'webhook_id',
+                    'label' => 'Webhook ID',
+                    'type' => 'text',
+                    'hint' => 'Cadastre a URL do webhook no PayPal Developer Dashboard e cole aqui o Webhook ID. Eventos: PAYMENT.CAPTURE.COMPLETED, PAYMENT.CAPTURE.DENIED, PAYMENT.CAPTURE.REFUNDED.',
+                ],
+                [
+                    'key' => 'sandbox',
+                    'label' => 'Usar ambiente Sandbox',
+                    'type' => 'boolean',
+                    'hint' => 'Ative com credenciais sandbox; desative em produção com Client ID/Secret live.',
+                ],
+            ],
+        ],
         'mercadopago' => [
             'slug' => 'mercadopago',
             'name' => 'Mercado Pago',
@@ -161,6 +242,7 @@ return [
             'driver' => \App\Gateways\Asaas\AsaasDriver::class,
             'credential_keys' => [
                 ['key' => 'api_key', 'label' => 'API Key', 'type' => 'password'],
+                ['key' => 'webhook_secret', 'label' => 'Token de autenticação do webhook (authToken do painel Asaas)', 'type' => 'password'],
                 ['key' => 'sandbox', 'label' => 'Usar ambiente de homologação (sandbox)', 'type' => 'boolean'],
             ],
         ],
@@ -182,6 +264,165 @@ return [
                 ['key' => 'sandbox', 'label' => 'Sandbox', 'type' => 'boolean'],
             ],
         ],
+        'linaopenx' => [
+            'slug' => 'linaopenx',
+            'name' => 'Lina OpenX',
+            'image' => 'images/gateways/lina.jpg',
+            /** Sem o plugin `linaopenx` instalado/ativo: card no Financeiro + modal; config e checkout bloqueados. */
+            'requires_plugin' => 'linaopenx',
+            'methods' => ['open_finance'],
+            'scope' => 'national',
+            'country' => 'br',
+            'country_name' => 'Brasil',
+            'country_flag' => 'brasil.png',
+            'signup_url' => 'https://linaopenx.com.br',
+            'driver' => \App\Gateways\LinaOpenx\LinaOpenxDriver::class,
+            'credential_keys' => [
+                ['key' => 'client_id', 'label' => 'Client ID (OAuth)', 'type' => 'text'],
+                ['key' => 'client_secret', 'label' => 'Client Secret (OAuth)', 'type' => 'password'],
+                ['key' => 'sandbox', 'label' => 'Homologação (HML): só se as credenciais forem do IAM hml.linaob.com.br', 'type' => 'boolean'],
+                ['key' => 'sub_tenant_id', 'label' => 'Sub-tenant ID (opcional, ex.: newpay ou UUID)', 'type' => 'text', 'optional' => true],
+                ['key' => 'token_url', 'label' => 'URL do token OAuth (opcional)', 'type' => 'text', 'optional' => true],
+                ['key' => 'api_base_url', 'label' => 'URL base da API Embedded Payment Manager (opcional)', 'type' => 'text', 'optional' => true],
+                ['key' => 'webhook_secret', 'label' => 'Segredo do webhook (HMAC, opcional — painel Lina)', 'type' => 'password', 'optional' => true],
+                // Credor (recebedor): obrigatório na API white-label Lina para criar pagamento
+                ['key' => 'creditor_name', 'label' => 'Credor: nome (obrigatório para checkout Open Finance)', 'type' => 'text'],
+                ['key' => 'creditor_cpf_cnpj', 'label' => 'Credor: CPF/CNPJ (obrigatório)', 'type' => 'text'],
+                ['key' => 'creditor_ispb', 'label' => 'Credor: ISPB do banco (8 dígitos, obrigatório)', 'type' => 'text'],
+                ['key' => 'creditor_issuer', 'label' => 'Credor: agência (1 a 4 dígitos, obrigatório)', 'type' => 'text'],
+                ['key' => 'creditor_number', 'label' => 'Credor: número da conta (sem dígito ou com, só números, obrigatório)', 'type' => 'text'],
+                ['key' => 'creditor_account_type', 'label' => 'Credor: tipo de conta: CACC (corrente), SVGS (poupança) ou TRAN', 'type' => 'text', 'optional' => true],
+            ],
+        ],
+         /*
+         | Versell — uma adquirente na UI; credenciais internas cash_in / cash_out.
+         | Cash In (PIX cob + webhook) e Cash Out (dict + transfer/cashout).
+         */
+        'versell' => [
+            'slug' => 'versell',
+            'name' => 'Versell',
+            'image' => 'images/gateways/versell-logo.svg',
+            'methods' => ['pix', 'pix_auto'],
+            'scope' => 'national',
+            'country' => 'br',
+            'country_name' => 'Brasil',
+            'country_flag' => 'brasil.png',
+            'signup_url' => 'https://finance.versell.com.br',
+            'support_contacts' => [
+                [
+                    'name' => 'Atendimento',
+                    'role' => '',
+                    'whatsapp' => '556298498261',
+                ],
+            ],
+            'driver' => \App\Gateways\Versell\VersellDriver::class,
+            'credential_keys' => [
+                ['key' => 'cash_in_client_id', 'label' => 'Client ID', 'type' => 'text', 'group' => 'cash_in', 'group_label' => 'Versell — Cash In'],
+                ['key' => 'cash_in_client_secret', 'label' => 'Client Secret', 'type' => 'password', 'group' => 'cash_in', 'group_label' => 'Versell — Cash In', 'optional' => true],
+                ['key' => 'cash_in_pix_key', 'label' => 'Chave PIX', 'type' => 'text', 'group' => 'cash_in', 'group_label' => 'Versell — Cash In'],
+                ['key' => 'cash_in_certificate', 'label' => 'Certificado CRT', 'type' => 'file', 'accept' => '.crt,.pem', 'group' => 'cash_in', 'group_label' => 'Versell — Cash In', 'file_kind' => 'certificate'],
+                ['key' => 'cash_in_private_key', 'label' => 'Private Key KEY', 'type' => 'file', 'accept' => '.key,.pem', 'group' => 'cash_in', 'group_label' => 'Versell — Cash In', 'file_kind' => 'private_key'],
+                ['key' => 'cash_out_client_id', 'label' => 'Client ID', 'type' => 'text', 'group' => 'cash_out', 'group_label' => 'Versell — Cash Out'],
+                ['key' => 'cash_out_client_secret', 'label' => 'Client Secret', 'type' => 'password', 'group' => 'cash_out', 'group_label' => 'Versell — Cash Out', 'optional' => true],
+                ['key' => 'cash_out_certificate', 'label' => 'Certificado CRT', 'type' => 'file', 'accept' => '.crt,.pem', 'group' => 'cash_out', 'group_label' => 'Versell — Cash Out', 'file_kind' => 'certificate'],
+                ['key' => 'cash_out_private_key', 'label' => 'Private Key KEY', 'type' => 'file', 'accept' => '.key,.pem', 'group' => 'cash_out', 'group_label' => 'Versell — Cash Out', 'file_kind' => 'private_key'],
+                ['key' => 'versell_payout_min_brl', 'label' => 'Mínimo líquido de payout (R$)', 'type' => 'text', 'optional' => true, 'group' => 'cash_out', 'group_label' => 'Versell — Cash Out'],
+                ['key' => 'versell_admin_fee_pix_brl', 'label' => 'Taxa PIX paga à Versell (R$)', 'type' => 'text', 'optional' => true, 'group' => 'cash_out', 'group_label' => 'Versell — Cash Out'],
+                ['key' => 'versell_admin_fee_payout_brl', 'label' => 'Taxa de saque paga à Versell (R$)', 'type' => 'text', 'optional' => true, 'group' => 'cash_out', 'group_label' => 'Versell — Cash Out'],
+            ],
+        ],
+        'cielo' => [
+            'slug' => 'cielo',
+            'name' => 'Cielo',
+            'image' => 'images/gateways/cielo.svg',
+            'methods' => ['pix', 'card'],
+            'scope' => 'national',
+            'country' => 'br',
+            'country_name' => 'Brasil',
+            'country_flag' => 'brasil.png',
+            'signup_url' => 'https://www.cielo.com.br',
+            'driver' => \App\Gateways\Cielo\CieloDriver::class,
+            'checkout_payload_keys' => ['sandbox'],
+            'credential_keys' => [
+                ['key' => 'merchant_id', 'label' => 'MerchantId (API E-commerce)', 'type' => 'text', 'group' => 'api', 'group_label' => 'API de pagamentos'],
+                ['key' => 'merchant_key', 'label' => 'MerchantKey (API E-commerce)', 'type' => 'password', 'group' => 'api', 'group_label' => 'API de pagamentos'],
+                ['key' => 'sandbox', 'label' => 'Usar sandbox (cartão; PIX Cielo2 não tem sandbox de pago)', 'type' => 'boolean', 'group' => 'api', 'group_label' => 'API de pagamentos'],
+                ['key' => 'webhook_header_key', 'label' => 'Header do webhook (nome, cadastro no Site Cielo)', 'type' => 'text', 'optional' => true, 'group' => 'api', 'group_label' => 'API de pagamentos'],
+                ['key' => 'webhook_header_value', 'label' => 'Header do webhook (valor secreto)', 'type' => 'password', 'optional' => true, 'group' => 'api', 'group_label' => 'API de pagamentos'],
+                ['key' => 'sop_client_id', 'label' => 'ClientId Silent Order Post (cartão)', 'type' => 'text', 'optional' => true, 'group' => 'sop', 'group_label' => 'Silent Order Post (cartão)'],
+                ['key' => 'sop_client_secret', 'label' => 'ClientSecret Silent Order Post (cartão)', 'type' => 'password', 'optional' => true, 'group' => 'sop', 'group_label' => 'Silent Order Post (cartão)'],
+            ],
+        ],
+        'xflow' => [
+            'slug' => 'xflow',
+            'name' => 'Xflow',
+            'image' => 'images/gateways/xflow_logo1.svg',
+            'methods' => ['pix'],
+            'scope' => 'national',
+            'country' => 'br',
+            'country_name' => 'Brasil',
+            'country_flag' => 'brasil.png',
+            'signup_url' => 'https://app.xflowpayments.com/cadastro?indicacao=XF-D5846D',
+            'support_contacts' => [
+                [
+                    'name' => 'Gustavo',
+                    'role' => 'Compliance',
+                    'whatsapp' => '5518976096447',
+                ],
+                [
+                    'name' => 'Andriel',
+                    'role' => 'Gerente de contas',
+                    'whatsapp' => '5511983671924',
+                ],
+            ],
+            'driver' => \App\Gateways\Xflow\XflowDriver::class,
+            'credential_keys' => [
+                ['key' => 'public_key', 'label' => 'Chave pública (pk_live_… ou pk_test_…)', 'type' => 'text'],
+                ['key' => 'secret_key', 'label' => 'Segredo (sk_live_… ou sk_test_…)', 'type' => 'password'],
+                ['key' => 'webhook_secret', 'label' => 'Segredo do webhook (HMAC — preenchido ao salvar/testar, ou cole o do painel)', 'type' => 'password', 'optional' => true],
+                ['key' => 'xflow_payout_min_brl', 'label' => 'Mínimo líquido de payout (R$)', 'type' => 'text', 'optional' => true],
+                ['key' => 'xflow_admin_fee_pix_brl', 'label' => 'Taxa PIX paga à Xflow (R$)', 'type' => 'text', 'optional' => true],
+                ['key' => 'xflow_admin_fee_payout_brl', 'label' => 'Taxa de saque paga à Xflow (R$)', 'type' => 'text', 'optional' => true],
+            ],
+        ],
+        'okto' => [
+            'slug' => 'okto',
+            'name' => 'Okto',
+            'image' => 'images/gateways/okto_payments.svg',
+            'methods' => ['pix'],
+            'scope' => 'national',
+            'country' => 'br',
+            'country_name' => 'Brasil',
+            'country_flag' => 'brasil.png',
+            'signup_url' => 'https://www.oktopayments.com/pt/home-portugues/',
+            'support_contacts' => [
+                [
+                    'name' => 'Mauricio',
+                    'role' => 'Gerente de contas',
+                    'whatsapp' => '5511970790960',
+                ],
+            ],
+            'driver' => \App\Gateways\Okto\OktoDriver::class,
+            'credential_keys' => [
+                ['key' => 'access_token', 'label' => 'Access token (Bearer)', 'type' => 'password'],
+                ['key' => 'rsa_public_key', 'label' => 'Chave pública RSA (PEM) para X-Payload-Signature', 'type' => 'textarea'],
+                ['key' => 'notification_token', 'label' => 'Token do webhook (Gaming-Operator-Token — opcional, default = access token)', 'type' => 'password', 'optional' => true],
+                ['key' => 'sandbox', 'label' => 'Usar staging (demo-pix.oktopay.eu)', 'type' => 'boolean'],
+                ['key' => 'okto_payout_min_brl', 'label' => 'Mínimo líquido de payout (R$)', 'type' => 'text', 'optional' => true],
+                ['key' => 'okto_admin_fee_pix_brl', 'label' => 'Taxa PIX paga à Okto (R$)', 'type' => 'text', 'optional' => true],
+                ['key' => 'okto_admin_fee_payout_brl', 'label' => 'Taxa de saque paga à Okto (R$)', 'type' => 'text', 'optional' => true],
+            ],
+        ],
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Adquirentes só no checkout da plataforma (ex. BSPay).
+    | ApiPix e PixGO não usam estes slugs; checkout e demais canais sim.
+    |--------------------------------------------------------------------------
+    */
+    'api_pix_excluded_slugs' => [
+        'bspay',
     ],
 
     /*
@@ -194,11 +435,20 @@ return [
     'platform_acquirer_slugs' => [
         'cajupay',
         'efi',
-        'spacepag',
+        // 'spacepag', // oculto da UI (Financeiro → Adquirentes) e da ordem de cobrança
         'woovi',
+        'bspay',
+        'onlyup',
         'mercadopago',
         'pagarme',
+        'asaas',
         'stripe',
+        'paypal',
+        'linaopenx',
+        'versell', // Cash In + Cash Out (dict)
+        'cielo',
+        'xflow',
+        'okto',
     ],
 
     /*
@@ -207,10 +457,12 @@ return [
     |--------------------------------------------------------------------------
     */
     'default_order' => [
-        'pix' => ['cajupay', 'spacepag', 'woovi', 'efi', 'mercadopago', 'pagarme', 'pushinpay', 'asaas'],
-        'card' => ['efi', 'stripe', 'mercadopago', 'pagarme', 'asaas'],
+        'pix' => ['cajupay', /* 'spacepag', */ 'woovi', 'bspay', 'onlyup', 'efi', 'mercadopago', 'pagarme', 'pushinpay', 'asaas', 'versell', 'cielo', 'xflow', 'okto'],
+        'card' => ['cajupay', 'efi', 'stripe', 'mercadopago', 'pagarme', 'asaas', 'cielo'],
         'boleto' => ['efi', 'mercadopago', 'pagarme', 'asaas'],
-        'pix_auto' => ['efi', 'pushinpay'],
+        'pix_auto' => ['efi', 'pushinpay', 'versell'],
+        'open_finance' => ['linaopenx'],
+        'paypal' => ['paypal'],
         'crypto' => [],
     ],
 ];

@@ -2,40 +2,86 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
+use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Support\Str;
 
 class Product extends Model
 {
+    use SoftDeletes;
+
     protected $keyType = 'string';
 
     public $incrementing = false;
 
     public const TYPE_APLICATIVO = 'aplicativo';
+
     public const TYPE_AREA_MEMBROS = 'area_membros';
+
     public const TYPE_AREA_MEMBROS_EXTERNA = 'area_membros_externa';
+
     public const TYPE_LINK = 'link';
+
     public const TYPE_LINK_PAGAMENTO = 'link_pagamento';
 
+    public const TYPE_PRODUTO_FISICO = 'produto_fisico';
+
+    public const TYPE_ANUNCIO = 'anuncio';
+
+    public const DELIVERY_CHAT = 'chat';
+
+    public const DELIVERY_AUTOMATIC = 'automatic';
+
+    public const DELIVERY_BOTH = 'both';
+
     public const BILLING_ONE_TIME = 'one_time';
+
     public const BILLING_SUBSCRIPTION = 'subscription';
+
+    public const APPROVAL_PENDING = 'pending';
+
+    public const APPROVAL_APPROVED = 'approved';
+
+    public const APPROVAL_REJECTED = 'rejected';
+
+    public const APPROVAL_SOURCE_AUTOMATIC = 'automatic';
+
+    public const APPROVAL_SOURCE_MANUAL = 'manual';
+
+    public const APPROVAL_SOURCE_MIGRATION = 'migration';
 
     protected $fillable = [
         'tenant_id',
         'name',
+        'notification_name',
+        'support_email',
         'slug',
         'checkout_slug',
         'checkout_config',
         'description',
+        'category',
+        'marketplace_category_id',
         'type',
+        'delivery_mode',
+        'warranty_text',
+        'region_text',
+        'marketplace_meta',
         'billing_type',
         'image',
         'price',
         'currency',
         'is_active',
+        'admin_blocked',
+        'approval_status',
+        'approval_reason',
+        'approval_source',
+        'reviewed_by',
+        'reviewed_at',
         'conversion_pixels',
         'member_area_config',
         'affiliate_enabled',
@@ -45,7 +91,11 @@ class Product extends Model
         'affiliate_page_url',
         'affiliate_support_email',
         'affiliate_showcase_description',
+        'affiliate_hide_customer_data',
+        'affiliate_invite_token',
         'refund_policy_days',
+        'shipping_store_id',
+        'physical_config',
     ];
 
     protected function casts(): array
@@ -53,25 +103,96 @@ class Product extends Model
         return [
             'price' => 'decimal:2',
             'is_active' => 'boolean',
+            'admin_blocked' => 'boolean',
+            'reviewed_at' => 'datetime',
             'checkout_config' => 'array',
             'member_area_config' => 'array',
+            'marketplace_meta' => 'array',
             'conversion_pixels' => 'array',
             'affiliate_enabled' => 'boolean',
             'affiliate_commission_percent' => 'decimal:2',
             'affiliate_manual_approval' => 'boolean',
             'affiliate_show_in_showcase' => 'boolean',
+            'affiliate_hide_customer_data' => 'boolean',
             'refund_policy_days' => 'integer',
+            'physical_config' => 'array',
         ];
+    }
+
+    public function marketplaceCategory(): BelongsTo
+    {
+        return $this->belongsTo(MarketplaceCategory::class, 'marketplace_category_id');
+    }
+
+    public function deliveryCodes(): HasMany
+    {
+        return $this->hasMany(ProductDeliveryCode::class);
+    }
+
+    public function questions(): HasMany
+    {
+        return $this->hasMany(ProductQuestion::class);
+    }
+
+    public function isMarketplaceListing(): bool
+    {
+        return $this->type === self::TYPE_ANUNCIO || in_array($this->delivery_mode, [
+            self::DELIVERY_CHAT,
+            self::DELIVERY_AUTOMATIC,
+            self::DELIVERY_BOTH,
+        ], true);
+    }
+
+    public function usesAutomaticDelivery(): bool
+    {
+        return in_array($this->delivery_mode, [self::DELIVERY_AUTOMATIC, self::DELIVERY_BOTH], true);
+    }
+
+    public function availableCodesCount(): int
+    {
+        return $this->deliveryCodes()->where('status', ProductDeliveryCode::STATUS_AVAILABLE)->count();
+    }
+
+    public function shippingStore(): BelongsTo
+    {
+        return $this->belongsTo(ShippingStore::class, 'shipping_store_id');
+    }
+
+    public function isPhysical(): bool
+    {
+        return $this->type === self::TYPE_PRODUTO_FISICO;
+    }
+
+    public function requiresShippingAddress(): bool
+    {
+        return \App\Services\PhysicalProductAccess::globalEnabled() && $this->isPhysical();
+    }
+
+    public function hasFreeShipping(): bool
+    {
+        if (! $this->isPhysical()) {
+            return false;
+        }
+        $config = is_array($this->physical_config) ? $this->physical_config : [];
+
+        return filter_var($config['free_shipping'] ?? false, FILTER_VALIDATE_BOOLEAN);
     }
 
     protected static function booted(): void
     {
         static::creating(function (Product $product): void {
-            if (empty($product->id)) {
+            if (empty($product->id) && $product->getConnection()->getDriverName() !== 'sqlite') {
                 $product->id = (string) Str::uuid();
             }
             if (empty($product->checkout_slug)) {
                 $product->checkout_slug = static::generateUniqueCheckoutSlug();
+            }
+            if (empty($product->slug) && $product->tenant_id !== null) {
+                $source = trim((string) ($product->name ?? ''));
+                $product->slug = static::uniqueSlugForTenant(
+                    (int) $product->tenant_id,
+                    $source !== '' ? $source : 'produto'
+                );
             }
         });
 
@@ -86,9 +207,69 @@ class Product extends Model
     {
         do {
             $slug = Str::lower(Str::random(7));
-        } while (static::where('checkout_slug', $slug)->exists());
+        } while (static::withTrashed()->where('checkout_slug', $slug)->exists());
 
         return $slug;
+    }
+
+    /**
+     * Checkout público (/c/{slug}) só aceita [a-z0-9]{6,16}.
+     */
+    public static function isValidCheckoutSlug(?string $slug): bool
+    {
+        return is_string($slug) && preg_match('/^[a-z0-9]{6,16}$/', $slug) === 1;
+    }
+
+    public static function normalizeCheckoutSlug(?string $slug): ?string
+    {
+        return self::isValidCheckoutSlug($slug) ? $slug : null;
+    }
+
+    /**
+     * Garante um checkout_slug válido (gera um novo se estiver vazio ou inválido).
+     */
+    public function ensureValidCheckoutSlug(bool $save = true): string
+    {
+        if (self::isValidCheckoutSlug($this->checkout_slug)) {
+            return (string) $this->checkout_slug;
+        }
+
+        $this->checkout_slug = self::generateUniqueCheckoutSlug();
+        if ($save && $this->exists) {
+            $this->save();
+        }
+
+        return (string) $this->checkout_slug;
+    }
+
+    /**
+     * Slug interno único por tenant (inclui produtos excluídos — constraint no banco não ignora soft delete).
+     */
+    public static function uniqueSlugForTenant(int $tenantId, string $source, ?string $ignoreProductId = null): string
+    {
+        $base = Str::slug($source);
+        if ($base === '') {
+            $base = 'produto';
+        }
+
+        $candidate = $base;
+        $suffix = 2;
+        while (static::slugExistsForTenant($tenantId, $candidate, $ignoreProductId)) {
+            $candidate = $base.'-'.$suffix;
+            $suffix++;
+        }
+
+        return $candidate;
+    }
+
+    public static function slugExistsForTenant(int $tenantId, string $slug, ?string $ignoreProductId = null): bool
+    {
+        $query = static::withTrashed()->forTenant($tenantId)->where('slug', $slug);
+        if ($ignoreProductId !== null && $ignoreProductId !== '') {
+            $query->where('id', '!=', $ignoreProductId);
+        }
+
+        return $query->exists();
     }
 
     /**
@@ -143,6 +324,8 @@ class Product extends Model
                 'boleto_redundancy' => [],
                 'pix_auto' => null,
                 'pix_auto_redundancy' => [],
+                'open_finance' => null,
+                'open_finance_redundancy' => [],
                 'crypto' => null,
                 'crypto_redundancy' => [],
             ],
@@ -155,6 +338,10 @@ class Product extends Model
                 'card' => true,
                 'boleto' => true,
                 'pix_auto' => true,
+                'apple_pay' => true,
+                'google_pay' => true,
+                'open_finance' => true,
+                'paypal' => true,
             ],
             'stripe_link_enabled' => true,
             'deliverable_link' => '',
@@ -252,14 +439,25 @@ class Product extends Model
             'logo_url' => '',
             'from_name' => '',
             'subject' => 'Seu acesso a {nome_produto}',
-            'body_html' => '<table width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;margin:0 auto;font-family:\'Segoe UI\',Tahoma,sans-serif;background:#f8fafc;padding:32px 24px;"><tr><td style="background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.08);"><table width="100%" cellpadding="0" cellspacing="0"><tr><td style="padding:32px 32px 24px;text-align:center;border-bottom:1px solid #e2e8f0;"><h1 style="margin:0;font-size:22px;font-weight:600;color:#0f172a;">Olá, {nome_cliente}!</h1></td></tr><tr><td style="padding:28px 32px;"><p style="margin:0 0 16px;font-size:16px;line-height:1.6;color:#334155;">Obrigado por adquirir <strong>{nome_produto}</strong>.</p><p style="margin:0 0 24px;font-size:16px;line-height:1.6;color:#334155;">Clique no botão abaixo para acessar seu conteúdo agora:</p><p style="margin:0 0 24px;text-align:center;"><a href="{link_acesso}" style="display:inline-block;padding:14px 32px;background:#0ea5e9;color:#ffffff;text-decoration:none;font-weight:600;font-size:16px;border-radius:8px;">Acessar agora</a></p><p style="margin:0 0 24px;font-size:14px;line-height:1.5;color:#64748b;">Ou copie e cole no navegador:<br/><a href="{link_acesso}" style="color:#0ea5e9;word-break:break-all;">{link_acesso}</a></p><div style="margin:28px 0 0;padding:20px;background:#fffbeb;border:1px solid #f59e0b;border-radius:8px;"><p style="margin:0 0 10px;font-size:14px;line-height:1.5;color:#92400e;"><strong>Guarde seus dados de acesso</strong></p><p style="margin:0 0 16px;font-size:14px;line-height:1.5;color:#78350f;">O botão acima entra automaticamente na sua conta. Se você sair ou usar outro aparelho, faça login na área de membros com:</p><p style="margin:0 0 10px;font-size:14px;color:#0f172a;"><strong>E-mail:</strong> {email_cliente}</p><p style="margin:0;font-size:15px;color:#0f172a;font-family:Consolas,\'Courier New\',monospace;font-weight:600;letter-spacing:0.02em;word-break:break-all;"><strong>Senha:</strong> {senha}</p></div></td></tr><tr><td style="padding:20px 32px;background:#f1f5f9;border-radius:0 0 12px 12px;"><p style="margin:0;font-size:13px;color:#64748b;">Qualquer dúvida, responda este e-mail.</p></td></tr></table></td></tr></table>',
+            'body_html' => '<table width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;margin:0 auto;font-family:\'Segoe UI\',Tahoma,sans-serif;background:#f8fafc;padding:32px 24px;"><tr><td style="background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.08);"><table width="100%" cellpadding="0" cellspacing="0"><tr><td style="padding:32px 32px 24px;text-align:center;border-bottom:1px solid #e2e8f0;"><h1 style="margin:0;font-size:22px;font-weight:600;color:#0f172a;">Olá, {nome_cliente}!</h1></td></tr><tr><td style="padding:28px 32px;"><p style="margin:0 0 16px;font-size:16px;line-height:1.6;color:#334155;">Obrigado por adquirir <strong>{nome_produto}</strong>.</p><p style="margin:0 0 24px;font-size:16px;line-height:1.6;color:#334155;">Clique no botão abaixo para fazer login e ver todos os seus produtos em Minha área:</p><p style="margin:0 0 24px;text-align:center;"><a href="{link_acesso}" style="display:inline-block;padding:14px 32px;background:#0ea5e9;color:#ffffff;text-decoration:none;font-weight:600;font-size:16px;border-radius:8px;">Fazer login</a></p><p style="margin:0 0 24px;font-size:14px;line-height:1.5;color:#64748b;">Ou copie e cole no navegador:<br/><a href="{link_acesso}" style="color:#0ea5e9;word-break:break-all;">{link_acesso}</a></p><div style="margin:28px 0 0;padding:20px;background:#fffbeb;border:1px solid #f59e0b;border-radius:8px;"><p style="margin:0 0 10px;font-size:14px;line-height:1.5;color:#92400e;"><strong>Guarde seus dados de acesso</strong></p><p style="margin:0 0 16px;font-size:14px;line-height:1.5;color:#78350f;">Na tela de login, entre com:</p><p style="margin:0 0 10px;font-size:14px;color:#0f172a;"><strong>E-mail:</strong> {email_cliente}</p><p style="margin:0 0 16px;font-size:15px;color:#0f172a;font-family:Consolas,\'Courier New\',monospace;font-weight:600;letter-spacing:0.02em;word-break:break-all;"><strong>Senha:</strong> {senha}</p><p style="margin:0;font-size:13px;line-height:1.5;color:#78350f;">Se você não tiver senha, use <a href="{link_esqueci_senha}" style="color:#2563eb;font-weight:600;">Esqueci minha senha</a> para criar uma nova.</p></div></td></tr><tr><td style="padding:20px 32px;background:#f1f5f9;border-radius:0 0 12px 12px;"><p style="margin:0;font-size:13px;color:#64748b;">Qualquer dúvida, responda este e-mail.</p></td></tr></table></td></tr></table>',
         ];
     }
 
     public function getCheckoutConfigAttribute(mixed $value): array
     {
         $stored = is_array($value) ? $value : (is_string($value) ? json_decode($value, true) : []);
+
         return array_replace_recursive(static::defaultCheckoutConfig(), $stored ?? []);
+    }
+
+    /**
+     * Flags `payment_methods_enabled` efetivas no checkout — definidas globalmente pela plataforma.
+     *
+     * @return array<string, bool>
+     */
+    public static function resolvedPaymentMethodsEnabled(self $product, ?ProductOffer $offer = null, ?SubscriptionPlan $plan = null): array
+    {
+        return \App\Services\PlatformPaymentMethods::enabledForCheckout();
     }
 
     /**
@@ -296,6 +494,17 @@ class Product extends Model
     }
 
     /**
+     * Meta/TikTok pixel IDs: apenas dígitos (aceita colar "ID: 1234567890").
+     */
+    public static function normalizePixelIdString(string $raw): string
+    {
+        $digits = preg_replace('/\D/', '', $raw) ?? '';
+        $len = strlen($digits);
+
+        return ($len >= 5 && $len <= 20) ? $digits : '';
+    }
+
+    /**
      * Normaliza um bloco de plataforma (novo formato com entries ou legado com pixel_id / conversion_id na raiz).
      *
      * @param  array<string, mixed>  $block
@@ -326,7 +535,7 @@ class Product extends Model
                 }
 
                 if ($platform === 'meta' || $platform === 'tiktok') {
-                    $pixelId = trim((string) ($e['pixel_id'] ?? ''));
+                    $pixelId = static::normalizePixelIdString(trim((string) ($e['pixel_id'] ?? '')));
                     if ($pixelId === '') {
                         continue;
                     }
@@ -366,7 +575,7 @@ class Product extends Model
             $id = Str::uuid()->toString();
 
             if ($platform === 'meta' || $platform === 'tiktok') {
-                $pixelId = trim((string) ($block['pixel_id'] ?? ''));
+                $pixelId = static::normalizePixelIdString(trim((string) ($block['pixel_id'] ?? '')));
                 $accessToken = trim((string) ($block['access_token'] ?? ''));
                 if ($pixelId !== '' || $accessToken !== '') {
                     $entries[] = [
@@ -473,11 +682,38 @@ class Product extends Model
             'certificate' => [
                 'enabled' => false,
                 'title' => '',
+                'release_mode' => 'completion_percent',
                 'completion_percent' => 100,
+                'days_after_access' => 0,
                 'template_url' => null,
                 'signature_text' => '',
                 'font_family' => 'sans-serif',
                 'duration_text' => '',
+                'platform_name' => '',
+                'header_text' => 'Certificado de conclusão',
+                'recipient_intro_text' => 'Certificamos que',
+                'completion_text' => 'completou com sucesso o curso em',
+                'issued_on_text' => 'em',
+                'instructor_label_text' => 'Assinatura do Instrutor',
+                'platform_label_text' => 'Plataforma de Cursos',
+                'duration_label_text' => 'Duração',
+                'print_format' => 'A4',
+                'font_scale' => 100,
+                'duration_enabled' => true,
+                'body_template' => '',
+                'layout' => [
+                    'background_only' => false,
+                    'custom_positions' => false,
+                    'fields' => [
+                        'header' => ['visible' => true, 'x' => 50, 'y' => 14, 'w' => 80, 'align' => 'center'],
+                        'title' => ['visible' => true, 'x' => 50, 'y' => 28, 'w' => 80, 'align' => 'center'],
+                        'body' => ['visible' => true, 'x' => 50, 'y' => 45, 'w' => 70, 'align' => 'center'],
+                        'date' => ['visible' => true, 'x' => 50, 'y' => 62, 'w' => 50, 'align' => 'center'],
+                        'duration' => ['visible' => true, 'x' => 50, 'y' => 70, 'w' => 45, 'align' => 'center'],
+                        'signature' => ['visible' => true, 'x' => 22, 'y' => 85, 'w' => 36, 'align' => 'left'],
+                        'platform' => ['visible' => true, 'x' => 78, 'y' => 85, 'w' => 36, 'align' => 'right'],
+                    ],
+                ],
             ],
             'comments_enabled' => false,
             'comments_require_approval' => true,
@@ -503,6 +739,7 @@ class Product extends Model
         if (($theme['sidebar_bg'] ?? '') === '#1e293b') {
             $config['theme']['sidebar_bg'] = '#27272a';
         }
+
         return $config;
     }
 
@@ -511,11 +748,58 @@ class Product extends Model
         return $this->belongsToMany(User::class, 'product_user')->withTimestamps();
     }
 
+    public function tenantOwner(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'tenant_id', 'id');
+    }
+
+    /** Produto pode ser vendido no checkout (ativo, aprovado e não bloqueado pela plataforma). */
+    public function isAvailableForPurchase(): bool
+    {
+        if (! (bool) $this->is_active || (bool) $this->admin_blocked) {
+            return false;
+        }
+
+        if (\Illuminate\Support\Facades\Schema::hasColumn($this->getTable(), 'approval_status')) {
+            $status = $this->approval_status ?? self::APPROVAL_APPROVED;
+
+            return $status === self::APPROVAL_APPROVED;
+        }
+
+        return true;
+    }
+
+    public function scopeAvailableForPurchase(Builder $query): Builder
+    {
+        $query->where('is_active', true)->where('admin_blocked', false);
+
+        if (\Illuminate\Support\Facades\Schema::hasColumn((new static)->getTable(), 'approval_status')) {
+            $query->where('approval_status', self::APPROVAL_APPROVED);
+        }
+
+        return $query;
+    }
+
+    public function isApprovalApproved(): bool
+    {
+        if (! \Illuminate\Support\Facades\Schema::hasColumn($this->getTable(), 'approval_status')) {
+            return true;
+        }
+
+        return ($this->approval_status ?? self::APPROVAL_APPROVED) === self::APPROVAL_APPROVED;
+    }
+
+    public function reviewer(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'reviewed_by');
+    }
+
     public function scopeForTenant($query, ?int $tenantId)
     {
         if ($tenantId === null) {
             return $query->whereNull('tenant_id');
         }
+
         return $query->where('tenant_id', $tenantId);
     }
 
@@ -584,11 +868,71 @@ class Product extends Model
         return $this->hasMany(ProductAffiliateEnrollment::class);
     }
 
+    public static function generateAffiliateInviteToken(): string
+    {
+        do {
+            $token = Str::lower(Str::random(40));
+        } while (self::query()->where('affiliate_invite_token', $token)->exists());
+
+        return $token;
+    }
+
+    public function ensureAffiliateInviteToken(): string
+    {
+        if (! \Illuminate\Support\Facades\Schema::hasColumn($this->getTable(), 'affiliate_invite_token')) {
+            return '';
+        }
+
+        $current = trim((string) ($this->affiliate_invite_token ?? ''));
+        if ($current !== '') {
+            return $current;
+        }
+
+        $this->affiliate_invite_token = self::generateAffiliateInviteToken();
+        $this->save();
+
+        return (string) $this->affiliate_invite_token;
+    }
+
+    public function regenerateAffiliateInviteToken(): string
+    {
+        if (! \Illuminate\Support\Facades\Schema::hasColumn($this->getTable(), 'affiliate_invite_token')) {
+            return '';
+        }
+
+        $this->affiliate_invite_token = self::generateAffiliateInviteToken();
+        $this->save();
+
+        return (string) $this->affiliate_invite_token;
+    }
+
+    public function affiliateJoinUrl(): ?string
+    {
+        $token = trim((string) ($this->affiliate_invite_token ?? ''));
+        if ($token === '') {
+            return null;
+        }
+
+        return url('/afiliar/'.$token);
+    }
+
+    public static function findByAffiliateInviteToken(string $token): ?self
+    {
+        $token = Str::lower(trim($token));
+        if ($token === '' || ! \Illuminate\Support\Facades\Schema::hasColumn((new static)->getTable(), 'affiliate_invite_token')) {
+            return null;
+        }
+
+        return self::query()->where('affiliate_invite_token', $token)->first();
+    }
+
     /**
      * Soma dos % de co-produtores (pendentes ou ativos) que participam de vendas por afiliado.
      */
     public function sumCoproducerPercentOnAffiliateSales(): float
     {
+        ProductCoproducer::expireOverdue();
+
         return round((float) $this->coproducers()
             ->whereIn('status', [ProductCoproducer::STATUS_PENDING, ProductCoproducer::STATUS_ACTIVE])
             ->where('commission_on_affiliate_sales', true)
@@ -613,6 +957,11 @@ class Product extends Model
 
     public function hasMemberAreaAccess(User $user): bool
     {
+        // Administrador da plataforma: preview de moderação (sem matrícula).
+        if ($user->canAccessPlatformPanel()) {
+            return true;
+        }
+
         // Admin/Infoprodutor do mesmo tenant do produto tem acesso automático à área de membros
         // (usuário de equipe não deve ganhar acesso automático)
         if (($user->isAdmin() || $user->isInfoprodutor()) && $user->tenant_id === $this->tenant_id) {
@@ -649,6 +998,11 @@ class Product extends Model
     public static function typeConfig(): array
     {
         return [
+            self::TYPE_ANUNCIO => [
+                'label' => 'Anúncio marketplace',
+                'description' => 'Conta, crédito, assinatura ou item digital. Entrega por chat e/ou códigos automáticos.',
+                'available' => true,
+            ],
             self::TYPE_APLICATIVO => [
                 'label' => 'Aplicativo',
                 'description' => 'App próprio com PWA. Subdomínio ou domínio customizado (em breve).',
@@ -657,22 +1011,27 @@ class Product extends Model
             self::TYPE_AREA_MEMBROS => [
                 'label' => 'Área de membros',
                 'description' => 'Área exclusiva para alunos com PWA. Subdomínio ou domínio customizado.',
-                'available' => true,
+                'available' => false,
             ],
             self::TYPE_AREA_MEMBROS_EXTERNA => [
                 'label' => 'Área de membros externa',
                 'description' => 'Entrega o acesso em uma plataforma externa (ex.: Cademí) após o pagamento.',
-                'available' => true,
+                'available' => false,
             ],
             self::TYPE_LINK => [
                 'label' => 'Link',
                 'description' => 'Entrega por link único após a compra.',
-                'available' => true,
+                'available' => false,
             ],
             self::TYPE_LINK_PAGAMENTO => [
                 'label' => 'Somente link de pagamento',
                 'description' => 'Apenas gera link de checkout, sem entrega automática.',
-                'available' => true,
+                'available' => false,
+            ],
+            self::TYPE_PRODUTO_FISICO => [
+                'label' => 'Produto físico',
+                'description' => 'Envio por correio/transportadora. Configure frete e endereço de entrega no checkout.',
+                'available' => false,
             ],
         ];
     }
@@ -686,5 +1045,76 @@ class Product extends Model
             self::BILLING_ONE_TIME => 'Pagamento único',
             self::BILLING_SUBSCRIPTION => 'Assinatura',
         ];
+    }
+
+    /**
+     * Categorias disponíveis para classificação do infoproduto.
+     *
+     * @return array<string, string>
+     */
+    public static function categoryLabels(): array
+    {
+        return [
+            'educacao_e_cursos' => 'Educação e Cursos',
+            'negocios_e_empreendedorismo' => 'Negócios e Empreendedorismo',
+            'marketing_e_vendas' => 'Marketing e Vendas',
+            'financas_e_investimentos' => 'Finanças e Investimentos',
+            'tecnologia_e_inovacao' => 'Tecnologia e Inovação',
+            'saude_e_bem_estar' => 'Saúde e Bem-estar',
+            'desenvolvimento_pessoal' => 'Desenvolvimento Pessoal',
+            'lifestyle_e_hobbies' => 'Lifestyle e Hobbies',
+            'conteudo_e_recursos_digitais' => 'Conteúdo e Recursos Digitais',
+            'automotivos' => 'Automotivos',
+            'outros' => 'Outros',
+        ];
+    }
+
+    /**
+     * @return list<string>
+     */
+    public static function categoryKeys(): array
+    {
+        return array_keys(self::categoryLabels());
+    }
+
+    /**
+     * @return list<array{value: string, label: string}>
+     */
+    public static function categoriesForSelect(): array
+    {
+        $out = [];
+        foreach (self::categoryLabels() as $value => $label) {
+            $out[] = ['value' => $value, 'label' => $label];
+        }
+
+        return $out;
+    }
+
+    public static function normalizeCategoryFilter(?string $category): string
+    {
+        $category = trim((string) $category);
+        if ($category === '' || $category === 'all') {
+            return '';
+        }
+        if ($category === 'uncategorized') {
+            return 'uncategorized';
+        }
+
+        return in_array($category, self::categoryKeys(), true) ? $category : '';
+    }
+
+    public function scopeOfCategory(Builder $query, ?string $category): Builder
+    {
+        $normalized = self::normalizeCategoryFilter($category);
+        if ($normalized === '') {
+            return $query;
+        }
+        if ($normalized === 'uncategorized') {
+            return $query->where(function (Builder $q) {
+                $q->whereNull('category')->orWhere('category', '');
+            });
+        }
+
+        return $query->where('category', $normalized);
     }
 }

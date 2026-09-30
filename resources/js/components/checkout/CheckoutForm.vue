@@ -1,12 +1,15 @@
 <script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue';
+import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick, inject } from 'vue';
 import { useForm, router } from '@inertiajs/vue3';
 import axios from 'axios';
-import { User, UserRound, Mail, ShoppingBag, Loader2, CreditCard, Tag, Check, Pencil, ScanQrCode, Shield, X, AlertCircle, FileText, MapPin } from 'lucide-vue-next';
+import { User, UserRound, Mail, ShoppingBag, Loader2, CreditCard, Tag, Check, Pencil, ScanQrCode, X, AlertCircle, FileText, MapPin } from 'lucide-vue-next';
 import CheckoutDropdown from './CheckoutDropdown.vue';
 import CheckoutOrderBumps from './CheckoutOrderBumps.vue';
 import CheckoutPaymentMethods from './CheckoutPaymentMethods.vue';
 import AsaasCard from './gateways/asaas/Card.vue';
+import CajuPaySdkMount from './CajuPaySdkMount.vue';
+import PaypalButtons from './PaypalButtons.vue';
+import CheckoutTurnstile from './CheckoutTurnstile.vue';
 import {
     CHECKOUT_PAGARME_TOKENIZE_FORM_ID,
     PAGARME_TOKENIZE_FORM_ACTION,
@@ -15,20 +18,88 @@ import {
     requestPagarmeTokenFromForm,
     resetPagarmeTokenizeScriptState,
 } from '@/composables/usePagarmeTokenizecard.js';
+import { requestCieloPaymentToken, formatCieloSopHolderName } from '@/composables/useCieloSilentOrderPost.js';
+import { loadCajuPaySdk } from '@/composables/useCajuPaySdk';
+import { isValidCpf } from '@/utils/brazilianDocuments.js';
+import { navigateAfterCheckout } from '@/lib/checkoutRedirect.js';
+import { trackCheckoutPurchase } from '@/composables/useCheckoutPurchaseTracking.js';
+import { getMetricsSessionKey } from '@/lib/metricsTracking.js';
+import CheckoutLegalFooter from './CheckoutLegalFooter.vue';
+import { usePlatformBranding } from '@/composables/usePlatformBranding';
 
 const STORAGE_KEY = 'checkout_draft';
 
-const UTM_PARAM_KEYS = ['utm_source', 'utm_medium', 'utm_campaign'];
+const checkoutIdempotencyKey = ref(
+    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `ck-${Date.now()}-${Math.random().toString(36).slice(2)}`
+);
+const checkoutSubmitting = ref(false);
+const honeypotWebsite = ref('');
+const turnstileToken = ref('');
+const turnstileRef = ref(null);
+
+/** Mesmas chaves que CheckoutSession::TRACKING_FIELD_KEYS (UTMfy + funis). */
+const TRACKING_PARAM_KEYS = [
+    'utm_source',
+    'utm_medium',
+    'utm_campaign',
+    'utm_content',
+    'utm_term',
+    'sck',
+    'src',
+];
 
 function utmStorageKey() {
     return `getfy_checkout_utm_${String(props.productId)}`;
+}
+
+function affiliateRefStorageKey() {
+    return `getfy_checkout_aff_ref_${String(props.productId)}`;
+}
+
+function readStoredAffiliateRef() {
+    if (typeof window === 'undefined' || typeof sessionStorage === 'undefined') {
+        return '';
+    }
+    try {
+        return String(sessionStorage.getItem(affiliateRefStorageKey()) || '').trim();
+    } catch (_) {
+        return '';
+    }
+}
+
+function persistAffiliateRef(value) {
+    const next = String(value || '').trim();
+    if (!next || typeof sessionStorage === 'undefined') {
+        return;
+    }
+    try {
+        sessionStorage.setItem(affiliateRefStorageKey(), next);
+    } catch (_) {
+        /* ignore quota / private mode */
+    }
+}
+
+function resolveAffiliateRef() {
+    const fromProp = String(props.affiliateRef || '').trim();
+    if (fromProp) {
+        return fromProp;
+    }
+    if (typeof window !== 'undefined') {
+        const fromUrl = String(new URLSearchParams(window.location.search).get('ref') || '').trim();
+        if (fromUrl) {
+            return fromUrl;
+        }
+    }
+    return readStoredAffiliateRef();
 }
 
 function readUtmsFromUrl() {
     if (typeof window === 'undefined') return {};
     const p = new URLSearchParams(window.location.search);
     const o = {};
-    UTM_PARAM_KEYS.forEach((k) => {
+    TRACKING_PARAM_KEYS.forEach((k) => {
         const v = p.get(k);
         if (v != null && String(v).trim() !== '') o[k] = String(v).trim();
     });
@@ -54,7 +125,7 @@ function mergeStoredUtms() {
 function getUtmPayload() {
     const m = mergeStoredUtms();
     const out = {};
-    UTM_PARAM_KEYS.forEach((k) => {
+    TRACKING_PARAM_KEYS.forEach((k) => {
         if (m[k]) out[k] = m[k];
     });
     return out;
@@ -75,10 +146,28 @@ function getCsrfToken() {
     return '';
 }
 
-function tf(key, fallback = '') {
-    const v = typeof t === 'function' ? t(key) : null;
-    if (!v || v === key) return fallback;
-    return v;
+function getCookie(name) {
+    if (typeof document === 'undefined') return null;
+    // escape para montar regex segura
+    const escaped = String(name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const m = document.cookie ? document.cookie.match(new RegExp('(?:^|; )' + escaped + '=([^;]*)')) : null;
+    if (!m) return null;
+    try {
+        return decodeURIComponent(m[1]);
+    } catch (_) {
+        return m[1];
+    }
+}
+
+function getMetaCookiePayload() {
+    const fbp = getCookie('_fbp');
+    const fbc = getCookie('_fbc');
+    const ua = typeof navigator !== 'undefined' ? (navigator.userAgent || '') : '';
+    const out = {};
+    if (fbp) out.fbp = fbp;
+    if (fbc) out.fbc = fbc;
+    if (ua) out.user_agent = ua;
+    return out;
 }
 
 const EMAIL_PROVIDERS = [
@@ -101,7 +190,7 @@ const props = defineProps({
     affiliateRef: { type: String, default: '' },
     orderBumps: { type: Array, default: () => [] },
     orderBumpIds: { type: Array, default: () => [] },
-    primaryColor: { type: String, default: '#7427F1' },
+    primaryColor: { type: String, default: '#FF5A1F' },
     formatPrice: { type: Function, default: (v, c) => `R$ ${Number(v).toFixed(2)}` },
     config: { type: Object, default: () => ({}) },
     /** Métodos disponíveis: [{ id: 'pix'|'card'|'boleto', label: string, gateway_name?: string }] */
@@ -125,31 +214,121 @@ const props = defineProps({
     cardInstallmentsEnabled: { type: Boolean, default: false },
     cardMaxInstallments: { type: Number, default: 1 },
     checkoutTotalBrl: { type: Number, default: 0 },
+    conversionPixels: { type: Object, default: () => ({}) },
+    requiresShipping: { type: Boolean, default: false },
+    productSubtotalBrl: { type: Number, default: 0 },
     /** Public Key Mercado Pago para Payment Brick (cartão). */
     cardMercadopagoPublicKey: { type: String, default: '' },
     /** Se o gateway Mercado Pago está em sandbox. */
     cardMercadopagoSandbox: { type: Boolean, default: false },
     /** Chaves por gateway slug para gateways de plugin (checkout_payload_keys). Ex.: { 'meu-gateway': { publishable_key: '...' } } */
     cardGatewayKeys: { type: Object, default: () => ({}) },
+    paypalClientId: { type: String, default: '' },
+    paypalSandbox: { type: Boolean, default: false },
+    checkoutLocale: { type: String, default: 'pt_BR' },
+    /** Cloudflare Turnstile: { enabled, site_key, mode } */
+    turnstile: { type: Object, default: () => ({ enabled: false, site_key: '', mode: 'pix_boleto' }) },
+    checkoutBuilderPreview: { type: Boolean, default: false },
+    /** Aviso legal da plataforma (texto interpolado, com {termos}/{privacidade}). Vazio = Termos · Privacidade. */
+    platformCheckoutNotice: { type: String, default: '' },
+    /** Cliente autenticado com perfil (pula formulário de dados). */
+    authenticatedCustomer: { type: Object, default: null },
 });
 
-const affiliateRefEffective = ref(String(props.affiliateRef || '').trim());
+/** Apple Pay e Google Pay aparecem em qualquer aparelho; o botão nativo decide a disponibilidade. */
+const checkoutPaymentMethodsForDevice = computed(() => {
+    return Array.isArray(props.availablePaymentMethods) ? [...props.availablePaymentMethods] : [];
+});
+
+function tf(key, fallback = '') {
+    const fn = props.t;
+    const v = typeof fn === 'function' ? fn(key) : null;
+    if (!v || v === key) return fallback;
+    return v;
+}
+
+const affiliateRefEffective = ref(resolveAffiliateRef());
 onMounted(() => {
-    if (!affiliateRefEffective.value && typeof window !== 'undefined') {
-        const r = new URLSearchParams(window.location.search).get('ref');
-        if (r) affiliateRefEffective.value = String(r).trim();
+    const resolved = resolveAffiliateRef();
+    if (resolved) {
+        affiliateRefEffective.value = resolved;
+        persistAffiliateRef(resolved);
     }
 });
 
+watch(
+    () => props.affiliateRef,
+    (value) => {
+        const next = String(value || '').trim();
+        if (next) {
+            affiliateRefEffective.value = next;
+            persistAffiliateRef(next);
+        }
+    }
+);
+
 function appendUtmsAndAffiliate(payload) {
     appendUtms(payload);
-    if (affiliateRefEffective.value) {
-        payload.affiliate_ref = affiliateRefEffective.value;
+    const ref = String(affiliateRefEffective.value || resolveAffiliateRef() || '').trim();
+    if (ref) {
+        affiliateRefEffective.value = ref;
+        persistAffiliateRef(ref);
+        payload.affiliate_ref = ref;
+    }
+    Object.assign(payload, getMetaCookiePayload());
+    try {
+        const msid = getMetricsSessionKey();
+        if (msid) payload.metrics_session_key = msid;
+    } catch (_) {
+        // tracking interno opcional
     }
     return payload;
 }
 
-const emit = defineEmits(['coupon-applied', 'coupon-cleared', 'update:orderBumpIds', 'purchase-confirmed']);
+const emit = defineEmits(['coupon-applied', 'coupon-cleared', 'update:orderBumpIds', 'purchase-confirmed', 'update:shippingAmount']);
+
+const shippingQuoteLoading = ref(false);
+const shippingQuoteError = ref('');
+const shippingAmountLocal = ref(0);
+const shippingDeliveryHint = ref('');
+
+async function fetchShippingQuote() {
+    if (!props.requiresShipping) return;
+    const cep = (form.address_zipcode || form.shipping_cep || '').replace(/\D/g, '');
+    if (cep.length < 8) return;
+    shippingQuoteLoading.value = true;
+    shippingQuoteError.value = '';
+    try {
+        const { data } = await axios.post(
+            '/checkout/shipping-quote',
+            appendUtmsAndAffiliate({
+                product_id: props.productId,
+                product_offer_id: props.productOfferId,
+                subscription_plan_id: props.subscriptionPlanId,
+                cep,
+                order_bump_ids: props.orderBumpIds,
+                coupon_code: form.coupon_code || '',
+            }),
+            { headers: { Accept: 'application/json', 'X-XSRF-TOKEN': getCsrfToken() } }
+        );
+        shippingAmountLocal.value = Number(data.shipping_amount) || 0;
+        const min = data.delivery_days_min;
+        const max = data.delivery_days_max;
+        shippingDeliveryHint.value =
+            min != null ? `Entrega estimada: ${min}${max != null && max !== min ? `–${max}` : ''} dias úteis` : '';
+        emit('update:shippingAmount', shippingAmountLocal.value);
+    } catch (e) {
+        shippingQuoteError.value = e?.response?.data?.message || 'Não foi possível calcular o frete.';
+        shippingAmountLocal.value = 0;
+        emit('update:shippingAmount', 0);
+    } finally {
+        shippingQuoteLoading.value = false;
+    }
+}
+
+function isCardPaymentApprovedStatus(status) {
+    return ['approved', 'paid', 'settled', 'completed'].includes(String(status || '').toLowerCase());
+}
 
 function emitPurchaseConfirmed(orderId, triggerType = 'approved') {
     const oid = orderId !== null && orderId !== undefined ? String(orderId) : '';
@@ -162,33 +341,109 @@ function emitPurchaseConfirmed(orderId, triggerType = 'approved') {
     });
 }
 
+const checkoutConversionPixelsRef = inject('checkoutConversionPixelsRef', null);
+
+async function completeApprovedPurchase(orderId, redirectUrl, triggerType = 'approved') {
+    const url = redirectUrl;
+    if (!url) return;
+
+    cardApproved.value = true;
+    cardApprovedRedirectUrl.value = url;
+
+    const api = checkoutConversionPixelsRef?.value ?? null;
+    await trackCheckoutPurchase({
+        orderId,
+        checkoutSessionToken: props.checkoutSessionToken || '',
+        value: Math.max(0, Number(props.checkoutTotalBrl) || 0),
+        currency: 'BRL',
+        triggerType,
+        pixels: props.conversionPixels || {},
+        conversionPixelsApi: api,
+        settleDelayMs: 350,
+    });
+
+    emitPurchaseConfirmed(orderId, triggerType);
+    navigateAfterCheckout(url);
+}
+
 const customerFields = computed(() => props.config?.customer_fields ?? { name: true, cpf: true, phone: true, coupon: false });
 const showName = computed(() => customerFields.value.name !== false);
-const showCpf = computed(() => customerFields.value.cpf === true && props.displayCurrency === 'BRL');
+const showCpf = computed(() => {
+    if (form.payment_method === 'open_finance') {
+        return true;
+    }
+    return customerFields.value.cpf === true && props.displayCurrency === 'BRL';
+});
 const showPhone = computed(() => customerFields.value.phone === true);
 const showCouponByConfig = computed(() => customerFields.value.coupon === true);
 const showCouponField = computed(() => showCouponByConfig.value || Boolean(props.prefillCoupon));
 const orderBumpColor = computed(() => props.config?.appearance?.order_bump_color || '#F59E0B');
-const footerConfig = computed(() => props.config?.footer ?? {});
-const footerEnabled = computed(() => footerConfig.value?.enabled === true);
-const footerLogoUrl = computed(() => String(footerConfig.value?.logo_url ?? '').trim());
-const footerText = computed(() => String(footerConfig.value?.text ?? '').trim());
-const footerSupportEmail = computed(() => String(footerConfig.value?.support_email ?? '').trim());
-const showFooterCustom = computed(
-    () => footerEnabled.value && (footerLogoUrl.value !== '' || footerText.value !== '' || footerSupportEmail.value !== '')
+const { branding, appName } = usePlatformBranding();
+const platformLogoUrl = computed(() =>
+    String(branding.value?.app_logo || branding.value?.app_logo_icon || '').trim()
 );
 
-/** Gateway do método cartão (primeiro método com id === 'card' em available_payment_methods). */
+/** Gateway do cartão / wallets (primeiro método cartão ou Apple/Google Pay na lista visível no dispositivo). */
 const cardGatewaySlug = computed(() => {
-    const methods = Array.isArray(props.availablePaymentMethods) ? props.availablePaymentMethods : [];
-    const cardMethod = methods.find((m) => m.id === 'card');
-    return (cardMethod?.gateway_slug || '').toLowerCase();
+    const methods = checkoutPaymentMethodsForDevice.value;
+    const m = methods.find((x) => ['card', 'apple_pay', 'google_pay'].includes(x.id));
+    return (m?.gateway_slug || '').toLowerCase();
 });
-const isCardGatewayStripe = computed(() => cardGatewaySlug.value === 'stripe');
-const isCardGatewayEfi = computed(() => cardGatewaySlug.value === 'efi');
-const isCardGatewayMercadopago = computed(() => cardGatewaySlug.value === 'mercadopago');
-const isCardGatewayAsaas = computed(() => cardGatewaySlug.value === 'asaas');
-const isCardGatewayPagarme = computed(() => cardGatewaySlug.value === 'pagarme');
+/** Slug do gateway do método atualmente selecionado (fluxo CajuPay draft = referência). */
+const currentMethodGatewaySlug = computed(() => {
+    const methods = checkoutPaymentMethodsForDevice.value;
+    const m = methods.find((x) => x.id === form.payment_method);
+    return (m?.gateway_slug || '').toLowerCase();
+});
+const isCajuPaySdkFlow = computed(() => ['card', 'apple_pay', 'google_pay'].includes(form.payment_method)
+    && currentMethodGatewaySlug.value === 'cajupay');
+const isCajuPayWalletSdk = computed(() => isCajuPaySdkFlow.value
+    && (form.payment_method === 'apple_pay' || form.payment_method === 'google_pay'));
+const isCardMethodSelected = computed(() => form.payment_method === 'card');
+const isCardGatewayStripe = computed(() => isCardMethodSelected.value && currentMethodGatewaySlug.value === 'stripe');
+const isCardGatewayEfi = computed(() => isCardMethodSelected.value && currentMethodGatewaySlug.value === 'efi');
+const isCardGatewayMercadopago = computed(() => isCardMethodSelected.value && currentMethodGatewaySlug.value === 'mercadopago');
+const isCardGatewayAsaas = computed(() => isCardMethodSelected.value && currentMethodGatewaySlug.value === 'asaas');
+const isCardGatewayPagarme = computed(() => isCardMethodSelected.value && currentMethodGatewaySlug.value === 'pagarme');
+const isCardGatewayCielo = computed(() => isCardMethodSelected.value && currentMethodGatewaySlug.value === 'cielo');
+const isCardGatewayCajupay = computed(() => isCardMethodSelected.value && currentMethodGatewaySlug.value === 'cajupay');
+const isCardPaymentFamily = computed(() => ['card', 'apple_pay', 'google_pay'].includes(form.payment_method));
+const isPaypalMethodSelected = computed(() => form.payment_method === 'paypal');
+const paypalButtonsReady = computed(() => {
+    if (!isPaypalMethodSelected.value) return false;
+    if (!(props.paypalClientId || '').trim()) return false;
+    const email = (form.email || '').trim();
+    if (!email.includes('@')) return false;
+    if (showName.value && !(form.name || '').trim()) return false;
+    if (showCpf.value && (form.cpf || '').replace(/\D/g, '').length < 11) return false;
+    if (showPhone.value && phoneDigits.value.replace(/\D/g, '').length < 8) return false;
+    if (props.requiresShipping) {
+        const cep = (form.address_zipcode || '').replace(/\D/g, '');
+        if (cep.length < 8) return false;
+        if (!(form.address_street || '').trim() || !(form.address_number || '').trim()) return false;
+        if (!(form.address_city || '').trim() || (form.address_state || '').trim().length !== 2) return false;
+    }
+    return true;
+});
+const isCajupayCardOnly = computed(() => isCajuPaySdkFlow.value && form.payment_method === 'card');
+const isCajupayCheckoutUi = computed(() => isCajuPaySdkFlow.value);
+/** Apple/Google Pay CajuPay: o SDK exibe o botão de pagar; escondemos o submit principal do formulário. */
+const hidePrimarySubmitForCajupayWallet = computed(() => isCajuPayWalletSdk.value);
+const hidePrimarySubmitForPaypal = computed(() => isPaypalMethodSelected.value);
+
+const primarySubmitButtonLabel = computed(() => {
+    const pm = form.payment_method;
+    if (pm === 'pix') return tf('checkout.gerar_pix', 'Gerar PIX');
+    if (pm === 'pix_auto') return tf('checkout.gerar_pix_auto', 'Gerar PIX (renovação automática)');
+    if (pm === 'open_finance') return tf('checkout.pagar_open_finance', 'Pagar com Open Finance');
+    if (pm === 'boleto') return tf('checkout.gerar_boleto', 'Gerar boleto');
+    if (pm === 'apple_pay' || pm === 'google_pay') return 'Continuar';
+    if (pm === 'card') {
+        if (isCardGatewayAsaas.value && asaasCardStep.value === 1) return 'Continuar';
+        return tf('checkout.pagar_cartao', 'Pagar com cartão');
+    }
+    return tf('checkout.submit_button', 'Concluir compra');
+});
 const cardPagarmePublicKey = computed(() => {
     const k = props.cardGatewayKeys?.pagarme;
     return (k && typeof k.public_key === 'string' ? k.public_key : '').trim();
@@ -199,8 +454,14 @@ const cardPagarmeApiBaseUrl = computed(() => {
     const u = k && typeof k.api_base_url === 'string' ? k.api_base_url.trim() : '';
     return u !== '' ? u.replace(/\/$/, '') : 'https://api.pagar.me/core/v5';
 });
+/** Endereço de entrega (produto físico) — exibido antes da forma de pagamento. */
+const showDeliveryAddressBlock = computed(() => props.requiresShipping);
+
+/** Cobrança/boleto/Pagar.me — após escolher o método (não duplica o bloco de entrega). */
 const showBillingAddressBlock = computed(
-    () => form.payment_method === 'boleto' || (form.payment_method === 'card' && isCardGatewayPagarme.value)
+    () =>
+        !props.requiresShipping &&
+        (form.payment_method === 'boleto' || isCardGatewayPagarme.value)
 );
 
 const pagarmeTokenizeFormId = CHECKOUT_PAGARME_TOKENIZE_FORM_ID;
@@ -228,7 +489,16 @@ const countryCodes = [
 
 function getDefaultCountryCode() {
     const suggested = (props.suggestedCountryCode || '').toUpperCase();
-    if (!suggested) return '55';
+    if (!suggested && typeof navigator !== 'undefined') {
+        const lang = String(navigator.language || '').trim();
+        const region = lang.split('-')[1]?.toUpperCase?.() || '';
+        if (region) {
+            const navFound = countryCodes.find((c) => c.country === region);
+            if (navFound) return navFound.code;
+        }
+    } else if (!suggested) {
+        return '55';
+    }
     const found = countryCodes.find((c) => c.country === suggested);
     return found ? found.code : '55';
 }
@@ -248,10 +518,26 @@ const form = useForm({
     address_neighborhood: '',
     address_city: '',
     address_state: '',
+    shipping_cep: '',
+    shipping_street: '',
+    shipping_number: '',
+    shipping_complement: '',
+    shipping_neighborhood: '',
+    shipping_city: '',
+    shipping_state: '',
+});
+
+const turnstileActive = computed(() => {
+    const cfg = props.turnstile || {};
+    if (!cfg.enabled || !cfg.site_key) return false;
+    const mode = cfg.mode || 'pix_boleto';
+    if (mode === 'disabled') return false;
+    if (mode === 'all_payments') return true;
+    return ['pix', 'boleto', 'pix_auto', 'open_finance'].includes(form.payment_method);
 });
 
 watch(
-    () => props.availablePaymentMethods,
+    () => checkoutPaymentMethodsForDevice.value,
     (list) => {
         const methods = Array.isArray(list) ? list : [];
         if (methods.length > 0 && (!form.payment_method || !methods.some((m) => m.id === form.payment_method))) {
@@ -390,17 +676,58 @@ function saveDraft() {
 }
 
 onMounted(() => {
-    loadDraft();
+    applyAuthenticatedCustomer();
+    if (!loggedInCustomer.value) {
+        loadDraft();
+    }
     try {
         const merged = mergeStoredUtms();
         if (Object.keys(merged).length > 0 && typeof sessionStorage !== 'undefined') {
             sessionStorage.setItem(utmStorageKey(), JSON.stringify(merged));
         }
     } catch (_) {}
-    // Não forçar showEditForm = true aqui: o watch em form.payment_method já abre o form quando o usuário escolhe PIX/Boleto.
-    // Se forçássemos aqui, ao carregar com draft salvo + primeiro método = boleto/pix, os dados "fixos" e o botão Editar dados nunca apareceriam.
 });
 
+const loggedInCustomer = computed(() => (props.authenticatedCustomer?.email ? props.authenticatedCustomer : null));
+const skipCustomerForm = computed(() => Boolean(loggedInCustomer.value?.profile_complete));
+
+function applyAuthenticatedCustomer() {
+    const c = loggedInCustomer.value;
+    if (!c) return;
+    if (c.email) form.email = c.email;
+    if (c.name) form.name = c.name;
+    if (c.document) {
+        form.cpf = String(c.document).replace(/\D/g, '').slice(0, 11);
+        cpfDisplay.value = formatCpf(form.cpf);
+    }
+    if (c.phone) {
+        let digitsPhone = String(c.phone).replace(/\D/g, '');
+        if (digitsPhone.startsWith('55') && digitsPhone.length > 11) digitsPhone = digitsPhone.slice(2);
+        phoneDigits.value = digitsPhone.slice(0, 15);
+        form.country_code = '55';
+        phoneDisplay.value = formatPhone(phoneDigits.value, '55');
+    }
+    if (c.address_zip) form.address_zipcode = String(c.address_zip).replace(/\D/g, '').slice(0, 8);
+    if (c.address_street) form.address_street = c.address_street;
+    if (c.address_number) form.address_number = c.address_number;
+    if (c.address_neighborhood) form.address_neighborhood = c.address_neighborhood;
+    if (c.address_city) form.address_city = c.address_city;
+    if (c.address_state) form.address_state = c.address_state;
+    if (c.address_complement) form.address_complement = c.address_complement;
+    if (c.profile_complete) showEditForm.value = false;
+}
+
+function goLoginFromCheckout() {
+    try {
+        if (typeof window !== 'undefined') {
+            const path = window.location.pathname + window.location.search;
+            // intended is handled server-side on next request via Referer sometimes; use query redirect
+            window.location.href = `/login?redirect=${encodeURIComponent(path)}`;
+            return;
+        }
+    } catch (_) {}
+    router.visit('/login');
+}
 watch(
     () => [form.email, form.name, form.cpf, form.country_code, phoneDigits.value],
     () => saveDraft(),
@@ -408,28 +735,59 @@ watch(
 );
 
 let trackTimeout = null;
+let contactSyncTimeout = null;
 const trackStepSent = ref({ form_started: false, form_filled: false });
+
+function buildTrackContactPayload(email, name) {
+    const cpf = (form.cpf || '').replace(/\D/g, '');
+    const phone = (showPhone.value ? `${form.country_code || ''}${phoneDigits.value || ''}` : '').trim();
+    return {
+        session_token: props.checkoutSessionToken,
+        email: email || undefined,
+        name: name || undefined,
+        cpf: cpf.length >= 11 ? cpf : undefined,
+        phone: phone !== '' ? phone : undefined,
+    };
+}
+
+async function postTrackApi(step, email, name) {
+    await axios.post('/api/checkout/track', {
+        ...buildTrackContactPayload(email, name),
+        step,
+    });
+}
+
 function callTrackApi(step, email, name) {
+    if (props.checkoutBuilderPreview) return;
     if (!props.checkoutSessionToken) return;
     if (trackStepSent.value[step]) return;
     trackStepSent.value[step] = true;
     if (trackTimeout) clearTimeout(trackTimeout);
     trackTimeout = setTimeout(async () => {
         try {
-            await axios.post('/api/checkout/track', {
-                session_token: props.checkoutSessionToken,
-                step,
-                email: email || undefined,
-                name: name || undefined,
-            });
+            await postTrackApi(step, email, name);
         } catch (_) {
             trackStepSent.value[step] = false;
         }
         trackTimeout = null;
     }, 500);
 }
+
+function syncContactFields(email, name) {
+    if (props.checkoutBuilderPreview) return;
+    if (!props.checkoutSessionToken) return;
+    if (!trackStepSent.value.form_started && !trackStepSent.value.form_filled) return;
+    if (contactSyncTimeout) clearTimeout(contactSyncTimeout);
+    contactSyncTimeout = setTimeout(async () => {
+        try {
+            await postTrackApi('form_filled', email, name);
+        } catch (_) {}
+        contactSyncTimeout = null;
+    }, 500);
+}
+
 watch(
-    () => [form.email, form.name],
+    () => [form.email, form.name, form.cpf, form.country_code, phoneDigits.value],
     () => {
         const email = (form.email || '').trim();
         const name = (form.name || '').trim();
@@ -442,6 +800,9 @@ watch(
         if (hasEmail && (!needsName || hasName) && !trackStepSent.value.form_filled) {
             callTrackApi('form_filled', email, name);
         }
+        if (hasEmail && (trackStepSent.value.form_started || trackStepSent.value.form_filled)) {
+            syncContactFields(email, name);
+        }
     },
     { deep: true }
 );
@@ -450,6 +811,10 @@ watch(
 watch(
     () => form.payment_method,
     (method) => {
+        if (skipCustomerForm.value) {
+            showEditForm.value = false;
+            return;
+        }
         if (method === 'pix_auto') {
             const emailOk = (form.email || '').trim().length > 0 && (form.email || '').includes('@');
             const nameOk = (form.name || '').trim().length > 0;
@@ -459,8 +824,14 @@ watch(
             } else {
                 showEditForm.value = true;
             }
-        } else if (method === 'pix' || method === 'boleto') {
+        } else if (method === 'pix' || method === 'boleto' || method === 'open_finance' || method === 'paypal') {
             showEditForm.value = true;
+        } else if (method === 'card' || method === 'apple_pay' || method === 'google_pay') {
+            if ((form.email || '').trim().length > 0 && (form.email || '').includes('@')) {
+                showEditForm.value = false;
+            } else {
+                showEditForm.value = true;
+            }
         } else if ((form.email || '').trim().length > 0 && (form.email || '').includes('@')) {
             showEditForm.value = false;
         }
@@ -470,7 +841,8 @@ watch(
     () => Object.keys(form.errors || {}).length,
     (count) => {
         if (count > 0 && (form.payment_method === 'pix' || form.payment_method === 'pix_auto' || form.payment_method === 'boleto'
-            || (form.payment_method === 'card' && isCardGatewayPagarme.value))) {
+            || form.payment_method === 'open_finance' || form.payment_method === 'paypal'
+            || isCardGatewayPagarme.value)) {
             showEditForm.value = true;
         }
     }
@@ -559,6 +931,13 @@ async function fetchAddressByCep() {
         }
 
         if (data.logradouro) form.address_street = data.logradouro;
+        if (props.requiresShipping) {
+            form.shipping_street = data.logradouro;
+            form.shipping_neighborhood = data.bairro || form.shipping_neighborhood;
+            form.shipping_city = data.localidade || form.shipping_city;
+            form.shipping_state = data.uf || form.shipping_state;
+            await fetchShippingQuote();
+        }
         if (data.bairro) form.address_neighborhood = data.bairro;
         if (data.localidade) form.address_city = data.localidade;
         if (data.uf) form.address_state = data.uf;
@@ -571,7 +950,7 @@ async function fetchAddressByCep() {
 }
 
 const inputClass =
-    'block w-full rounded-xl border-2 border-gray-100 bg-gray-50/80 px-4 py-3.5 pl-12 text-base font-medium text-gray-900 placeholder-gray-400 transition focus:border-gray-200 focus:bg-white focus:outline-none focus:ring-2 focus:ring-offset-0';
+    'block w-full rounded-[12px] border border-[#E2D7CB] bg-white px-4 py-3.5 pl-12 text-[15px] font-medium text-[#1A1410] placeholder-[#A3958A] transition focus:border-[#1A1410] focus:outline-none focus:ring-0';
 const inputClassWithIcon = inputClass;
 
 // Desktop: nome e email só → email full. Telefone ativo → email | telefone. CPF ativo (sem telefone) → email | cpf. Telefone e CPF ativos → email full, depois telefone | cpf.
@@ -582,9 +961,9 @@ const emailColSpan = computed(() => {
 });
 
 const phoneInputClass =
-    'w-full min-w-0 rounded-xl border-0 bg-transparent py-3.5 pr-4 pl-2 text-base font-medium text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-0';
+    'w-full min-w-0 rounded-[12px] border-0 bg-transparent py-3.5 pr-4 pl-2 text-[15px] font-medium text-[#1A1410] placeholder-[#A3958A] focus:outline-none focus:ring-0';
 const phoneWrapperClass =
-    'flex items-stretch overflow-hidden rounded-xl border-2 border-gray-100 bg-gray-50/80 transition focus-within:border-gray-200 focus-within:bg-white focus-within:ring-2 focus-within:ring-offset-0';
+    'flex items-stretch overflow-hidden rounded-[12px] border border-[#E2D7CB] bg-white transition focus-within:border-[#1A1410]';
 const phoneSelectClass =
     'absolute left-0 top-0 h-full w-12 cursor-pointer border-0 bg-transparent py-0 pl-0 opacity-0 focus:outline-none focus:ring-0';
 const phoneFlagWrapClass = 'relative flex h-10 w-12 shrink-0 items-center justify-center self-center';
@@ -677,6 +1056,52 @@ const cardExpYearInput = ref(null);
 const cardCvvInput = ref(null);
 const showFullCardNumber = ref(true);
 const selectedInstallments = ref(1);
+const cieloExpirationDate = computed(() => {
+    const month = String(cardExpMonth.value || '').replace(/\D/g, '').padStart(2, '0').slice(0, 2);
+    let year = String(cardExpYear.value || '').replace(/\D/g, '');
+    if (year.length === 2) {
+        year = `20${year}`;
+    }
+    if (month.length !== 2 || year.length !== 4) {
+        return '';
+    }
+    return `${month}/${year}`;
+});
+const MIN_PARCELA_BRL = 5;
+const effectiveCardMaxInstallments = computed(() => {
+    if (!props.cardInstallmentsEnabled) return 1;
+    const configured = Math.min(12, Math.max(1, Number(props.cardMaxInstallments) || 1));
+    const total = Number(props.checkoutTotalBrl) || 0;
+    if (total < MIN_PARCELA_BRL) return 1;
+    return Math.min(configured, Math.max(1, Math.floor(total / MIN_PARCELA_BRL)));
+});
+const showInstallmentsSelect = computed(() => (
+    form.payment_method === 'card'
+    && props.cardInstallmentsEnabled
+    && effectiveCardMaxInstallments.value > 1
+    && !isCardGatewayStripe.value
+    && !isCardGatewayMercadopago.value
+    && !isCardGatewayAsaas.value
+    && !isCajuPaySdkFlow.value
+));
+function currentInstallments() {
+    return Math.min(effectiveCardMaxInstallments.value, Math.max(1, selectedInstallments.value));
+}
+function installmentOptionLabel(n) {
+    if (n <= 1) {
+        return tf('checkout.installments_cash', 'À vista');
+    }
+    const total = Number(props.checkoutTotalBrl) || 0;
+    const each = props.formatPrice(total / n, props.displayCurrency);
+    return tf('checkout.installments_times', '{n}x de {amount} sem juros')
+        .replace('{n}', String(n))
+        .replace('{amount}', each);
+}
+watch(effectiveCardMaxInstallments, (max) => {
+    if (selectedInstallments.value > max) {
+        selectedInstallments.value = max;
+    }
+});
 const asaasCardStep = ref(1);
 const asaasCardData = ref({});
 const asaasAddressData = ref({});
@@ -766,7 +1191,7 @@ function onCardExpInput(e, part) {
     }
 }
 function onCardCvvInput(e) {
-    const max = cardGatewaySlug.value === 'pagarme' ? 4 : 3;
+    const max = isCardGatewayPagarme.value ? 4 : 3;
     cardCvv.value = (e.target.value || '').replace(/\D/g, '').slice(0, max);
 }
 
@@ -796,12 +1221,24 @@ watch(
 
 watch(
     () => [form.payment_method, isCardGatewayMercadopago.value, props.cardMercadopagoPublicKey, props.checkoutTotalBrl],
-    async ([method, isMP]) => {
+    async ([method, isMP, , totalBrl]) => {
         if (method !== 'card' || !isMP) {
             destroyMercadopagoBrick();
             return;
         }
         await nextTick();
+        const amount = Math.max(0.01, Number(totalBrl) || 0);
+        const ctrl = mercadopagoBrickController.value
+            ?? (typeof window !== 'undefined' ? window.cardPaymentBrickController : null);
+        // Preferir update() (doc Brick) em vez de remount quando só o valor muda.
+        if (ctrl && typeof ctrl.update === 'function' && mercadopagoBrickReady.value) {
+            try {
+                await ctrl.update({ amount });
+                return;
+            } catch (_) {
+                // cai no remount abaixo
+            }
+        }
         loadMercadopagoBrick().catch((err) => {
             mercadopagoBrickError.value = err?.message || 'Não foi possível carregar o formulário de pagamento. Verifique sua conexão e tente recarregar.';
         });
@@ -809,8 +1246,417 @@ watch(
     { immediate: true }
 );
 
+const cajupayMountRef = ref(null);
+const cajupaySessionToken = ref('');
+/** Base da API para o SDK (proxy same-origin em HTTP local; API direta em HTTPS). */
+const cajupaySdkBaseUrl = ref('');
+const cajupayPollingToken = ref('');
+const cajupayError = ref('');
+const cajupayPolling = ref(false);
+const cajupaySessionLoading = ref(false);
+const cajupayMissingFieldsHint = ref('');
+const cajupayMethodsAvailable = ref([]);
+/** Após POST /checkout/cajupay/confirm-order com sucesso (wallets podem materializar antes do 1º confirm do SDK). */
+const cajupayOrderMaterialized = ref(false);
+let cajupayPollTimer = null;
+let cajupaySessionDebounce = null;
+
+function stopCajuPayPolling() {
+    if (cajupayPollTimer) {
+        clearTimeout(cajupayPollTimer);
+        cajupayPollTimer = null;
+    }
+    cajupayPolling.value = false;
+}
+
+function resetCajuPaySessionState() {
+    cajupaySessionToken.value = '';
+    cajupaySdkBaseUrl.value = '';
+    cajupayPollingToken.value = '';
+    cajupayMethodsAvailable.value = [];
+    cajupayOrderMaterialized.value = false;
+    cajupayError.value = '';
+    stopCajuPayPolling();
+}
+
+/** Pré-carrega script do SDK quando o fluxo CajuPay está ativo. */
+async function refreshCajupayWalletProbe() {
+    if (!isCajupayCheckoutUi.value) {
+        return;
+    }
+    try {
+        await loadCajuPaySdk();
+    } catch (_) {
+        /* opcional */
+    }
+}
+
+watch(
+    () => [form.payment_method, isCajuPaySdkFlow.value],
+    () => {
+        if (isCajupayCheckoutUi.value) {
+            void refreshCajupayWalletProbe();
+        }
+    },
+    { immediate: true }
+);
+
+watch(
+    () => [form.payment_method, isCajuPaySdkFlow.value],
+    () => {
+        if (!isCajupayCheckoutUi.value) {
+            resetCajuPaySessionState();
+        }
+    }
+);
+
+function buildCajuPaySessionPayload() {
+    const payload = {
+        product_id: form.product_id,
+        payment_method: form.payment_method,
+        coupon_code: (form.coupon_code || '').trim() || null,
+    };
+    if (props.productOfferId) payload.product_offer_id = props.productOfferId;
+    if (props.subscriptionPlanId) payload.subscription_plan_id = props.subscriptionPlanId;
+    if (props.checkoutSessionToken) payload.checkout_session_token = props.checkoutSessionToken;
+    if (props.displayCurrency) payload.display_currency = props.displayCurrency;
+    if (props.checkoutLocale) payload.checkout_locale = props.checkoutLocale;
+    if (Array.isArray(props.orderBumpIds) && props.orderBumpIds.length > 0) {
+        payload.order_bump_ids = props.orderBumpIds
+            .map((id) => (typeof id === 'number' ? id : parseInt(id, 10)))
+            .filter((n) => !Number.isNaN(n));
+    }
+    appendUtmsAndAffiliate(payload);
+    return payload;
+}
+
+function buildPaypalPayload() {
+    const payload = {
+        product_id: form.product_id,
+        payment_method: 'paypal',
+        email: form.email,
+        name: showName.value ? form.name : '',
+        cpf: showCpf.value ? (form.cpf || '').replace(/\D/g, '') : '',
+        phone: showPhone.value ? form.country_code + phoneDigits.value : '',
+        coupon_code: (form.coupon_code || '').trim() || null,
+        website: honeypotWebsite.value,
+        turnstile_token: turnstileActive.value ? turnstileToken.value : '',
+        checkout_session_token: props.checkoutSessionToken?.trim() || '',
+        checkout_locale: props.checkoutLocale || 'pt_BR',
+    };
+    if (props.productOfferId) payload.product_offer_id = props.productOfferId;
+    if (props.subscriptionPlanId) payload.subscription_plan_id = props.subscriptionPlanId;
+    if (props.displayCurrency) payload.display_currency = props.displayCurrency;
+    if (Array.isArray(props.orderBumpIds) && props.orderBumpIds.length > 0) {
+        payload.order_bump_ids = props.orderBumpIds
+            .map((id) => (typeof id === 'number' ? id : parseInt(id, 10)))
+            .filter((n) => !Number.isNaN(n));
+    }
+    if (props.requiresShipping) {
+        payload.shipping_cep = (form.address_zipcode || '').replace(/\D/g, '').slice(0, 8);
+        payload.shipping_street = (form.address_street || '').trim();
+        payload.shipping_number = (form.address_number || '').trim();
+        payload.shipping_complement = (form.address_complement || '').trim();
+        payload.shipping_neighborhood = (form.address_neighborhood || '').trim();
+        payload.shipping_city = (form.address_city || '').trim();
+        payload.shipping_state = (form.address_state || '').trim().slice(0, 2).toUpperCase();
+    }
+    appendUtmsAndAffiliate(payload);
+    return payload;
+}
+
+async function onPaypalApproved(result) {
+    const oid = result?.order_id;
+    const url = result?.redirect_url;
+    if (oid && url) {
+        await completeApprovedPurchase(oid, url, 'approved');
+        return;
+    }
+    if (url) {
+        navigateAfterCheckout(url);
+    }
+}
+
+function onPaypalError(message) {
+    const msg = typeof message === 'string' && message.trim()
+        ? message
+        : 'Não foi possível pagar com PayPal. Tente novamente.';
+    form.setError('payment_method', msg);
+}
+
+function cajupayMinimumFieldsReady() {
+    cajupayMissingFieldsHint.value = '';
+    return true;
+}
+
+function validateCajuPayCustomerFields() {
+    const errors = {};
+    const email = (form.email || '').trim();
+    if (email.length < 5 || !/.+@.+\..+/.test(email)) {
+        errors.email = 'E-mail obrigatório.';
+    }
+    if (showName.value && (form.name || '').trim().length < 2) {
+        errors.name = 'Informe seu nome completo.';
+    }
+    if (showCpf.value) {
+        const cpfDigits = (form.cpf || '').replace(/\D/g, '');
+        if (cpfDigits.length !== 11 || !isValidCpf(cpfDigits)) {
+            errors.cpf = 'CPF inválido.';
+        }
+    }
+    if (showPhone.value && (phoneDigits.value || '').length < 8) {
+        errors.phone = 'Telefone inválido.';
+    }
+    if (Object.keys(errors).length > 0) {
+        Object.entries(errors).forEach(([k, v]) => form.setError(k, v));
+        showEditForm.value = true;
+        return false;
+    }
+    form.clearErrors('email', 'name', 'cpf', 'phone');
+    return true;
+}
+
+async function ensureCajuPaySession({ silent = false } = {}) {
+    if (!isCajuPaySdkFlow.value) return null;
+    if (cajupaySessionToken.value) return cajupaySessionToken.value;
+    if (cajupaySessionLoading.value) return null;
+    if (!cajupayMinimumFieldsReady()) return null;
+
+    cajupaySessionLoading.value = true;
+    if (!silent) cajupayError.value = '';
+    try {
+        const res = await axios.post('/checkout/cajupay/session', buildCajuPaySessionPayload(), {
+            headers: {
+                Accept: 'application/json',
+                'X-Requested-With': 'XMLHttpRequest',
+                'X-XSRF-TOKEN': getCsrfToken(),
+            },
+            withCredentials: true,
+        });
+        const data = res?.data || {};
+        if (!data.success || !data.token) {
+            cajupayError.value = data?.message || 'Não foi possível iniciar o pagamento na CajuPay.';
+            return null;
+        }
+        cajupaySessionToken.value = data.token;
+        cajupaySdkBaseUrl.value = typeof data.sdk_base_url === 'string' ? data.sdk_base_url.trim() : '';
+        cajupayPollingToken.value = data.polling_token || '';
+        cajupayMethodsAvailable.value = Array.isArray(data.methods_available) ? data.methods_available : [];
+
+        if (cajupayMethodsAvailable.value.length > 0 && data.method_supported === false) {
+            const methodLabel = form.payment_method === 'apple_pay' ? 'Apple Pay'
+                : form.payment_method === 'google_pay' ? 'Google Pay'
+                : form.payment_method === 'card' ? 'Cartão'
+                : 'Esse método de pagamento';
+            cajupayError.value = `${methodLabel} não está disponível para esta conta CajuPay no momento. Selecione outra forma de pagamento (ex.: Cartão).`;
+        }
+
+        return data.token;
+    } catch (e) {
+        const msg = e?.response?.data?.message || e?.message || 'Falha ao iniciar pagamento.';
+        cajupayError.value = msg;
+        return null;
+    } finally {
+        cajupaySessionLoading.value = false;
+    }
+}
+
+function scheduleEnsureCajuPaySession() {
+    if (cajupaySessionDebounce) clearTimeout(cajupaySessionDebounce);
+    cajupaySessionDebounce = setTimeout(() => {
+        ensureCajuPaySession({ silent: true });
+    }, 800);
+}
+
+async function pollCajuPayOrderStatus() {
+    if (!cajupayPollingToken.value) return;
+    try {
+        const res = await axios.get('/checkout/order-status', {
+            params: { token: cajupayPollingToken.value },
+            headers: { Accept: 'application/json' },
+            withCredentials: true,
+        });
+        const data = res?.data || {};
+        if (data.status === 'completed' && data.redirect_url) {
+            stopCajuPayPolling();
+            cardApproved.value = true;
+            cardApprovedRedirectUrl.value = data.redirect_url;
+            const oid = data.order_id;
+            if (oid) {
+                await completeApprovedPurchase(oid, data.redirect_url, 'approved');
+            }
+            return;
+        }
+        if (['rejected', 'cancelled', 'failed'].includes(data.status)) {
+            stopCajuPayPolling();
+            cajupayError.value = 'Pagamento recusado. Tente novamente ou use outro método.';
+        }
+    } catch (_) {
+        /* segue tentando */
+    }
+    cajupayPollTimer = setTimeout(pollCajuPayOrderStatus, 2000);
+}
+
+function startCajuPayPolling(token) {
+    if (!token) return;
+    cajupayPollingToken.value = token;
+    cajupayPolling.value = true;
+    stopCajuPayPolling();
+    cajupayPolling.value = true;
+    cajupayPollTimer = setTimeout(pollCajuPayOrderStatus, 2000);
+}
+
+watch(() => form.payment_method, () => {
+    turnstileToken.value = '';
+    turnstileRef.value?.reset?.();
+    cajupayError.value = '';
+    if (cajupaySessionToken.value) {
+        resetCajuPaySessionState();
+    }
+    if (isCajuPaySdkFlow.value) {
+        scheduleEnsureCajuPaySession();
+    } else {
+        cajupayMissingFieldsHint.value = '';
+    }
+});
+
+watch(
+    () => [form.coupon_code, props.orderBumpIds, props.productOfferId, props.subscriptionPlanId],
+    () => {
+        if (!isCajuPaySdkFlow.value) return;
+        if (cajupaySessionToken.value) {
+            resetCajuPaySessionState();
+        }
+        scheduleEnsureCajuPaySession();
+    },
+    { deep: true },
+);
+
+async function postCajuPayConfirmOrder() {
+    const pollingToken = cajupayPollingToken.value;
+    if (!pollingToken) {
+        throw new Error('Sessão de pagamento não iniciada. Aguarde ou recarregue a página.');
+    }
+    const orderPayload = {
+        polling_token: pollingToken,
+        email: form.email,
+        name: showName.value ? form.name : '',
+        cpf: showCpf.value ? (form.cpf || '').replace(/\D/g, '') : '',
+        phone: showPhone.value ? form.country_code + phoneDigits.value : '',
+        installments: cajupayMountRef.value?.getInstallments?.() ?? 1,
+    };
+    appendUtmsAndAffiliate(orderPayload);
+    const orderRes = await axios.post('/checkout/cajupay/confirm-order', orderPayload, {
+        headers: {
+            Accept: 'application/json',
+            'X-Requested-With': 'XMLHttpRequest',
+            'X-XSRF-TOKEN': getCsrfToken(),
+        },
+        withCredentials: true,
+    });
+    const orderData = orderRes?.data || {};
+    if (!orderData.success) {
+        throw new Error(orderData?.message || 'Não foi possível registrar o pedido.');
+    }
+    return orderData;
+}
+
+async function beforeCajuPayWalletPrime() {
+    if (!isCajuPayWalletSdk.value) return;
+    if (cajupayOrderMaterialized.value) return;
+    if (!validateCajuPayCustomerFields()) {
+        throw new Error('Preencha e-mail e os dados obrigatórios acima antes de usar a carteira.');
+    }
+    try {
+        await postCajuPayConfirmOrder();
+    } catch (e) {
+        const fieldErrors = e?.response?.data?.errors;
+        if (fieldErrors && typeof fieldErrors === 'object') {
+            Object.entries(fieldErrors).forEach(([k, v]) => form.setError(k, Array.isArray(v) ? v[0] : v));
+            showEditForm.value = true;
+        }
+        throw new Error(e?.response?.data?.message || e?.message || 'Não foi possível registrar o pedido.');
+    }
+    cajupayOrderMaterialized.value = true;
+    startCajuPayPolling(cajupayPollingToken.value);
+}
+
+async function submitCajuPaySdkFlow(paymentMethod) {
+    cajupayError.value = '';
+    cardFormError.value = '';
+
+    if (!validateCajuPayCustomerFields()) {
+        cajupayError.value = 'Preencha os dados do cliente acima antes de finalizar o pagamento.';
+        return;
+    }
+
+    cardTokenizing.value = true;
+    try {
+        let token = cajupaySessionToken.value;
+        let pollingToken = cajupayPollingToken.value;
+        if (!token) {
+            await ensureCajuPaySession();
+            token = cajupaySessionToken.value;
+            pollingToken = cajupayPollingToken.value;
+            if (!token) {
+                throw new Error(cajupayError.value || 'Não foi possível iniciar o pagamento na CajuPay.');
+            }
+            await nextTick();
+            const start = Date.now();
+            while (!cajupayMountRef.value?.isReady?.() && Date.now() - start < 8000) {
+                await new Promise((r) => { setTimeout(r, 150); });
+            }
+        }
+
+        if (!cajupayMountRef.value?.isReady?.()) {
+            throw new Error('Aguarde o checkout CajuPay terminar de carregar e tente novamente.');
+        }
+
+        try {
+            await postCajuPayConfirmOrder();
+            cajupayOrderMaterialized.value = true;
+        } catch (e) {
+            const fieldErrors = e?.response?.data?.errors;
+            if (fieldErrors && typeof fieldErrors === 'object') {
+                Object.entries(fieldErrors).forEach(([k, v]) => form.setError(k, Array.isArray(v) ? v[0] : v));
+                showEditForm.value = true;
+                throw new Error(e?.response?.data?.message || 'Dados do cliente incompletos.');
+            }
+            throw e;
+        }
+
+        cajupayMountRef.value?.setPayer?.({
+            name: form.name,
+            email: form.email,
+            document: (form.cpf || '').replace(/\D/g, ''),
+        });
+
+        await cajupayMountRef.value.confirm();
+        if (!cajupayPolling.value) {
+            startCajuPayPolling(pollingToken);
+        }
+    } catch (e) {
+        const msg = e?.response?.data?.message || e?.message || 'Falha ao processar pagamento.';
+        cajupayError.value = msg;
+        cardFormError.value = msg;
+        showCardRefusedModal.value = true;
+        cardRefusedMessage.value = msg;
+    } finally {
+        cardTokenizing.value = false;
+    }
+}
+
+onMounted(() => {
+    if (isCajuPaySdkFlow.value) {
+        scheduleEnsureCajuPaySession();
+    }
+});
+
 onBeforeUnmount(() => {
+    stopCajuPayPolling();
+    if (cajupaySessionDebounce) clearTimeout(cajupaySessionDebounce);
     destroyMercadopagoBrick();
+    resetCajuPaySessionState();
 });
 
 function closeRefusedModal() {
@@ -834,7 +1680,7 @@ function onRefusedOtherPaymentMethod(e) {
     }
     showCardRefusedModal.value = false;
     cardRefusedMessage.value = '';
-    const other = props.availablePaymentMethods.find((m) => m.id !== 'card');
+    const other = checkoutPaymentMethodsForDevice.value.find((m) => m.id !== 'card');
     if (other) form.payment_method = other.id;
 }
 
@@ -950,30 +1796,54 @@ async function initMercadopagoBrick() {
             onReady: () => {
                 mercadopagoBrickReady.value = true;
             },
-            onSubmit: (param) => {
-                const formData = param?.formData ?? param;
-                if (!formData || typeof formData !== 'object') {
+            onSubmit: (formData, additionalData) => {
+                const data = formData?.formData ?? formData;
+                if (!data || typeof data !== 'object') {
                     cardFormError.value = 'Dados do cartão inválidos.';
                     return Promise.reject();
+                }
+                // Doc MP Brick: incluir payment type (credit_card/debit_card) quando disponível.
+                if (additionalData?.paymentTypeId && !data.payment_type_id) {
+                    data.payment_type_id = additionalData.paymentTypeId;
                 }
                 return new Promise((resolve, reject) => {
                     cardTokenizing.value = true;
                     cardFormError.value = '';
-                    submitCardWithMercadopagoFormData(formData)
+                    submitCardWithMercadopagoFormData(data)
                         .then(async (res) => {
-                            const data = res?.data;
-                            const isJson = data && typeof data === 'object' && !Array.isArray(data);
-                            if (isJson && data.success) {
-                                const url = data.redirect_url;
+                            const payload = res?.data;
+                            const isJson = payload && typeof payload === 'object' && !Array.isArray(payload);
+                            const status = String(payload?.status || '').toLowerCase();
+                            const approved = isCardPaymentApprovedStatus(status);
+                            if (isJson && payload.success && approved) {
+                                const url = payload.redirect_url
+                                    || (payload.order_id
+                                        ? `/checkout/obrigado?order_id=${encodeURIComponent(String(payload.order_id))}&next=login`
+                                        : null);
                                 if (url) {
-                                    cardApproved.value = true;
-                                    emitPurchaseConfirmed(data.order_id, 'approved');
-                                    setTimeout(() => router.visit(url), 800);
+                                    await completeApprovedPurchase(payload.order_id, url, 'approved');
+                                    resolve();
+                                    return;
                                 }
-                                resolve();
-                            } else {
-                                reject();
                             }
+                            if (isJson && ['rejected', 'refused', 'cancelled', 'canceled', 'failed'].includes(status)) {
+                                const msg = payload.message
+                                    || 'Pagamento recusado. Verifique os dados do cartão e tente novamente.';
+                                cardFormError.value = typeof msg === 'string' ? msg : 'Pagamento recusado.';
+                                reject();
+                                return;
+                            }
+                            // pending / in_process: não tratar como erro do Brick (doc MP — aguardar webhook).
+                            if (isJson && (payload.pending || ['pending', 'in_process', 'in_mediation', 'authorized'].includes(status))) {
+                                cardFormError.value = payload.message
+                                    || 'Pagamento em processamento. Você receberá a confirmação em breve.';
+                                resolve();
+                                return;
+                            }
+                            const msg = (isJson && payload.message)
+                                || 'Pagamento não aprovado. Verifique os dados do cartão e tente novamente.';
+                            cardFormError.value = typeof msg === 'string' ? msg : 'Pagamento não aprovado.';
+                            reject();
                         })
                         .catch((err) => {
                             const msg = err?.response?.data?.message || err?.message || 'Não foi possível processar o pagamento.';
@@ -1163,7 +2033,7 @@ async function getPagarmePaymentTokenViaApi() {
     if (!id || typeof id !== 'string') {
         throw new Error('Resposta inválida da Pagar.me.');
     }
-    const installments = Math.min(props.cardMaxInstallments || 1, Math.max(1, selectedInstallments.value));
+    const installments = currentInstallments();
     const last4 = data?.card?.last_four_digits || cardNumberDigits.value.slice(-4);
     return {
         payment_token: JSON.stringify({ card_token: id, installments }),
@@ -1181,7 +2051,7 @@ async function getPagarmePaymentToken() {
         await loadPagarmeTokenizeScript(pk);
         ensurePagarmeCheckoutInit();
         const { token } = await requestPagarmeTokenFromForm(pagarmeTokenizeFormId);
-        const installments = Math.min(props.cardMaxInstallments || 1, Math.max(1, selectedInstallments.value));
+        const installments = currentInstallments();
         const last4 = cardNumberDigits.value.length >= 4 ? cardNumberDigits.value.slice(-4) : '';
         return {
             payment_token: JSON.stringify({ card_token: token, installments }),
@@ -1190,6 +2060,14 @@ async function getPagarmePaymentToken() {
     } catch {
         return getPagarmePaymentTokenViaApi();
     }
+}
+
+async function getCieloPaymentToken() {
+    await nextTick();
+    return requestCieloPaymentToken({
+        productId: form.product_id,
+        installments: currentInstallments(),
+    });
 }
 
 async function getEfiPaymentToken() {
@@ -1219,7 +2097,7 @@ async function getEfiPaymentToken() {
 }
 
 function submit() {
-    const methods = Array.isArray(props.availablePaymentMethods) ? props.availablePaymentMethods : [];
+    const methods = checkoutPaymentMethodsForDevice.value;
     if (methods.length === 0) {
         form.setError('payment_method', 'Nenhum método de pagamento disponível.');
         return;
@@ -1231,9 +2109,19 @@ function submit() {
     }
     form.clearErrors('payment_method');
 
-    if (paymentMethod === 'card') {
+    if (paymentMethod === 'paypal') {
+        return;
+    }
+
+    const isCardLikeSubmit = paymentMethod === 'card' || paymentMethod === 'apple_pay' || paymentMethod === 'google_pay';
+
+    if (isCardLikeSubmit) {
         cardFormError.value = '';
-        if (isCardGatewayAsaas.value) {
+        if (isCajuPaySdkFlow.value) {
+            void submitCajuPaySdkFlow(paymentMethod);
+            return;
+        }
+        if (paymentMethod === 'card' && isCardGatewayAsaas.value) {
             if (asaasCardStep.value === 1) {
                 asaasCardStep.value = 2;
                 return;
@@ -1295,14 +2183,17 @@ function submit() {
                 .then(async (res) => {
                     const data = res?.data;
                     const isJson = data && typeof data === 'object' && !Array.isArray(data);
-                    if (isJson && data.success) {
-                        const url = data.redirect_url;
-                        if (url) {
-                            cardApproved.value = true;
-                            cardApprovedRedirectUrl.value = url;
-                            emitPurchaseConfirmed(data.order_id, 'approved');
-                            setTimeout(() => router.visit(url), 1800);
-                        }
+                    if (isJson && data.success && data.requires_action && typeof data.redirect_url === 'string' && data.redirect_url) {
+                        window.location.assign(data.redirect_url);
+                        return;
+                    }
+                    if (isJson && data.success && isCardPaymentApprovedStatus(data.status) && data.redirect_url) {
+                        await completeApprovedPurchase(data.order_id, data.redirect_url, 'approved');
+                    } else if (isJson && !data.success) {
+                        const msg = data.message || 'Pagamento não aprovado.';
+                        cardFormError.value = typeof msg === 'string' ? msg : 'Pagamento não aprovado.';
+                        showCardRefusedModal.value = true;
+                        cardRefusedMessage.value = cardFormError.value;
                     }
                 })
                 .catch((err) => {
@@ -1351,6 +2242,16 @@ function submit() {
                 cardFormError.value = 'Preencha o endereço de cobrança completo (CEP, rua, número, bairro, cidade e UF).';
                 return;
             }
+        } else if (isCardGatewayCielo.value) {
+            const nameOk = (cardHolderName.value || form.name || '').trim().length >= 3;
+            const numberOk = cardNumberDigits.value.length >= 13 && cardNumberDigits.value.length <= 19;
+            const expOk = cardExpMonth.value.length === 2 && parseInt(cardExpMonth.value, 10) >= 1 && parseInt(cardExpMonth.value, 10) <= 12
+                && (cardExpYear.value.length === 2 || cardExpYear.value.length === 4);
+            const cvvOk = cardCvv.value.length >= 3 && cardCvv.value.length <= 4;
+            if (!nameOk || !numberOk || !expOk || !cvvOk) {
+                cardFormError.value = props.t('checkout.card_fill_all') || 'Preencha todos os dados do cartão corretamente.';
+                return;
+            }
         } else {
             if (!props.cardPayeeCode || !props.cardPayeeCode.trim()) {
                 cardFormError.value = props.t('checkout.card_not_configured') || 'Pagamento por cartão não está configurado.';
@@ -1372,7 +2273,9 @@ function submit() {
             ? getStripePaymentMethod()
             : isCardGatewayPagarme.value
                 ? getPagarmePaymentToken()
-                : getEfiPaymentToken();
+                : isCardGatewayCielo.value
+                    ? getCieloPaymentToken()
+                    : getEfiPaymentToken();
         getTokenPromise
             .then(({ payment_token, card_mask }) => {
                 const payload = {
@@ -1385,7 +2288,7 @@ function submit() {
                     coupon_code: (form.coupon_code || '').trim() || null,
                     payment_token,
                     card_mask: card_mask || undefined,
-                    installments: Math.min(props.cardMaxInstallments || 1, Math.max(1, selectedInstallments.value)),
+                    installments: currentInstallments(),
                 };
                 if (isCardGatewayPagarme.value) {
                     payload.address_zipcode = (form.address_zipcode || '').replace(/\D/g, '').slice(0, 8);
@@ -1425,33 +2328,33 @@ function submit() {
                     }
                     const url = data.redirect_url || (data.order_id ? `/checkout/obrigado?order_id=${data.order_id}` : null);
                     if (url && !url.replace(/\/$/, '').endsWith(window.location.origin + '/checkout')) {
-                        cardApproved.value = true;
-                        cardApprovedRedirectUrl.value = url;
-                        emitPurchaseConfirmed(data.order_id, 'approved');
-                        setTimeout(() => router.visit(url), 800);
+                        await completeApprovedPurchase(data.order_id, url, 'approved');
                         return;
                     }
                 }
                 if (isJson && data.success) {
+                    if (!isCardPaymentApprovedStatus(data.status) && !data.requires_action) {
+                        const pendingMsg = typeof data.message === 'string' && data.message.trim() !== ''
+                            ? data.message
+                            : 'Pagamento em processamento. Aguarde a confirmação.';
+                        cardRefusedMessage.value = pendingMsg;
+                        showCardRefusedModal.value = true;
+                        cardTokenizing.value = false;
+                        return;
+                    }
                     const url = data.redirect_url;
                     const isPostUrl = (u) => !u || u.replace(/\/$/, '') === window.location.origin + '/checkout';
-                    if (url && !isPostUrl(url)) {
-                        cardApproved.value = true;
-                        cardApprovedRedirectUrl.value = url;
-                        emitPurchaseConfirmed(data.order_id, 'approved');
-                        setTimeout(() => router.visit(url), 1800);
+                    if (url && !isPostUrl(url) && isCardPaymentApprovedStatus(data.status)) {
+                        await completeApprovedPurchase(data.order_id, url, 'approved');
                         return;
                     }
                     if (url && isPostUrl(url)) {
                         cardTokenizing.value = false;
                         return;
                     }
-                    if (data.order_id) {
+                    if (data.order_id && isCardPaymentApprovedStatus(data.status)) {
                         const fallback = `/checkout/obrigado?order_id=${encodeURIComponent(String(data.order_id))}&next=login`;
-                        cardApproved.value = true;
-                        cardApprovedRedirectUrl.value = fallback;
-                        emitPurchaseConfirmed(data.order_id, 'approved');
-                        setTimeout(() => router.visit(fallback), 800);
+                        await completeApprovedPurchase(data.order_id, fallback, 'approved');
                         return;
                     }
                     const pendingMsg = typeof data.message === 'string' && data.message.trim() !== ''
@@ -1491,18 +2394,37 @@ function submit() {
         return;
     }
 
+    if (!validateCajuPayCustomerFields()) {
+        return;
+    }
+    if (!props.checkoutSessionToken?.trim()) {
+        form.setError('payment_method', 'Sessão de checkout inválida. Recarregue a página e tente novamente.');
+        return;
+    }
+    if (turnstileActive.value && !turnstileToken.value) {
+        form.setError('payment_method', 'Aguarde a verificação de segurança ou tente novamente.');
+        return;
+    }
+    if (checkoutSubmitting.value) {
+        return;
+    }
+    checkoutSubmitting.value = true;
+
     const payload = {
         product_id: form.product_id,
         payment_method: paymentMethod,
         email: form.email,
         name: showName.value ? form.name : '',
-        cpf: showCpf.value ? (form.cpf || '').replace(/\D/g, '') : '',
+        cpf: (showCpf.value || paymentMethod === 'open_finance') ? (form.cpf || '').replace(/\D/g, '') : '',
         phone: showPhone.value ? form.country_code + phoneDigits.value : '',
         coupon_code: (form.coupon_code || '').trim() || null,
+        idempotency_key: checkoutIdempotencyKey.value,
+        website: honeypotWebsite.value,
+        turnstile_token: turnstileActive.value ? turnstileToken.value : '',
+        checkout_session_token: props.checkoutSessionToken?.trim() || '',
     };
     if (props.productOfferId) payload.product_offer_id = props.productOfferId;
     if (props.subscriptionPlanId) payload.subscription_plan_id = props.subscriptionPlanId;
-    if (props.checkoutSessionToken) payload.checkout_session_token = props.checkoutSessionToken;
     if (props.displayCurrency) payload.display_currency = props.displayCurrency;
     if (Array.isArray(props.orderBumpIds) && props.orderBumpIds.length > 0) {
         payload.order_bump_ids = props.orderBumpIds.map((id) => (typeof id === 'number' ? id : parseInt(id, 10))).filter((n) => !Number.isNaN(n));
@@ -1515,8 +2437,70 @@ function submit() {
         payload.address_city = (form.address_city || '').trim();
         payload.address_state = (form.address_state || '').trim().slice(0, 2).toUpperCase();
     }
+    if (props.requiresShipping) {
+        payload.shipping_cep = (form.address_zipcode || '').replace(/\D/g, '').slice(0, 8);
+        payload.shipping_street = (form.address_street || '').trim();
+        payload.shipping_number = (form.address_number || '').trim();
+        payload.shipping_complement = (form.address_complement || '').trim();
+        payload.shipping_neighborhood = (form.address_neighborhood || '').trim();
+        payload.shipping_city = (form.address_city || '').trim();
+        payload.shipping_state = (form.address_state || '').trim().slice(0, 2).toUpperCase();
+    }
     appendUtmsAndAffiliate(payload);
-    form.transform(() => payload).post('/checkout');
+
+    if (paymentMethod === 'open_finance') {
+        const cpfDigits = (payload.cpf || '').replace(/\D/g, '');
+        if (cpfDigits.length < 11) {
+            checkoutSubmitting.value = false;
+            form.setError('cpf', 'Informe um CPF válido para pagar com Open Finance.');
+            showEditForm.value = true;
+            return;
+        }
+        axios.post('/checkout', payload, {
+            headers: {
+                Accept: 'application/json',
+                'X-Requested-With': 'XMLHttpRequest',
+                'X-XSRF-TOKEN': getCsrfToken(),
+            },
+            withCredentials: true,
+        })
+            .then((res) => {
+                const data = res?.data;
+                if (data && data.success && data.redirect_url) {
+                    window.location.href = data.redirect_url;
+                    return;
+                }
+                form.setError('payment_method', data?.message || 'Não foi possível iniciar o Open Finance.');
+            })
+            .catch((err) => {
+                const msg = err?.response?.data?.message
+                    || err?.response?.data?.errors?.payment_method?.[0]
+                    || err?.response?.data?.errors?.cpf?.[0]
+                    || 'Não foi possível iniciar o Open Finance. Tente novamente.';
+                form.setError('payment_method', typeof msg === 'string' ? msg : 'Não foi possível iniciar o Open Finance.');
+                showEditForm.value = true;
+            })
+            .finally(() => {
+                checkoutSubmitting.value = false;
+            });
+        return;
+    }
+
+    form.transform(() => payload).post('/checkout', {
+        onError: (errors) => {
+            const msg = errors?.payment_method
+                || errors?.checkout_session_token
+                || errors?.turnstile_token
+                || errors?.email
+                || (typeof errors === 'object' && Object.values(errors).flat?.()[0]);
+            if (msg && !form.errors.payment_method) {
+                form.setError('payment_method', Array.isArray(msg) ? msg[0] : msg);
+            }
+        },
+        onFinish: () => {
+            checkoutSubmitting.value = false;
+        },
+    });
 }
 </script>
 
@@ -1548,14 +2532,69 @@ function submit() {
             </div>
         </Teleport>
 
+        <template v-if="skipCustomerForm">
+            <div class="mb-6 overflow-hidden rounded-[14px] border border-[#E2D7CB] bg-[#FBF7F2]" data-checkout="form-section-account">
+                <div class="flex items-start gap-3 p-4 sm:p-5">
+                    <span class="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[#1A1410] text-sm font-bold uppercase text-white">
+                        {{ (loggedInCustomer.name || loggedInCustomer.email || '?').slice(0, 1) }}
+                    </span>
+                    <div class="min-w-0 flex-1">
+                        <div class="flex flex-wrap items-center gap-2">
+                            <h2 class="font-display text-[16px] font-bold text-[#1A1410]">Comprando como {{ loggedInCustomer.name }}</h2>
+                            <span class="rounded-[8px] bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-800">Conta verificada</span>
+                        </div>
+                        <p class="mt-0.5 truncate text-sm text-[#8A7B6E]">{{ loggedInCustomer.email }}</p>
+                        <p class="mt-2 text-xs leading-relaxed text-[#6B5E54]">Seus dados já estão salvos. Escolha só a forma de pagamento abaixo.</p>
+                    </div>
+                </div>
+                <div class="grid gap-px border-t border-[#E2D7CB] bg-[#E2D7CB] sm:grid-cols-3">
+                    <div class="bg-white px-4 py-2.5 text-xs">
+                        <div class="text-[#A3958A]">Telefone</div>
+                        <div class="font-medium text-[#1A1410]">{{ phoneDisplay || '—' }}</div>
+                    </div>
+                    <div class="bg-white px-4 py-2.5 text-xs">
+                        <div class="text-[#A3958A]">CPF</div>
+                        <div class="font-medium text-[#1A1410]">{{ cpfDisplay || '—' }}</div>
+                    </div>
+                    <div class="bg-white px-4 py-2.5 text-xs">
+                        <div class="text-[#A3958A]">E-mail</div>
+                        <div class="truncate font-medium text-[#1A1410]">{{ form.email }}</div>
+                    </div>
+                </div>
+            </div>
+            <!-- campos hidden para submit -->
+            <input type="hidden" :value="form.name" />
+            <input type="hidden" :value="form.email" />
+            <input type="hidden" :value="form.cpf" />
+        </template>
+        <template v-else>
         <div class="mb-6 flex items-center gap-3" data-checkout="form-section-dados-header">
-            <span class="flex h-10 w-10 items-center justify-center rounded-xl bg-gray-100 text-gray-600" aria-hidden="true">
+            <span class="flex h-10 w-10 items-center justify-center rounded-[12px] bg-[#F1EAE2] text-[#3D332B]" aria-hidden="true">
                 <UserRound class="h-5 w-5" />
             </span>
-            <h2 class="text-lg font-semibold tracking-tight text-gray-900">{{ t('checkout.seus_dados') }}</h2>
+            <div class="min-w-0 flex-1">
+                <h2 class="font-display text-[18px] font-bold tracking-[-0.02em] text-[#1A1410]">{{ t('checkout.seus_dados') }}</h2>
+                <p class="text-xs text-[#8A7B6E]">
+                    Já tem conta?
+                    <a href="/login" class="font-semibold text-[#1A1410] underline decoration-[#E2D7CB] underline-offset-2 hover:decoration-[#1A1410]" @click.prevent="goLoginFromCheckout">Entrar</a>
+                    e pule esta etapa.
+                </p>
+            </div>
         </div>
+        </template>
         <form class="space-y-5" data-checkout="checkout-form-element" @submit.prevent="submit">
             <input v-model="form.product_id" type="hidden" />
+            <div class="absolute -left-[9999px] h-0 w-0 overflow-hidden" aria-hidden="true">
+                <label for="checkout-website-hp">Website</label>
+                <input
+                    id="checkout-website-hp"
+                    v-model="honeypotWebsite"
+                    type="text"
+                    name="website"
+                    tabindex="-1"
+                    autocomplete="off"
+                />
+            </div>
             <div
                 v-if="Object.keys(form.errors).length > 0"
                 class="rounded-xl border border-red-200 bg-red-50/90 px-4 py-3 text-sm font-medium text-red-800"
@@ -1564,7 +2603,7 @@ function submit() {
             >
                 {{ t('checkout.corrija_erros') || 'Corrija os erros abaixo antes de continuar.' }}
             </div>
-            <div v-if="showEditForm" class="grid grid-cols-1 gap-5 sm:grid-cols-2 sm:gap-4" data-checkout="form-fields">
+            <div v-if="showEditForm && !skipCustomerForm" class="grid grid-cols-1 gap-5 sm:grid-cols-2 sm:gap-4" data-checkout="form-fields">
                 <div v-if="showName" class="relative sm:col-span-2" data-checkout="field-name">
                     <label for="checkout-name" class="mb-2 block text-sm font-medium text-gray-700">{{ t('checkout.name') }}</label>
                     <div class="relative">
@@ -1781,7 +2820,7 @@ function submit() {
                     </div>
                 </template>
             </div>
-            <div v-else class="space-y-4" data-checkout="form-collapsed-summary">
+            <div v-else-if="!skipCustomerForm" class="space-y-4" data-checkout="form-collapsed-summary">
                 <div class="rounded-xl border-2 border-gray-100 bg-gray-50/80 p-4 space-y-2.5" data-checkout="form-data-summary">
                     <p v-if="showName" class="flex justify-between gap-2 text-sm">
                         <span class="text-gray-600">{{ t('checkout.name') }}</span>
@@ -1845,10 +2884,125 @@ function submit() {
                 @update:selected-ids="emit('update:orderBumpIds', $event)"
             />
 
+            <!-- Endereço de entrega (produto físico) — antes da forma de pagamento -->
+            <div
+                v-if="showDeliveryAddressBlock"
+                class="mt-8 space-y-4 rounded-xl border-2 border-emerald-100 bg-emerald-50/40 p-4"
+                data-checkout="form-delivery-address"
+            >
+                <div class="flex items-center gap-2 text-gray-700">
+                    <MapPin class="h-5 w-5 shrink-0 text-emerald-600" aria-hidden="true" />
+                    <span class="text-sm font-medium">Endereço de entrega</span>
+                </div>
+                <div class="text-sm text-gray-600">
+                    <p v-if="shippingQuoteLoading">Calculando frete…</p>
+                    <p v-else-if="shippingQuoteError" class="font-medium text-red-600">{{ shippingQuoteError }}</p>
+                    <p v-else-if="shippingAmountLocal > 0">
+                        Frete: <strong>{{ formatPrice(shippingAmountLocal, 'BRL') }}</strong>
+                        <span v-if="shippingDeliveryHint" class="block text-xs text-gray-500">{{ shippingDeliveryHint }}</span>
+                    </p>
+                    <p v-else class="text-xs text-gray-500">Informe o CEP para calcular o frete.</p>
+                </div>
+                <div v-if="!boletoAddressFetched" class="flex flex-col gap-2 sm:flex-row sm:items-end sm:gap-2">
+                    <div class="min-w-0 flex-1">
+                        <label for="checkout-delivery-cep" class="mb-2 block text-sm font-medium text-gray-700">CEP</label>
+                        <div class="relative">
+                            <span class="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-gray-400">
+                                <MapPin class="h-5 w-5" aria-hidden="true" />
+                            </span>
+                            <input
+                                id="checkout-delivery-cep"
+                                :value="form.address_zipcode"
+                                type="text"
+                                inputmode="numeric"
+                                maxlength="9"
+                                :class="inputClassWithIcon"
+                                placeholder="00000-000"
+                                @input="onAddressCepInput"
+                                @blur="fetchAddressByCep"
+                            />
+                        </div>
+                        <p v-if="form.errors.address_zipcode" class="mt-1.5 text-sm font-medium text-red-600">{{ form.errors.address_zipcode }}</p>
+                        <p v-else-if="addressCepError" class="mt-1.5 text-sm font-medium text-red-600">{{ addressCepError }}</p>
+                    </div>
+                    <button
+                        type="button"
+                        :disabled="addressCepLoading || (form.address_zipcode || '').replace(/\D/g, '').length < 8"
+                        class="shrink-0 self-start rounded-xl border-2 border-gray-200 bg-white px-4 py-3 text-sm font-medium text-gray-700 transition hover:bg-gray-50 disabled:opacity-50 sm:h-[3.25rem] sm:self-end"
+                        @click="fetchAddressByCep"
+                    >
+                        <Loader2 v-if="addressCepLoading" class="h-5 w-5 animate-spin" />
+                        <span v-else>{{ t('checkout.endereco_boleto_buscar') }}</span>
+                    </button>
+                </div>
+                <div v-if="!boletoAddressFetched" class="pt-1">
+                    <button
+                        type="button"
+                        class="text-xs font-medium text-gray-600 underline decoration-gray-300 underline-offset-2 hover:text-gray-800"
+                        @click="boletoManualAddress = !boletoManualAddress"
+                    >
+                        {{ boletoManualAddress ? 'Ocultar preenchimento manual' : 'Preencher endereço manualmente' }}
+                    </button>
+                </div>
+                <div v-if="!boletoAddressFetched && boletoManualAddress" class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <div class="sm:col-span-2">
+                        <label class="mb-2 block text-sm font-medium text-gray-700">Rua</label>
+                        <input v-model="form.address_street" type="text" :class="inputClass" placeholder="Rua" />
+                    </div>
+                    <div>
+                        <label class="mb-2 block text-sm font-medium text-gray-700">Número</label>
+                        <input v-model="form.address_number" type="text" :class="inputClass" placeholder="Nº" />
+                        <p v-if="form.errors.address_number" class="mt-1.5 text-sm font-medium text-red-600">{{ form.errors.address_number }}</p>
+                    </div>
+                    <div>
+                        <label class="mb-2 block text-sm font-medium text-gray-700">Complemento</label>
+                        <input v-model="form.address_complement" type="text" :class="inputClass" placeholder="Apto, bloco…" />
+                    </div>
+                    <div>
+                        <label class="mb-2 block text-sm font-medium text-gray-700">Bairro</label>
+                        <input v-model="form.address_neighborhood" type="text" :class="inputClass" placeholder="Bairro" />
+                    </div>
+                    <div>
+                        <label class="mb-2 block text-sm font-medium text-gray-700">Cidade</label>
+                        <input v-model="form.address_city" type="text" :class="inputClass" placeholder="Cidade" />
+                    </div>
+                    <div class="max-w-[12rem]">
+                        <label class="mb-2 block text-sm font-medium text-gray-700">UF</label>
+                        <input v-model="form.address_state" type="text" maxlength="2" :class="inputClass" placeholder="UF" />
+                    </div>
+                    <p v-if="form.errors.address_street || form.errors.address_neighborhood || form.errors.address_city || form.errors.address_state" class="sm:col-span-2 text-sm font-medium text-red-600">
+                        {{ form.errors.address_street || form.errors.address_neighborhood || form.errors.address_city || form.errors.address_state }}
+                    </p>
+                </div>
+                <template v-else>
+                    <p class="text-xs font-medium text-gray-500">
+                        {{ [form.address_street, form.address_neighborhood, [form.address_city, form.address_state].filter(Boolean).join(' - ')].filter(Boolean).join(', ') }}
+                    </p>
+                    <div class="max-w-[12rem]">
+                        <label for="checkout-delivery-number" class="mb-2 block text-sm font-medium text-gray-700">{{ t('checkout.endereco_boleto_numero') }}</label>
+                        <input
+                            id="checkout-delivery-number"
+                            v-model="form.address_number"
+                            type="text"
+                            :class="inputClassWithIcon"
+                            placeholder="Nº"
+                        />
+                        <p v-if="form.errors.address_number" class="mt-1.5 text-sm font-medium text-red-600">{{ form.errors.address_number }}</p>
+                    </div>
+                    <div class="max-w-md">
+                        <label class="mb-2 block text-sm font-medium text-gray-700">Complemento</label>
+                        <input v-model="form.address_complement" type="text" :class="inputClass" placeholder="Apto, bloco… (opcional)" />
+                    </div>
+                    <p v-if="form.errors.address_street || form.errors.address_neighborhood || form.errors.address_city || form.errors.address_state" class="text-sm font-medium text-red-600">
+                        {{ form.errors.address_street || form.errors.address_neighborhood || form.errors.address_city || form.errors.address_state }}
+                    </p>
+                </template>
+            </div>
+
             <!-- Forma de pagamento (componentes por gateway em gateways/<slug>/) -->
             <CheckoutPaymentMethods
                 v-model="form.payment_method"
-                :available-payment-methods="availablePaymentMethods"
+                :available-payment-methods="checkoutPaymentMethodsForDevice"
                 :primary-color="primaryColor"
                 :t="t"
             />
@@ -1856,15 +3010,40 @@ function submit() {
 
             <!-- Formulário de cartão (Stripe Elements ou campos Efí) -->
             <div
-                v-if="form.payment_method === 'card'"
-                class="space-y-4 rounded-xl border-2 border-gray-100 bg-gray-50/50 p-4"
+                v-if="isCardPaymentFamily"
+                :class="
+                    isCajupayCardOnly
+                        ? 'space-y-2'
+                        : 'space-y-4 rounded-xl border-2 border-gray-100 bg-gray-50/50 p-4'
+                "
                 data-checkout="form-card-panel"
             >
-                <div class="flex items-center gap-2 text-gray-700">
+                <div
+                    v-if="!isCajupayCardOnly"
+                    class="flex items-center gap-2 text-gray-700"
+                >
                     <span class="flex h-8 w-8 shrink-0 items-center justify-center">
-                        <img src="/images/gateways/card.png" alt="" class="h-6 w-6 object-contain" />
+                        <img
+                            v-if="form.payment_method === 'apple_pay'"
+                            src="/images/gateways/apple.png"
+                            alt=""
+                            class="h-6 w-6 object-contain"
+                        />
+                        <img
+                            v-else-if="form.payment_method === 'google_pay'"
+                            src="/images/gateways/gpay.png"
+                            alt=""
+                            class="h-6 w-6 object-contain"
+                        />
+                        <img v-else src="/images/gateways/card.png" alt="" class="h-6 w-6 object-contain" />
                     </span>
-                    <span class="text-sm font-medium">{{ t('checkout.dados_cartao') || 'Dados do cartão' }}</span>
+                    <span class="text-sm font-medium">{{
+                        form.payment_method === 'apple_pay'
+                            ? 'Apple Pay'
+                            : form.payment_method === 'google_pay'
+                              ? 'Google Pay'
+                              : t('checkout.dados_cartao') || 'Dados do cartão'
+                    }}</span>
                 </div>
                 <p v-if="cardFormError" class="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm font-medium text-red-700" role="alert">
                     {{ cardFormError }}
@@ -1884,15 +3063,15 @@ function submit() {
                 <!-- Asaas: 2 etapas (cartão + endereço com CEP) -->
                 <div v-else-if="isCardGatewayAsaas" class="space-y-4">
                     <AsaasCard
-                        :method="availablePaymentMethods?.find((m) => m.id === 'card') || { id: 'card', label: 'Cartão' }"
+                        :method="checkoutPaymentMethodsForDevice.find((m) => m.id === 'card') || { id: 'card', label: 'Cartão' }"
                         :selected="true"
                         :primary-color="primaryColor"
                         :card-data="asaasCardData"
                         :address-data="asaasAddressData"
                         :step="asaasCardStep"
                         :format-price="formatPrice"
-                        :card-installments-enabled="cardInstallmentsEnabled"
-                        :card-max-installments="cardMaxInstallments"
+                        :card-installments-enabled="cardInstallmentsEnabled && effectiveCardMaxInstallments > 1"
+                        :card-max-installments="effectiveCardMaxInstallments"
                         :checkout-total-brl="checkoutTotalBrl"
                         :t="t"
                         @update:cardData="asaasCardData = $event"
@@ -2044,8 +3223,65 @@ function submit() {
                         </div>
                     </template>
                 </div>
-                <!-- Efí: campos manuais para tokenização payment-token-efi -->
-                <div v-else class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <!-- Cartão / Apple Pay / Google Pay (CajuPay SDK, draft session — referência) -->
+                <div v-else-if="isCajuPaySdkFlow" class="space-y-2">
+                    <p v-if="cajupayError" class="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm font-medium text-red-700" role="alert">
+                        {{ cajupayError }}
+                    </p>
+                    <div
+                        class="rounded-xl border-2 border-gray-100 bg-white px-4"
+                        :class="form.payment_method === 'card' ? 'py-2' : 'py-3'"
+                    >
+                        <CajuPaySdkMount
+                            ref="cajupayMountRef"
+                            :payment-method="form.payment_method"
+                            :session-token="cajupaySessionToken"
+                            :api-base-url="cajupaySdkBaseUrl"
+                            :initial-payer="{ name: form.name, email: form.email, document: (form.cpf || '').replace(/\D/g, '') }"
+                            :locale="(checkoutLocale || '').replace('_', '-')"
+                            :before-wallet-prime="beforeCajuPayWalletPrime"
+                            container-id="cajupay-method"
+                        />
+                        <div
+                            v-if="!cajupaySessionToken && (cajupaySessionLoading || cajupayMissingFieldsHint)"
+                            class="mt-2 flex items-center gap-2 text-sm text-gray-600"
+                        >
+                            <Loader2 v-if="cajupaySessionLoading" class="h-4 w-4 shrink-0 animate-spin text-gray-500" />
+                            <AlertCircle v-else class="h-4 w-4 shrink-0 text-gray-500" />
+                            <span>
+                                {{
+                                    cajupaySessionLoading
+                                        ? 'Inicializando pagamento seguro…'
+                                        : cajupayMissingFieldsHint
+                                }}
+                            </span>
+                        </div>
+                    </div>
+                    <p v-if="cajupayPolling" class="text-xs text-gray-500">Aguardando confirmação do pagamento…</p>
+                    <button
+                        v-if="isCajuPayWalletSdk"
+                        type="button"
+                        class="mt-1 w-full text-center text-xs font-medium text-gray-500 underline decoration-gray-400 hover:text-gray-700"
+                        @click="submitCajuPaySdkFlow(form.payment_method)"
+                    >
+                        Pagamento não concluiu? Tentar novamente
+                    </button>
+                    <p
+                        v-if="hidePrimarySubmitForCajupayWallet && cardTokenizing && !cardApproved"
+                        class="text-sm text-gray-500"
+                    >
+                        Aguardando confirmação do pagamento…
+                    </p>
+                </div>
+                <!-- Efí / Cielo: campos manuais (Cielo tokeniza via Silent Order Post, sem PAN no backend) -->
+                <div v-else-if="isCardGatewayEfi || isCardGatewayCielo" class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                    <template v-if="isCardGatewayCielo">
+                        <input type="hidden" class="bp-sop-cardholdername" :value="formatCieloSopHolderName(cardHolderName || form.name)" />
+                        <input type="hidden" class="bp-sop-cardnumber" :value="cardNumberDigits" />
+                        <input type="hidden" class="bp-sop-cardexpirationdate" :value="cieloExpirationDate" />
+                        <input type="hidden" class="bp-sop-cardcvv bp-sop-cardcvvc" :value="cardCvv" />
+                        <input type="hidden" class="bp-sop-cardtype" value="creditCard" />
+                    </template>
                     <div class="relative sm:col-span-2">
                         <label for="card-holder" class="mb-2 block text-sm font-medium text-gray-700">{{ t('checkout.card_holder') || 'Nome no cartão' }}</label>
                         <div class="relative">
@@ -2139,9 +3375,9 @@ function submit() {
                         </div>
                     </div>
                 </div>
-                <!-- Parcelas (Efí e Asaas; Stripe e MP Brick têm seu próprio) -->
+                <!-- Parcelas (Pagar.me e Efí; Stripe/MP/Asaas/CajuPay têm UI própria) -->
                 <div
-                    v-if="form.payment_method === 'card' && cardInstallmentsEnabled && !isCardGatewayStripe && !isCardGatewayMercadopago && !isCardGatewayAsaas"
+                    v-if="showInstallmentsSelect"
                     class="mt-4"
                     data-checkout="form-installments"
                 >
@@ -2153,11 +3389,11 @@ function submit() {
                         :style="{ '--tw-ring-color': primaryColor }"
                     >
                         <option
-                            v-for="n in cardMaxInstallments"
+                            v-for="n in effectiveCardMaxInstallments"
                             :key="n"
                             :value="n"
                         >
-                            {{ n }}x de {{ formatPrice(checkoutTotalBrl / n, displayCurrency) }}
+                            {{ installmentOptionLabel(n) }}
                         </option>
                     </select>
                 </div>
@@ -2172,16 +3408,24 @@ function submit() {
                 <div class="flex items-center gap-2 text-gray-700">
                     <MapPin class="h-5 w-5 shrink-0 text-gray-500" aria-hidden="true" />
                     <span class="text-sm font-medium">
-                        {{ form.payment_method === 'card'
+                        {{ ['card', 'apple_pay', 'google_pay'].includes(form.payment_method)
                             ? tf('checkout.endereco_cobranca', 'Endereço de cobrança')
                             : tf('checkout.endereco_boleto', 'Endereço') }}
                     </span>
+                </div>
+                <div v-if="props.requiresShipping" class="text-sm text-gray-600">
+                    <p v-if="shippingQuoteLoading">Calculando frete…</p>
+                    <p v-else-if="shippingQuoteError" class="font-medium text-red-600">{{ shippingQuoteError }}</p>
+                    <p v-else-if="shippingAmountLocal > 0">
+                        Frete: <strong>{{ formatPrice(shippingAmountLocal, 'BRL') }}</strong>
+                        <span v-if="shippingDeliveryHint" class="block text-xs text-gray-500">{{ shippingDeliveryHint }}</span>
+                    </p>
                 </div>
                 <!-- 1) Só CEP + Buscar -->
                 <div v-if="!boletoAddressFetched" class="flex flex-col gap-2 sm:flex-row sm:items-end sm:gap-2">
                     <div class="min-w-0 flex-1">
                         <label for="checkout-address-cep" class="mb-2 block text-sm font-medium text-gray-700">
-                            {{ form.payment_method === 'card' ? 'CEP' : t('checkout.endereco_boleto_cep') }}
+                            {{ ['card', 'apple_pay', 'google_pay'].includes(form.payment_method) ? 'CEP' : t('checkout.endereco_boleto_cep') }}
                         </label>
                         <div class="relative">
                             <span class="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-gray-400">
@@ -2273,11 +3517,25 @@ function submit() {
             </div>
 
             <p v-if="form.errors.product_id" class="text-sm font-medium text-red-600">{{ form.errors.product_id }}</p>
+            <p v-if="form.errors.payment_method" class="mb-2 text-sm font-medium text-red-600" role="alert">
+                {{ form.errors.payment_method }}
+            </p>
+            <div v-if="turnstileActive" class="mb-3">
+                <CheckoutTurnstile
+                    ref="turnstileRef"
+                    :site-key="turnstile?.site_key || ''"
+                    v-model="turnstileToken"
+                />
+            </div>
+            <div v-if="$slots['before-submit']" class="lg:hidden" data-checkout="form-purchase-summary-slot">
+                <slot name="before-submit" />
+            </div>
             <button
-                v-if="form.payment_method !== 'card' || !isCardGatewayMercadopago"
+                v-if="(!isCardPaymentFamily || !isCardGatewayMercadopago) && !hidePrimarySubmitForCajupayWallet && !hidePrimarySubmitForPaypal"
                 type="submit"
                 data-checkout="form-submit"
-                class="flex w-full items-center justify-center gap-2 rounded-xl px-6 py-4 text-base font-semibold text-white shadow-lg shadow-black/10 transition hover:opacity-95 focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:opacity-70"
+                class="flex w-full items-center justify-center gap-2 rounded-[12px] px-6 py-4 text-base font-semibold text-white transition hover:brightness-95 focus:outline-none disabled:opacity-70"
+                :class="{ '!mt-2': isCajuPaySdkFlow && form.payment_method === 'card' }"
                 :style="{ backgroundColor: primaryColor }"
                 :disabled="form.processing || cardTokenizing || cardApproved"
             >
@@ -2285,10 +3543,36 @@ function submit() {
                 <Check v-else-if="cardApproved" class="h-5 w-5" />
                 <ScanQrCode v-else-if="form.payment_method === 'pix' || form.payment_method === 'pix_auto'" class="h-5 w-5" />
                 <CreditCard v-else-if="form.payment_method === 'card'" class="h-5 w-5" />
+                <img
+                    v-else-if="form.payment_method === 'apple_pay'"
+                    src="/images/gateways/apple.png"
+                    alt=""
+                    class="h-5 w-5 object-contain"
+                />
+                <img
+                    v-else-if="form.payment_method === 'google_pay'"
+                    src="/images/gateways/gpay.png"
+                    alt=""
+                    class="h-5 w-5 object-contain"
+                />
                 <FileText v-else-if="form.payment_method === 'boleto'" class="h-5 w-5" />
                 <ShoppingBag v-else class="h-5 w-5" />
-                {{ cardApproved ? 'Aprovado!' : (form.processing || cardTokenizing) ? t('checkout.processing') : (form.payment_method === 'pix' ? t('checkout.gerar_pix') : form.payment_method === 'pix_auto' ? (t('checkout.gerar_pix_auto') || 'Gerar PIX (renovação automática)') : form.payment_method === 'card' ? (isCardGatewayAsaas && asaasCardStep === 1 ? 'Continuar' : (t('checkout.pagar_cartao') || 'Pagar com cartão')) : form.payment_method === 'boleto' ? (t('checkout.gerar_boleto') || 'Gerar boleto') : t('checkout.submit_button')) }}
+                {{ cardApproved ? 'Aprovado!' : (form.processing || cardTokenizing) ? t('checkout.processing') : primarySubmitButtonLabel }}
             </button>
+            <PaypalButtons
+                v-if="isPaypalMethodSelected"
+                class="mt-2"
+                :client-id="paypalClientId || ''"
+                :currency="displayCurrency || 'BRL'"
+                :locale="checkoutLocale || 'pt_BR'"
+                :disabled="!paypalButtonsReady"
+                :build-payload="buildPaypalPayload"
+                :get-csrf-token="getCsrfToken"
+                :fill-hint="t('checkout.paypal_fill_data')"
+                :loading-hint="t('checkout.paypal_loading')"
+                @approved="onPaypalApproved"
+                @error="onPaypalError"
+            />
         </form>
         <!-- Form vazio: tokenizecard.js; campos cartão Pagar.me associam-se via atributo HTML form="" -->
         <form
@@ -2304,36 +3588,12 @@ function submit() {
             <input type="hidden" name="_token" :value="getCsrfToken()" />
             <span data-pagarmecheckout-element="brand" class="hidden" aria-hidden="true" />
         </form>
-        <footer class="mt-8 hidden border-t border-gray-100 pt-6 sm:block" data-checkout="form-footer-desktop">
-            <div v-if="showFooterCustom" class="mb-6 text-center">
-                <img
-                    v-if="footerLogoUrl"
-                    :src="footerLogoUrl"
-                    alt=""
-                    class="mx-auto h-8 w-auto object-contain"
-                    loading="lazy"
-                />
-                <p v-if="footerText" class="mt-2 text-sm font-medium text-gray-700">
-                    {{ footerText }}
-                </p>
-                <a
-                    v-if="footerSupportEmail"
-                    :href="`mailto:${footerSupportEmail}`"
-                    class="mt-1 inline-block text-sm font-medium text-gray-600 underline decoration-gray-300 underline-offset-2 hover:text-gray-800"
-                >
-                    {{ footerSupportEmail }}
-                </a>
-            </div>
-            <p class="flex items-center justify-center gap-2 text-sm text-gray-500">
-                <Shield class="h-4 w-4 shrink-0" aria-hidden="true" />
-                Compra 100% segura
-            </p>
-            <p class="mt-2 text-center text-xs text-gray-400">
-                Este site é protegido pelo reCAPTCHA do Google
-            </p>
-            <p class="mt-2 text-center text-xs text-gray-400">
-                Copyright © {{ new Date().getFullYear() }}. Todos os direitos reservados.
-            </p>
+        <footer class="mt-8 hidden border-t border-gray-100 pt-6 lg:block" data-checkout="form-footer-desktop">
+            <CheckoutLegalFooter
+                :logo-url="platformLogoUrl"
+                :app-name="appName"
+                :notice="platformCheckoutNotice"
+            />
         </footer>
 
         <!-- Modal pagamento recusado (cartão) -->
@@ -2378,7 +3638,7 @@ function submit() {
                                 Tentar com outro cartão
                             </button>
                             <button
-                                v-if="availablePaymentMethods.some(m => m.id !== 'card')"
+                                v-if="checkoutPaymentMethodsForDevice.some(m => m.id !== 'card')"
                                 type="button"
                                 class="flex-1 rounded-xl border-2 border-gray-200 bg-white px-4 py-3 text-sm font-semibold text-gray-700 transition hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2"
                                 @click.prevent.stop="onRefusedOtherPaymentMethod($event)"

@@ -7,6 +7,7 @@ use App\Mail\RefundRequestSellerMail;
 use App\Models\Order;
 use App\Models\RefundRequest;
 use App\Models\User;
+use App\Services\CajuPay\CajuPayPixRefundConfirmationService;
 use App\Services\PlatformOrderAdminService;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
@@ -37,8 +38,13 @@ class RefundRequestService
             return;
         }
 
-        $url = url('/reembolsos');
+        $url = url('/vendas/reembolsos');
         Mail::to($owner->email)->send(new RefundRequestSellerMail($request->fresh(['order.product']), $url));
+    }
+
+    public function notifyPlatformAdmins(RefundRequest $request): void
+    {
+        app(PlatformEmailNotifications::class)->refundRequested($request->fresh(['order.product']));
     }
 
     public function approve(User $seller, RefundRequest $request): void
@@ -51,19 +57,86 @@ class RefundRequestService
             throw new \InvalidArgumentException('Pedido inválido.');
         }
 
+        try {
+            SellerRefundBalanceGuard::assertSufficient($order);
+        } catch (\InvalidArgumentException $e) {
+            $this->logSellerRefundFailure($seller, $order, $e->getMessage(), [
+                'failure_kind' => 'insufficient_balance',
+                'refund_request_id' => $request->id,
+            ]);
+            throw $e;
+        }
+
         $gw = $this->gatewayBridge->tryRefund($order);
         $request->update([
             'gateway_refund_status' => $gw['status'],
             'gateway_refund_note' => $gw['note'],
         ]);
 
+        if ($gw['status'] === 'blocked_med') {
+            $message = $gw['note'] ?? 'Reembolso bloqueado por disputa MED aberta.';
+            $this->logSellerRefundFailure($seller, $order, $message, [
+                'failure_kind' => 'blocked_med',
+                'gateway_status' => $gw['status'],
+                'error_code' => $gw['error_code'] ?? null,
+                'refund_request_id' => $request->id,
+            ]);
+            throw new \InvalidArgumentException($message);
+        }
+
+        if ($gw['status'] === 'failed') {
+            $message = $gw['note'] ?? 'Falha ao solicitar reembolso no gateway.';
+            $this->logSellerRefundFailure($seller, $order, $message, [
+                'failure_kind' => 'gateway_failed',
+                'gateway_status' => $gw['status'],
+                'error_code' => $gw['error_code'] ?? null,
+                'refund_request_id' => $request->id,
+            ]);
+            throw new \InvalidArgumentException($message);
+        }
+
+        if (CajuPayPixRefundConfirmationService::isCajuPixOrder($order)
+            && in_array($gw['status'], ['gateway_ok', 'gateway_pending'], true)) {
+            app(CajuPayPixRefundConfirmationService::class)
+                ->lockWalletAndAwait($order, null, 'seller_manual_refund');
+            $request->update([
+                'status' => RefundRequest::STATUS_APPROVED,
+                'resolved_by_user_id' => $seller->id,
+                'resolved_at' => now(),
+            ]);
+            $customer = $request->user;
+            if ($customer && $customer->email) {
+                Mail::to($customer->email)->send(new RefundDecisionCustomerMail($request->fresh(['order.product']), true, $gw['note'] ?? null));
+            }
+
+            $this->logSellerDecision($seller, $request, SellerActivityLogService::REFUND_REQUEST_APPROVED, [
+                'gateway_status' => $gw['status'] ?? null,
+            ]);
+
+            return;
+        }
+
         try {
-            PlatformOrderAdminService::refundPaidOrDisputed($order->fresh());
+            $outcome = PlatformOrderAdminService::applyRefundAfterAcquirer(
+                $order->fresh(),
+                (string) ($gw['status'] ?? ''),
+                null,
+                'seller_manual_refund'
+            );
         } catch (\Throwable $e) {
             Log::error('RefundRequestService: falha ao estornar carteira.', [
                 'order_id' => $order->id,
                 'message' => $e->getMessage(),
             ]);
+            $this->logSellerRefundFailure(
+                $seller,
+                $order,
+                'Falha ao ajustar a carteira após o reembolso na adquirente: '.$e->getMessage(),
+                [
+                    'failure_kind' => 'wallet_debit_failed',
+                    'refund_request_id' => $request->id,
+                ]
+            );
             throw $e;
         }
 
@@ -77,6 +150,11 @@ class RefundRequestService
         if ($customer && $customer->email) {
             Mail::to($customer->email)->send(new RefundDecisionCustomerMail($request->fresh(['order.product']), true, null));
         }
+
+        $this->logSellerDecision($seller, $request, SellerActivityLogService::REFUND_REQUEST_APPROVED, [
+            'gateway_status' => $gw['status'] ?? null,
+            'pending_gateway' => $outcome === 'refund_pending' ? true : null,
+        ]);
     }
 
     public function reject(User $seller, RefundRequest $request, ?string $reason): void
@@ -100,5 +178,41 @@ class RefundRequestService
         if ($customer && $customer->email) {
             Mail::to($customer->email)->send(new RefundDecisionCustomerMail($request->fresh(['order.product']), false, $reason));
         }
+
+        $this->logSellerDecision($seller, $request, SellerActivityLogService::REFUND_REQUEST_REJECTED, [
+            'reason' => $reason,
+        ]);
+    }
+
+    /**
+     * @param  array<string, mixed>  $extra
+     */
+    private function logSellerDecision(User $seller, RefundRequest $request, string $action, array $extra = []): void
+    {
+        SellerActivityLogService::record(
+            actor: $seller,
+            action: $action,
+            targetType: RefundRequest::class,
+            targetId: $request->id,
+            metadata: array_filter([
+                'refund_request_id' => $request->id,
+                'order_id' => $request->order_id,
+                ...$extra,
+            ], fn ($v) => $v !== null && $v !== ''),
+            tenantId: (int) $request->tenant_id,
+        );
+    }
+
+    /**
+     * @param  array<string, mixed>  $extra
+     */
+    private function logSellerRefundFailure(User $seller, Order $order, string $reason, array $extra = []): void
+    {
+        SellerActivityLogService::recordRefundFailure(
+            actor: $seller,
+            order: $order,
+            reason: $reason,
+            extra: $extra,
+        );
     }
 }

@@ -118,12 +118,16 @@ class PluginRegistry
     }
 
     /**
-     * Whether a plugin (by slug) is currently enabled.
+     * Plugin no disco, registrado e ativo (is_enabled).
      */
-    public static function isEnabled(string $slug): bool
+    public static function isActive(string $slug): bool
     {
+        $slug = trim($slug);
+        if ($slug === '') {
+            return false;
+        }
         foreach (self::enabled() as $plugin) {
-            if (($plugin['slug'] ?? null) === $slug) {
+            if (($plugin['slug'] ?? '') === $slug) {
                 return true;
             }
         }

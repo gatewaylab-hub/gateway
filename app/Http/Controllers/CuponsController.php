@@ -2,8 +2,10 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Controllers\Concerns\LogsSellerActivity;
 use App\Models\Coupon;
 use App\Models\Product;
+use App\Services\SellerActivityLogService;
 use App\Services\TeamAccessService;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
@@ -11,6 +13,8 @@ use Inertia\Response;
 
 class CuponsController extends Controller
 {
+    use LogsSellerActivity;
+
     private function allowedProductIdsForCurrentUser(?int $tenantId): array
     {
         if (! auth()->user()?->isTeam()) {
@@ -46,6 +50,7 @@ class CuponsController extends Controller
                 return false;
             })
             ->values()
+            ->each(fn (Coupon $c) => $c->syncUsedCountFromCompletedOrders())
             ->map(fn (Coupon $c) => $this->couponToArray($c));
 
         $produtos = Product::forTenant($tenantId)
@@ -75,6 +80,7 @@ class CuponsController extends Controller
             'valid_until' => ['nullable', 'date', 'after_or_equal:valid_from'],
             'is_active' => ['boolean'],
         ]);
+        $validated = $this->normalizeCouponAttributes($validated);
         $validated['tenant_id'] = $tenantId;
         $validated['is_active'] = $request->boolean('is_active', true);
         $productIds = $validated['product_ids'] ?? [];
@@ -91,6 +97,11 @@ class CuponsController extends Controller
 
         $coupon = Coupon::create($validated);
         $coupon->products()->sync($productIds);
+
+        $this->logSellerActivity(SellerActivityLogService::COUPON_CREATED, $coupon, [
+            'name' => $coupon->code,
+            'type' => $coupon->type,
+        ]);
 
         return redirect()->route('cupons.index')->with('success', 'Cupom criado.');
     }
@@ -112,6 +123,7 @@ class CuponsController extends Controller
             'valid_until' => ['nullable', 'date', 'after_or_equal:valid_from'],
             'is_active' => ['boolean'],
         ]);
+        $validated = $this->normalizeCouponAttributes($validated);
         $validated['is_active'] = $request->boolean('is_active', true);
         $productIds = $validated['product_ids'] ?? [];
         unset($validated['product_ids']);
@@ -129,12 +141,20 @@ class CuponsController extends Controller
         $coupon->update($validated);
         $coupon->products()->sync($productIds);
 
+        $this->logSellerActivity(SellerActivityLogService::COUPON_UPDATED, $coupon, [
+            'name' => $coupon->code,
+            'type' => $coupon->type,
+        ]);
+
         return redirect()->route('cupons.index')->with('success', 'Cupom atualizado.');
     }
 
     public function destroy(Coupon $coupon)
     {
         $this->authorizeCoupon($coupon);
+        $this->logSellerActivity(SellerActivityLogService::COUPON_DELETED, $coupon, [
+            'name' => $coupon->code,
+        ]);
         $coupon->delete();
 
         return redirect()->route('cupons.index')->with('success', 'Cupom removido.');
@@ -145,6 +165,25 @@ class CuponsController extends Controller
         if ($coupon->tenant_id !== auth()->user()->tenant_id) {
             abort(403);
         }
+    }
+
+    /**
+     * @param  array<string, mixed>  $validated
+     * @return array<string, mixed>
+     */
+    private function normalizeCouponAttributes(array $validated): array
+    {
+        $validated['code'] = trim((string) ($validated['code'] ?? ''));
+        $validated['max_uses'] = isset($validated['max_uses']) && $validated['max_uses'] !== '' && $validated['max_uses'] !== null
+            ? (int) $validated['max_uses']
+            : null;
+        if (array_key_exists('min_amount', $validated)) {
+            $validated['min_amount'] = $validated['min_amount'] !== '' && $validated['min_amount'] !== null
+                ? (float) $validated['min_amount']
+                : null;
+        }
+
+        return $validated;
     }
 
     private function couponToArray(Coupon $c): array

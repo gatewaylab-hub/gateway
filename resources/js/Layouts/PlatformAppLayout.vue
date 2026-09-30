@@ -4,6 +4,8 @@ import { usePage } from '@inertiajs/vue3';
 import { useSidebarProvider } from '@/composables/useSidebar';
 import PlatformSidebar from '@/components/layout/PlatformSidebar.vue';
 import PlatformAppHeader from '@/components/layout/PlatformAppHeader.vue';
+import DemoModeBanner from '@/components/layout/DemoModeBanner.vue';
+import TotpPromptBanner from '@/components/layout/TotpPromptBanner.vue';
 import Backdrop from '@/components/layout/Backdrop.vue';
 import FlashToast from '@/components/layout/FlashToast.vue';
 
@@ -13,7 +15,7 @@ const contentMaxWidth = computed(() => (page.props.layoutFullWidth ? 'max-w-[160
 const layoutContentFlushLeft = computed(() => !!page.props.layoutContentFlushLeft);
 
 watchEffect(() => {
-    const primary = page.props.appSettings?.theme_primary || '#8A2BE2';
+    const primary = page.props.appSettings?.theme_primary || '#0050fc';
     document.documentElement.style.setProperty('--color-primary', primary);
 });
 </script>
@@ -27,13 +29,17 @@ watchEffect(() => {
             :class="[isExpanded ? 'lg:ml-[260px]' : 'lg:ml-[72px]']"
         >
             <div class="flex w-full shrink-0 flex-col gap-2">
+                <DemoModeBanner />
+                <TotpPromptBanner />
                 <PlatformAppHeader />
             </div>
             <FlashToast />
-            <div class="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden">
-                <main class="flex-1 px-4 pb-12 pt-2 md:px-6 md:pt-3 lg:pb-8">
+            <div
+                class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl bg-white shadow-sm dark:bg-zinc-800"
+            >
+                <main class="min-w-0 flex-1 overflow-x-hidden px-4 pb-12 pt-4 md:px-6 md:pt-6 lg:pb-8">
                     <div
-                        class="w-full"
+                        class="w-full min-w-0"
                         :class="[
                             layoutContentFlushLeft ? 'max-w-none lg:-ml-6' : 'mx-auto',
                             !layoutContentFlushLeft && contentMaxWidth,

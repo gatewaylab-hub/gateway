@@ -3,9 +3,9 @@
 namespace App\Gateways\MercadoPago;
 
 use App\Gateways\Contracts\GatewayDriver;
+use App\Support\GatewayWebhookUrl;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Str;
 use MercadoPago\Client\Common\RequestOptions;
 use MercadoPago\Client\Payment\PaymentClient;
 use MercadoPago\Exceptions\MPApiException;
@@ -25,8 +25,17 @@ class MercadoPagoDriver implements GatewayDriver
 
     private function idempotencyKey(string $externalId): string
     {
-        // API pode exigir UUID v4 puro; uso hash do pedido para mesma tentativa retornar mesma chave
-        return Str::uuid()->toString();
+        // UUID v4 determinístico por pedido — retries reutilizam a mesma cobrança no MP.
+        $hash = md5('mercadopago:getfy:'.$externalId);
+
+        return sprintf(
+            '%s-%s-4%s-%s-%s',
+            substr($hash, 0, 8),
+            substr($hash, 8, 4),
+            substr($hash, 13, 3),
+            dechex((hexdec(substr($hash, 16, 2)) & 0x3f) | 0x80).substr($hash, 18, 2),
+            substr($hash, 20, 12)
+        );
     }
 
     private function requestOptions(string $externalId): RequestOptions
@@ -93,7 +102,8 @@ class MercadoPagoDriver implements GatewayDriver
         float $amount,
         array $consumer,
         string $externalId,
-        string $postbackUrl
+        string $postbackUrl,
+        array $options = []
     ): array {
         $this->setCredentials($credentials);
         if ($amount <= 0) {
@@ -284,7 +294,22 @@ class MercadoPagoDriver implements GatewayDriver
         if ($installments < 1) {
             $installments = 1;
         }
+        // O Brick tokeniza com transaction_amount próprio — divergência com o order.amount
+        // é causa clássica de recusa (cc_rejected_*). Preferir o valor do Brick quando vier.
         $transactionAmount = round($amount, 2);
+        $brickAmount = isset($formData['transaction_amount'])
+            ? round((float) $formData['transaction_amount'], 2)
+            : null;
+        if ($brickAmount !== null && $brickAmount >= 0.01) {
+            if (abs($brickAmount - $transactionAmount) > 0.009) {
+                Log::warning('MercadoPagoDriver createCardPayment amount mismatch (using Brick amount)', [
+                    'order_id' => $externalId,
+                    'order_amount' => $transactionAmount,
+                    'brick_amount' => $brickAmount,
+                ]);
+            }
+            $transactionAmount = $brickAmount;
+        }
         if ($transactionAmount < 0.01) {
             throw new \RuntimeException('Mercado Pago: valor inválido.');
         }
@@ -297,8 +322,10 @@ class MercadoPagoDriver implements GatewayDriver
             'payer' => $payer,
             'description' => 'Pedido #' . $externalId,
             'external_reference' => (string) $externalId,
+            // NÃO usar binary_mode: o MP rejeita pagamentos que iriam para in_process/pending
+            // (análise), derrubando a taxa de aprovação. Deixar fluxo normal + webhook/poll.
         ];
-        $notificationUrl = $this->validNotificationUrl(rtrim((string) config('app.url'), '/') . '/webhooks/gateways/mercadopago');
+        $notificationUrl = $this->validNotificationUrl(GatewayWebhookUrl::forGateway('mercadopago'));
         if ($notificationUrl !== '') {
             $body['notification_url'] = $notificationUrl;
         }
@@ -322,13 +349,36 @@ class MercadoPagoDriver implements GatewayDriver
 
             if ($statusCode >= 200 && $statusCode < 300) {
                 $paymentId = $responseBody['id'] ?? null;
-                $status = $responseBody['status'] ?? null;
+                $status = isset($responseBody['status']) ? strtolower(trim((string) $responseBody['status'])) : null;
+                $statusDetail = isset($responseBody['status_detail'])
+                    ? (string) $responseBody['status_detail']
+                    : null;
                 if (empty($paymentId)) {
                     throw new \RuntimeException('Mercado Pago: resposta sem identificador do pagamento.');
                 }
+
+                // Reconfirma na API quando o create não traz status definitivo.
+                if (! in_array($status, ['approved', 'rejected', 'cancelled', 'refunded', 'charged_back'], true)) {
+                    usleep(400000); // 0.4s — dá tempo ao autorizador em alguns casos in_process
+                    $confirmed = $this->getPaymentDetails((string) $paymentId, $credentials);
+                    $rawConfirmed = is_array($confirmed) ? ($confirmed['raw_status'] ?? null) : null;
+                    if (is_string($rawConfirmed) && $rawConfirmed !== '') {
+                        $status = strtolower(trim($rawConfirmed));
+                    }
+                    Log::info('MercadoPagoDriver createCardPayment reconfirm', [
+                        'order_id' => $externalId,
+                        'payment_id' => $paymentId,
+                        'create_status' => $responseBody['status'] ?? null,
+                        'confirmed_status' => $status,
+                        'status_detail' => $statusDetail,
+                    ]);
+                }
+
                 return [
                     'transaction_id' => (string) $paymentId,
-                    'status' => $status ? strtolower((string) $status) : null,
+                    'status' => $status,
+                    'status_detail' => $statusDetail,
+                    'charged_amount' => $transactionAmount,
                 ];
             }
 
@@ -554,33 +604,150 @@ class MercadoPagoDriver implements GatewayDriver
 
     /**
      * @param  array<string, string>  $credentials
+     * @return array{external_reference: ?string, status: ?string, raw_status: ?string}|null
+     */
+    public function getPaymentDetails(string $transactionId, array $credentials): ?array
+    {
+        $payload = $this->fetchPaymentPayload($transactionId, $credentials);
+        if ($payload === null) {
+            return null;
+        }
+
+        $rawStatus = isset($payload['status']) ? strtolower((string) $payload['status']) : null;
+        $ref = $payload['external_reference'] ?? null;
+
+        return [
+            'external_reference' => ($ref !== null && $ref !== '') ? (string) $ref : null,
+            'status' => $rawStatus !== null ? $this->mapPaymentStatus($rawStatus) : null,
+            'raw_status' => $rawStatus,
+        ];
+    }
+
+    /**
+     * @param  array<string, string>  $credentials
      */
     public function getTransactionStatus(string $transactionId, array $credentials): ?string
     {
-        $this->setCredentials($credentials);
+        $details = $this->getPaymentDetails($transactionId, $credentials);
+
+        return $details['status'] ?? null;
+    }
+
+    /**
+     * @param  array<string, string>  $credentials
+     * @return array<string, mixed>|null
+     */
+    private function fetchPaymentPayload(string $transactionId, array $credentials): ?array
+    {
+        $token = trim($credentials['access_token'] ?? '');
+        if ($token === '') {
+            return null;
+        }
 
         try {
-            $client = new PaymentClient();
-            $payment = $client->get((int) $transactionId);
+            $response = Http::withToken($token)
+                ->timeout(20)
+                ->get('https://api.mercadopago.com/v1/payments/'.(int) $transactionId);
         } catch (\Throwable $e) {
-            Log::debug('MercadoPagoDriver getTransactionStatus error', [
+            Log::debug('MercadoPagoDriver fetchPaymentPayload error', [
                 'transaction_id' => $transactionId,
                 'message' => $e->getMessage(),
             ]);
+
             return null;
         }
 
-        $status = $payment->status ?? null;
-        if ($status === null) {
+        if (! $response->successful()) {
+            Log::debug('MercadoPagoDriver fetchPaymentPayload http error', [
+                'transaction_id' => $transactionId,
+                'status' => $response->status(),
+            ]);
+
             return null;
         }
-        $status = strtolower((string) $status);
 
+        $payload = $response->json();
+        if (! is_array($payload)) {
+            return null;
+        }
+
+        return $payload;
+    }
+
+    private function mapPaymentStatus(string $status): string
+    {
+        // Doc MP: liberar somente com approved (creditado). authorized = pré-auth, ainda não creditado.
         return match ($status) {
-            'approved', 'authorized' => 'paid',
-            'pending', 'in_process', 'in_mediation' => 'pending',
+            'approved' => 'paid',
+            'authorized', 'pending', 'in_process', 'in_mediation' => 'pending',
             'rejected', 'cancelled', 'refunded', 'charged_back' => 'cancelled',
             default => 'pending',
         };
+    }
+
+    /**
+     * Busca payment_id aprovado mais recente pelo external_reference (order id interno).
+     *
+     * @param  array<string, string>  $credentials
+     */
+    public function findApprovedPaymentByExternalReference(string $orderId, array $credentials): ?string
+    {
+        $orderId = trim($orderId);
+        if ($orderId === '') {
+            return null;
+        }
+
+        $token = trim($credentials['access_token'] ?? '');
+        if ($token === '') {
+            return null;
+        }
+
+        try {
+            $response = Http::withToken($token)
+                ->timeout(20)
+                ->get('https://api.mercadopago.com/v1/payments/search', [
+                    'external_reference' => $orderId,
+                    'sort' => 'date_created',
+                    'criteria' => 'desc',
+                    'limit' => 5,
+                ]);
+        } catch (\Throwable $e) {
+            Log::debug('MercadoPagoDriver findApprovedPaymentByExternalReference error', [
+                'order_id' => $orderId,
+                'message' => $e->getMessage(),
+            ]);
+
+            return null;
+        }
+
+        if (! $response->successful()) {
+            Log::debug('MercadoPagoDriver findApprovedPaymentByExternalReference http error', [
+                'order_id' => $orderId,
+                'status' => $response->status(),
+            ]);
+
+            return null;
+        }
+
+        $results = $response->json('results');
+        if (! is_array($results)) {
+            return null;
+        }
+
+        foreach ($results as $payment) {
+            if (! is_array($payment)) {
+                continue;
+            }
+            $status = strtolower((string) ($payment['status'] ?? ''));
+            if ($status !== 'approved') {
+                continue;
+            }
+            $paymentId = $payment['id'] ?? null;
+            if ($paymentId !== null && $paymentId !== '') {
+                return (string) $paymentId;
+            }
+        }
+
+        return null;
     }
 }

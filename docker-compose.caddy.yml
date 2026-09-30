@@ -157,7 +157,9 @@ services:
       redis:
         condition: service_healthy
 
+  # Opcional — não sobe no install padrão. Ative com: COMPOSE_PROFILES=stacker
   stacker-agent:
+    profiles: ["stacker"]
     build:
       context: ./agent
       dockerfile: Dockerfile

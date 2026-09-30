@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_URL="${GETFY_REPO_URL:-https://github.com/stacker-builders/stacker-gateway.git}"
+REPO_URL="${GETFY_REPO_URL:-https://github.com/gatewaylab-hub/gateway.git}"
 BRANCH="${GETFY_BRANCH:-main}"
 INSTALL_DIR="${GETFY_DIR:-/opt/getfy}"
 HTTP_PORT="${GETFY_HTTP_PORT:-80}"
@@ -152,10 +152,7 @@ echo ""
 # shellcheck source=docker/prompt-public-url.sh
 . docker/prompt-public-url.sh
 
-$SUDO chmod +x docker/prompt-stacker-agent-token.sh docker/ensure-stacker-agent.sh docker/up.sh docker/verify-workers.sh >/dev/null 2>&1 || true
-echo ""
-echo "=== Agente Stacker (licença + métricas) ==="
-$SUDO bash docker/prompt-stacker-agent-token.sh || true
+$SUDO chmod +x docker/up.sh docker/verify-workers.sh >/dev/null 2>&1 || true
 
 export GETFY_QUEUE_CONNECTION="${GETFY_QUEUE_CONNECTION:-database}"
 export GETFY_CACHE_STORE="${GETFY_CACHE_STORE:-file}"

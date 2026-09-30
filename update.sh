@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_URL="${GETFY_REPO_URL:-https://github.com/stacker-builders/stacker-gateway.git}"
+REPO_URL="${GETFY_REPO_URL:-https://github.com/gatewaylab-hub/gateway.git}"
 BRANCH="${GETFY_BRANCH:-main}"
-LEGACY_GIT="${GETFY_LEGACY_GIT_UPDATE:-0}"
 INSTALL_DIR="${GETFY_DIR:-/opt/getfy}"
 
 if [ "$(uname -s)" != "Linux" ]; then
@@ -76,34 +75,6 @@ fi
 
 ENV_FILE="$INSTALL_DIR/.env"
 
-read_nonempty_stacker_token() {
-  local f="${1:-$ENV_FILE}"
-  local t=""
-  if [ ! -f "$f" ]; then
-    return 1
-  fi
-  t="$(grep -E '^\s*STACKER_AGENT_TOKEN\s*=' "$f" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' | tr -d "'" | tr -d '[:space:]' || true)"
-  [ -n "$t" ]
-}
-
-prompt_stacker_agent_if_needed() {
-  if [ ! -f docker/prompt-stacker-agent-token.sh ]; then
-    return 0
-  fi
-  $SUDO chmod +x docker/prompt-stacker-agent-token.sh docker/ensure-stacker-agent.sh 2>/dev/null || true
-  echo ""
-  echo "=== Agente Stacker (licença + métricas) ==="
-  $SUDO bash docker/prompt-stacker-agent-token.sh || true
-}
-
-STACKER_MANAGED=0
-if read_nonempty_stacker_token "$ENV_FILE" && [ "$LEGACY_GIT" != "1" ]; then
-  STACKER_MANAGED=1
-  echo "Updates via agente Stacker (pulando sync Git público)."
-  echo "Para forçar update legado: GETFY_LEGACY_GIT_UPDATE=1 bash update.sh"
-fi
-
-if [ "$STACKER_MANAGED" = "0" ]; then
 if [ ! -d "$INSTALL_DIR/.git" ]; then
   echo "Atualização manual indisponível: diretório não é um repositório Git (.git ausente)." >&2
   exit 1
@@ -127,60 +98,6 @@ else
 fi
 
 cd "$INSTALL_DIR"
-fi
-
-cd "$INSTALL_DIR"
-
-prompt_stacker_agent_if_needed
-
-if [ "$STACKER_MANAGED" = "1" ]; then
-  $SUDO bash docker/ensure-stacker-agent.sh || true
-  echo ""
-  echo "=== Reiniciando stack Docker (sem rebuild do app — updates de código via agente Stacker) ==="
-  $SUDO chmod +x docker/detect-compose-files.sh 2>/dev/null || true
-  COMPOSE_FILES="$($SUDO sh docker/detect-compose-files.sh)"
-  COMPOSE_EXEC_ARGS=""
-  for f in $COMPOSE_FILES; do
-    if [ -n "$f" ]; then
-      COMPOSE_EXEC_ARGS="$COMPOSE_EXEC_ARGS -f $f"
-    fi
-  done
-  STACK_ENV="$INSTALL_DIR/.docker/stack.env"
-  $SUDO chmod +x docker/ensure-db-credentials.sh docker/up.sh 2>/dev/null || true
-  # Export GETFY_DB_* da shell sobrescreve --env-file e pode reintroduzir user fantasma.
-  unset GETFY_DB_CONNECTION GETFY_DB_HOST GETFY_DB_PORT GETFY_DB_DATABASE GETFY_DB_USERNAME GETFY_DB_PASSWORD 2>/dev/null || true
-  if ! $SUDO sh docker/ensure-db-credentials.sh; then
-    echo "ERRO: credenciais PostgreSQL inválidas — update abortado (não vou recriar o app com user fantasma)." >&2
-    echo "Recupere com: cd \"$INSTALL_DIR\" && sh docker/recover-stack.sh" >&2
-    exit 1
-  fi
-  # Hardens LOG_* + limpa logs gigantes antes do recreate (evita herdar single/debug).
-  run_host_log_harden_only
-  $SUDO env -u GETFY_DB_CONNECTION -u GETFY_DB_HOST -u GETFY_DB_PORT -u GETFY_DB_DATABASE -u GETFY_DB_USERNAME -u GETFY_DB_PASSWORD \
-    GETFY_COMPOSE_FILES="$COMPOSE_FILES" GETFY_SKIP_DOCKER_BUILD=1 GETFY_APP_ENV=production GETFY_APP_DEBUG=false sh docker/up.sh
-  if [ -f "$INSTALL_DIR/agent/Dockerfile" ]; then
-    echo ""
-    echo "=== Rebuild do stacker-agent (se houver mudanças no agente) ==="
-    $SUDO docker compose $COMPOSE_EXEC_ARGS --env-file "$STACK_ENV" build stacker-agent
-    $SUDO docker compose $COMPOSE_EXEC_ARGS --env-file "$STACK_ENV" up -d stacker-agent
-  fi
-  echo ""
-  echo "=== Caches Laravel (optimize:clear) ==="
-  $SUDO docker compose $COMPOSE_EXEC_ARGS --env-file "$STACK_ENV" exec -T app php artisan optimize:clear || true
-  echo ""
-  echo "=== Health check pós-atualização ==="
-  $SUDO chmod +x docker/post-update-healthcheck.sh 2>/dev/null || true
-  if ! $SUDO env GETFY_COMPOSE_FILES="$COMPOSE_FILES" sh docker/post-update-healthcheck.sh "$COMPOSE_FILES"; then
-    echo "Health check falhou — a stack pode estar parcial. Veja os comandos de diagnóstico acima." >&2
-    exit 1
-  fi
-  run_storage_logs_cleanup
-  run_docker_prune
-  echo ""
-  echo "Atualização local concluída. Releases remotas: portal Stacker ou admin."
-  echo "Para atualizar scripts/PHP via Git: GETFY_LEGACY_GIT_UPDATE=1 bash update.sh"
-  exit 0
-fi
 
 $SUDO chmod +x docker/ensure-upload-limits.sh docker/detect-compose-files.sh docker/verify-workers.sh 2>/dev/null || true
 echo ""
@@ -257,8 +174,6 @@ echo ""
 echo "=== Verificação de workers (API) ==="
 $SUDO chmod +x docker/verify-workers.sh 2>/dev/null || true
 $SUDO sh docker/verify-workers.sh || true
-
-$SUDO bash docker/ensure-stacker-agent.sh 2>/dev/null || true
 
 run_storage_logs_cleanup
 run_docker_prune

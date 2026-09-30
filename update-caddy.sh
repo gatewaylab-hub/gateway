@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_URL="${GETFY_REPO_URL:-https://github.com/stacker-builders/stacker-gateway.git}"
+REPO_URL="${GETFY_REPO_URL:-https://github.com/gatewaylab-hub/gateway.git}"
 BRANCH="${GETFY_BRANCH:-main}"
 INSTALL_DIR="${GETFY_DIR:-/opt/getfy}"
 
@@ -58,13 +58,6 @@ else
 fi
 
 cd "$INSTALL_DIR"
-
-if [ -f docker/prompt-stacker-agent-token.sh ]; then
-  $SUDO chmod +x docker/prompt-stacker-agent-token.sh docker/ensure-stacker-agent.sh 2>/dev/null || true
-  echo ""
-  echo "=== Agente Stacker (licença + métricas) ==="
-  $SUDO bash docker/prompt-stacker-agent-token.sh || true
-fi
 
 $SUDO chmod +x docker/ensure-upload-limits.sh docker/detect-compose-files.sh docker/verify-workers.sh 2>/dev/null || true
 echo ""

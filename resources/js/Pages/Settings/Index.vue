@@ -28,6 +28,7 @@ import {
     Building2,
     BadgeCheck,
     Cable,
+    Search,
 } from 'lucide-vue-next';
 import IntegrationCard from '@/components/IntegrationCard.vue';
 import EmailProviderSidebar from '@/components/EmailProviderSidebar.vue';
@@ -44,6 +45,7 @@ import SellerPanelSupportTab from '@/Pages/Settings/Tabs/SellerPanelSupportTab.v
 import BackupTab from '@/Pages/Settings/Tabs/BackupTab.vue';
 import PublicUrlTab from '@/Pages/Settings/Tabs/PublicUrlTab.vue';
 import PlatformDataTab from '@/Pages/Settings/Tabs/PlatformDataTab.vue';
+import SeoAnalyticsTab from '@/Pages/Settings/Tabs/SeoAnalyticsTab.vue';
 import SellerIntegrationsTab from '@/Pages/Settings/Tabs/SellerIntegrationsTab.vue';
 defineOptions({ layout: LayoutPlatform });
 
@@ -123,7 +125,7 @@ const props = defineProps({
 });
 
 function allAllowedTabIds() {
-    const core = ['email', 'storage', 'backup', 'personalizacao', 'banners_dashboard', 'template_dashboard', 'idiomas', 'traducoes', 'moedas', 'recursos', 'suporte_painel', 'seguranca', 'kyc', 'lgpd', 'integracoes', 'dados_plataforma', 'url_publica', 'cron', 'update', 'demo'];
+    const core = ['email', 'storage', 'backup', 'personalizacao', 'banners_dashboard', 'template_dashboard', 'idiomas', 'traducoes', 'moedas', 'recursos', 'suporte_painel', 'seguranca', 'kyc', 'lgpd', 'integracoes', 'dados_plataforma', 'seo_analytics', 'url_publica', 'cron', 'update', 'demo'];
     const extra = (props.settings_plugin_tabs || []).map((t) => t.id).filter(Boolean);
     return [...core, ...extra];
 }
@@ -252,6 +254,18 @@ const form = useForm({
     platform_cnpj: props.settings.platform_cnpj ?? '',
     platform_checkout_notice_enabled: props.settings.platform_checkout_notice_enabled ?? '0',
     platform_checkout_notice: props.settings.platform_checkout_notice ?? '',
+    seo_home_title: props.settings.seo_home_title ?? '',
+    seo_home_description: props.settings.seo_home_description ?? '',
+    seo_default_og_image: props.settings.seo_default_og_image ?? '',
+    seo_default_og_image_url: props.settings.seo_default_og_image_url ?? '',
+    seo_google_analytics_id: props.settings.seo_google_analytics_id ?? '',
+    seo_google_tag_manager_id: props.settings.seo_google_tag_manager_id ?? '',
+    seo_social_instagram: props.settings.seo_social_instagram ?? '',
+    seo_social_facebook: props.settings.seo_social_facebook ?? '',
+    seo_social_x: props.settings.seo_social_x ?? '',
+    seo_social_youtube: props.settings.seo_social_youtube ?? '',
+    seo_social_tiktok: props.settings.seo_social_tiktok ?? '',
+    seo_social_discord: props.settings.seo_social_discord ?? '',
     kyc_allowed_identity_types: Array.isArray(props.settings.kyc_allowed_identity_types)
         ? [...props.settings.kyc_allowed_identity_types]
         : ['rg', 'cnh', 'passport'],
@@ -290,6 +304,7 @@ const coreTabsStatic = [
     { id: 'lgpd', label: 'LGPD', icon: Scale, group: 'seguranca' },
     { id: 'integracoes', label: 'Integrações', icon: Cable, group: 'sistema' },
     { id: 'dados_plataforma', label: 'Dados da plataforma', icon: Building2, group: 'sistema' },
+    { id: 'seo_analytics', label: 'SEO e Analytics', icon: Search, group: 'sistema' },
     { id: 'url_publica', label: 'URL pública', icon: Globe, group: 'sistema' },
     { id: 'cron', label: 'Cron', icon: Clock, group: 'sistema' },
     { id: 'update', label: 'Versão', icon: Tag, group: 'sistema' },
@@ -764,6 +779,18 @@ function applyPlatformCompanySettingsFromSettings(s) {
     form.platform_cnpj = s.platform_cnpj ?? '';
     form.platform_checkout_notice_enabled = s.platform_checkout_notice_enabled ?? '0';
     form.platform_checkout_notice = s.platform_checkout_notice ?? '';
+    form.seo_home_title = s.seo_home_title ?? '';
+    form.seo_home_description = s.seo_home_description ?? '';
+    form.seo_default_og_image = s.seo_default_og_image ?? '';
+    form.seo_default_og_image_url = s.seo_default_og_image_url ?? '';
+    form.seo_google_analytics_id = s.seo_google_analytics_id ?? '';
+    form.seo_google_tag_manager_id = s.seo_google_tag_manager_id ?? '';
+    form.seo_social_instagram = s.seo_social_instagram ?? '';
+    form.seo_social_facebook = s.seo_social_facebook ?? '';
+    form.seo_social_x = s.seo_social_x ?? '';
+    form.seo_social_youtube = s.seo_social_youtube ?? '';
+    form.seo_social_tiktok = s.seo_social_tiktok ?? '';
+    form.seo_social_discord = s.seo_social_discord ?? '';
 }
 
 function syncPlatformCompanySettingsFromProps() {
@@ -839,6 +866,21 @@ function buildSettingsPayload() {
             platform_cnpj: data.platform_cnpj,
             platform_checkout_notice_enabled: data.platform_checkout_notice_enabled,
             platform_checkout_notice: data.platform_checkout_notice,
+        };
+    }
+    if (activeTab.value === 'seo_analytics') {
+        return {
+            seo_home_title: data.seo_home_title,
+            seo_home_description: data.seo_home_description,
+            seo_default_og_image: data.seo_default_og_image,
+            seo_google_analytics_id: data.seo_google_analytics_id,
+            seo_google_tag_manager_id: data.seo_google_tag_manager_id,
+            seo_social_instagram: data.seo_social_instagram,
+            seo_social_facebook: data.seo_social_facebook,
+            seo_social_x: data.seo_social_x,
+            seo_social_youtube: data.seo_social_youtube,
+            seo_social_tiktok: data.seo_social_tiktok,
+            seo_social_discord: data.seo_social_discord,
         };
     }
     return {
@@ -1723,6 +1765,13 @@ const selectClass =
                 leave-from-class="opacity-100"
                 leave-to-class="opacity-0"
             >
+                <div v-show="activeTab === 'seo_analytics'" class="space-y-6">
+                    <SeoAnalyticsTab
+                        :form="form"
+                        :sitemap-url="settings.seo_sitemap_url || ''"
+                    />
+                </div>
+
                 <div v-show="activeTab === 'dados_plataforma'" class="space-y-6">
                     <PlatformDataTab
                         :form="form"

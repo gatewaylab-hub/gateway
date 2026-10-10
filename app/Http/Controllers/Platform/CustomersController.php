@@ -168,7 +168,7 @@ class CustomersController extends Controller
         PlatformAuditService::log('platform.customer.deleted', ['user_id' => $userId], $request);
 
         return redirect()->route('plataforma.clientes.index', $redirectParams)
-            ->with('success', 'Cliente excluído. Os pedidos antigos permanecem no sistema sem vínculo à conta.');
+            ->with('success', 'Cliente excluído. E-mail e CPF liberados para novo cadastro. Pedidos antigos permanecem sem vínculo à conta.');
     }
 
     public function destroyOrderHistory(Request $request, User $user): RedirectResponse

@@ -455,15 +455,19 @@ class AccessEmailService
      */
     public function resolveAccessLinkForProduct(Product $product, ?User $user = null): string
     {
-        if ($product->type === Product::TYPE_AREA_MEMBROS) {
-            return $this->resolvePlatformLoginLink();
-        }
-
         if ($user && $this->deliverableAccessLinks->tracks($product)) {
-            return $this->deliverableAccessLinks->trackedUrl($user, $product) ?? '';
+            $tracked = $this->deliverableAccessLinks->trackedUrl($user, $product);
+            if (is_string($tracked) && $tracked !== '') {
+                return $tracked;
+            }
         }
 
-        return '';
+        if ($product->type === Product::TYPE_AREA_MEMBROS) {
+            // Login com redirecionamento para a área do cliente (produto adquirido).
+            return $this->resolvePlatformLoginLink().'?redirect='.urlencode('/painel-cliente');
+        }
+
+        return rtrim(\App\Support\PublicAppUrl::base(), '/').'/painel-cliente';
     }
 
     public function sendForUserProduct(User $user, Product $product): AccessEmailSendResult

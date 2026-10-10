@@ -1,12 +1,13 @@
 <script setup>
-import { Head } from '@inertiajs/vue3';
 import MarketplaceLayout from '@/Layouts/MarketplaceLayout.vue';
 import ProductCard from '@/components/marketplace/ProductCard.vue';
 import SellerLevelBadge from '@/components/marketplace/SellerLevelBadge.vue';
+import MarketplaceSeoHead from '@/components/marketplace/MarketplaceSeoHead.vue';
 
 defineProps({
     seller: { type: Object, required: true },
     products: { type: Object, required: true },
+    seo: { type: Object, default: null },
 });
 
 function relativeTime(iso) {
@@ -28,7 +29,7 @@ function relativeTime(iso) {
 </script>
 
 <template>
-    <Head :title="`Reputação · ${seller.username}`" />
+    <MarketplaceSeoHead :seo="seo" />
     <MarketplaceLayout>
         <!-- Hero reputação -->
         <div class="border-b border-[#EBE2D8] bg-[#1A1410] text-white">

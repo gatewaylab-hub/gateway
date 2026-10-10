@@ -1,10 +1,11 @@
 <script setup>
-import { Head, Link } from '@inertiajs/vue3';
+import { Link } from '@inertiajs/vue3';
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue';
 import MarketplaceLayout from '@/Layouts/MarketplaceLayout.vue';
 import ProductCard from '@/components/marketplace/ProductCard.vue';
 import CategoryPoster from '@/components/marketplace/CategoryPoster.vue';
 import MkIcon from '@/components/marketplace/MkIcon.vue';
+import MarketplaceSeoHead from '@/components/marketplace/MarketplaceSeoHead.vue';
 import { categoryOrder, categoryTheme } from '@/components/marketplace/categoryTheme';
 
 const props = defineProps({
@@ -17,6 +18,7 @@ const props = defineProps({
     content: { type: Object, required: true },
     preview: { type: Boolean, default: false },
     appName: { type: String, default: 'Gamkon' },
+    seo: { type: Object, default: null },
 });
 
 const liveContent = ref(null);
@@ -125,7 +127,7 @@ const sectionLabels = {
 </script>
 
 <template>
-    <Head :title="appName" />
+    <MarketplaceSeoHead :seo="seo" />
     <MarketplaceLayout :theme="c.theme">
         <template v-for="s in sections" :key="s.id">
             <div :data-mk-section="s.id" class="relative" :class="outlineClass(s.id)">
@@ -184,8 +186,8 @@ const sectionLabels = {
                         </div>
 
                         <div v-if="c.hero.visual !== 'none'" class="relative hidden min-h-[460px] lg:block">
-                            <div v-if="c.hero.visual === 'image' && c.hero.image" class="absolute inset-0 overflow-hidden rounded-[22px] border border-[#1A1410]">
-                                <img :src="c.hero.image" alt="" class="h-full w-full object-cover" />
+                            <div v-if="c.hero.visual === 'image' && c.hero.image" class="absolute inset-0 overflow-hidden">
+                                <img :src="c.hero.image" alt="" class="h-full w-full object-contain object-center drop-shadow-[0_12px_28px_rgba(26,20,16,0.18)]" />
                             </div>
                             <div v-else class="absolute inset-0 grid grid-cols-[1.25fr_1fr] grid-rows-2 gap-3">
                                 <Link

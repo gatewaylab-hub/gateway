@@ -88,5 +88,8 @@ defineProps({
         <template v-else-if="name === 'wallet'">
             <path d="M3 7a2 2 0 0 1 2-2h13v4" /><path d="M3 7v11a2 2 0 0 0 2 2h15V9H5a2 2 0 0 1-2-2Z" /><path d="M16 14.5h.01" />
         </template>
+        <template v-else-if="name === 'logout'">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><path d="M16 17l5-5-5-5" /><path d="M21 12H9" />
+        </template>
     </svg>
 </template>

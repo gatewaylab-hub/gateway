@@ -49,9 +49,18 @@ export function useSellerDashboardTemplate() {
     });
 
     const templateId = computed(() => {
-        // Marketplace Gamkon: shell único cream/branco (sem Aurora/Kawaii LMS).
+        // Painel do cliente: shell único cream/branco (sem Aurora/Kawaii).
         if (page.props.customer_panel) {
             return 'default';
+        }
+
+        if (demoEnabled() && sharedPreviewOverride.value) {
+            return sharedPreviewOverride.value;
+        }
+
+        const raw = page.props.seller_dashboard_template;
+        if (raw === 'aurora' || raw === 'kawaii' || raw === 'default') {
+            return raw;
         }
 
         return 'default';

@@ -21,6 +21,7 @@ class Order extends Model
         'api_application_id', 'api_checkout_session_id',
         'affiliate_user_id', 'affiliate_enrollment_id', 'sale_origin',
         'status', 'amount', 'shipping_amount', 'shipping_store_id', 'shipping_rule_id', 'shipping_address',
+        'shipping_status', 'shipping_tracking_code',
         'email', 'cpf', 'phone', 'customer_ip', 'coupon_code',
         'gateway', 'gateway_id', 'cajupay_account_id', 'payment_method', 'approved_manually', 'metadata', 'period_start', 'period_end', 'is_renewal',
     ];

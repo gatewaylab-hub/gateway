@@ -156,6 +156,7 @@ class SettingsController extends Controller
                 ...($tenantId === null ? AccountManagerSettings::forSettingsForm() : []),
                 ...($tenantId === null ? SellerPanelSupportSettings::forSettingsForm() : []),
                 ...($tenantId === null ? PlatformCompanySettings::forSettingsForm() : []),
+                ...($tenantId === null ? \App\Support\MarketplaceSeoSettings::forSettingsForm() : []),
                 ...($tenantId === null ? [
                     'legal_privacy_policy_html' => $legalForm['legal_privacy_policy_html'],
                     'legal_terms_of_use_html' => $legalForm['legal_terms_of_use_html'],
@@ -263,6 +264,21 @@ class SettingsController extends Controller
             ],
             'platform_checkout_notice_enabled' => ['nullable', 'boolean'],
             'platform_checkout_notice' => ['nullable', 'string', 'max:5000'],
+            'seo_home_title' => ['nullable', 'string', 'max:120'],
+            'seo_home_description' => ['nullable', 'string', 'max:320'],
+            'seo_default_og_image' => ['nullable', 'string', 'max:500'],
+            'seo_google_analytics_id' => ['nullable', 'string', 'max:32'],
+            'seo_google_tag_manager_id' => ['nullable', 'string', 'max:32'],
+            'seo_social_instagram' => ['nullable', 'string', 'max:500', $seoSocialUrlRule = function (string $attribute, mixed $value, \Closure $fail): void {
+                if (is_string($value) && trim($value) !== '' && filter_var(trim($value), FILTER_VALIDATE_URL) === false) {
+                    $fail('Informe uma URL válida para a rede social.');
+                }
+            }],
+            'seo_social_facebook' => ['nullable', 'string', 'max:500', $seoSocialUrlRule],
+            'seo_social_x' => ['nullable', 'string', 'max:500', $seoSocialUrlRule],
+            'seo_social_youtube' => ['nullable', 'string', 'max:500', $seoSocialUrlRule],
+            'seo_social_tiktok' => ['nullable', 'string', 'max:500', $seoSocialUrlRule],
+            'seo_social_discord' => ['nullable', 'string', 'max:500', $seoSocialUrlRule],
             ...DatabaseBackupSettings::validationRules(),
         ]);
 
@@ -354,6 +370,7 @@ class SettingsController extends Controller
 
             SellerPanelSupportSettings::persistFromValidated($validated);
             PlatformCompanySettings::persistFromValidated($validated);
+            \App\Support\MarketplaceSeoSettings::persistFromValidated($validated);
             KycRequirementSettings::persistFromValidated($validated);
             DatabaseBackupSettings::persistFromValidated($validated, $request);
         }
@@ -407,6 +424,19 @@ class SettingsController extends Controller
             'platform_cnpj',
             'platform_checkout_notice_enabled',
             'platform_checkout_notice',
+        ];
+        $seoKeys = [
+            'seo_home_title',
+            'seo_home_description',
+            'seo_default_og_image',
+            'seo_google_analytics_id',
+            'seo_google_tag_manager_id',
+            'seo_social_instagram',
+            'seo_social_facebook',
+            'seo_social_x',
+            'seo_social_youtube',
+            'seo_social_tiktok',
+            'seo_social_discord',
         ];
         $securityToggleKeys = [
             'login_turnstile_enabled',
@@ -469,6 +499,9 @@ class SettingsController extends Controller
                 continue;
             }
             if (in_array($key, $platformCompanyKeys, true)) {
+                continue;
+            }
+            if (in_array($key, $seoKeys, true)) {
                 continue;
             }
             if (in_array($key, $securityToggleKeys, true)) {

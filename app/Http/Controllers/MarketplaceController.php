@@ -7,6 +7,8 @@ use App\Models\Product;
 use App\Models\ProductQuestion;
 use App\Models\User;
 use App\Services\MarketplacePresenter;
+use App\Services\MarketplaceSeoBuilder;
+use App\Services\StorageService;
 use App\Support\MarketplaceHomeContent;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
@@ -16,6 +18,7 @@ class MarketplaceController extends Controller
 {
     public function __construct(
         protected MarketplacePresenter $presenter,
+        protected MarketplaceSeoBuilder $seo,
     ) {}
 
     public function home(Request $request): Response
@@ -31,11 +34,12 @@ class MarketplaceController extends Controller
             ->groupBy('marketplace_category_id')
             ->pluck('total', 'marketplace_category_id');
 
+        $storage = app(StorageService::class);
         $categories = $categories->map(fn (MarketplaceCategory $c) => [
             'id' => $c->id,
             'name' => $c->name,
             'slug' => $c->slug,
-            'image' => $c->image,
+            'image' => $c->image ? ($storage->resolvePublicUrl((string) $c->image) ?: null) : null,
             'icon' => $c->icon,
             'listings_count' => (int) ($listingCounts[$c->id] ?? 0),
         ]);
@@ -86,6 +90,7 @@ class MarketplaceController extends Controller
             'content' => $content,
             'preview' => $preview,
             'appName' => config('getfy.app_name', 'Gamkon'),
+            'seo' => $this->seo->home(),
         ]);
     }
 
@@ -100,8 +105,16 @@ class MarketplaceController extends Controller
             ->through(fn (Product $p) => $this->presenter->productCard($p, $p->tenantOwner));
 
         return Inertia::render('Marketplace/Category', [
-            'category' => $category,
+            'category' => [
+                'id' => $category->id,
+                'name' => $category->name,
+                'slug' => $category->slug,
+                'image' => $category->image
+                    ? (app(StorageService::class)->resolvePublicUrl((string) $category->image) ?: null)
+                    : null,
+            ],
             'products' => $products,
+            'seo' => $this->seo->category($category),
         ]);
     }
 
@@ -176,6 +189,11 @@ class MarketplaceController extends Controller
             'questions' => $questions,
             'related' => $related,
             'canAsk' => (bool) $request->user(),
+            'seo' => $this->seo->product(
+                $product,
+                is_string($card['image'] ?? null) ? $card['image'] : null,
+                isset($card['price']) ? (float) $card['price'] : null,
+            ),
         ]);
     }
 
@@ -206,9 +224,12 @@ class MarketplaceController extends Controller
             ->paginate(24)
             ->through(fn (Product $p) => $this->presenter->productCard($p, $seller));
 
+        $sellerCard = $this->presenter->sellerCard($seller);
+
         return Inertia::render('Marketplace/SellerProfile', [
-            'seller' => $this->presenter->sellerCard($seller),
+            'seller' => $sellerCard,
             'products' => $products,
+            'seo' => $this->seo->seller($seller, $sellerCard),
         ]);
     }
 

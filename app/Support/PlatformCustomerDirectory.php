@@ -35,14 +35,15 @@ final class PlatformCustomerDirectory
     public const NOT_INFORMED = 'Não informado';
 
     /**
-     * Base da listagem/export: usuários com pelo menos uma compra concluída.
+     * Base da listagem/export: contas de comprador (com ou sem compras).
+     * Inclui cadastros de /criar-conta mesmo sem pedido concluído, para permitir exclusão/reuso de e-mail e CPF.
      *
      * @return Builder<User>
      */
     public static function listingQuery(?string $search = null): Builder
     {
         $query = User::query()
-            ->whereHas('orders', fn ($q) => $q->where('status', self::STATUS_COMPLETED))
+            ->whereIn('role', User::buyerRoleValues())
             ->withCount([
                 'orders as purchases_count' => fn ($q) => $q->where('status', self::STATUS_COMPLETED),
                 'orders as purchases_pending_count' => fn ($q) => $q->where('status', self::STATUS_PENDING),
@@ -88,13 +89,11 @@ final class PlatformCustomerDirectory
 
     public static function isViewableCustomer(User $user): bool
     {
-        if ($user->isPlatformAdmin() || $user->isTeam()) {
+        if ($user->isPlatformAdmin() || $user->isTeam() || $user->isInfoprodutor()) {
             return false;
         }
 
-        return $user->orders()
-            ->where('status', self::STATUS_COMPLETED)
-            ->exists();
+        return $user->isCliente();
     }
 
     /**

@@ -1,16 +1,18 @@
 <script setup>
-import { Head, Link } from '@inertiajs/vue3';
+import { Link } from '@inertiajs/vue3';
 import MarketplaceLayout from '@/Layouts/MarketplaceLayout.vue';
 import ProductCard from '@/components/marketplace/ProductCard.vue';
+import MarketplaceSeoHead from '@/components/marketplace/MarketplaceSeoHead.vue';
 
 defineProps({
     category: { type: Object, required: true },
     products: { type: Object, required: true },
+    seo: { type: Object, default: null },
 });
 </script>
 
 <template>
-    <Head :title="category.name" />
+    <MarketplaceSeoHead :seo="seo" />
     <MarketplaceLayout>
         <div class="mx-auto max-w-7xl px-4 py-8">
             <nav class="mb-4 text-xs text-zinc-500">

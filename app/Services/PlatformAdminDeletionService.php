@@ -10,6 +10,7 @@ use App\Models\TenantWallet;
 use App\Models\User;
 use App\Models\WalletTransaction;
 use App\Services\StorageService;
+use App\Support\UserUniqueIdentity;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use InvalidArgumentException;
@@ -35,8 +36,12 @@ class PlatformAdminDeletionService
     {
         self::assertDeletableBuyerAccount($user);
 
-        $user->products()->detach();
-        $user->delete();
+        DB::transaction(function () use ($user) {
+            $user->products()->detach();
+            self::forgetSessions((int) $user->id);
+            UserUniqueIdentity::release($user);
+            $user->delete();
+        });
     }
 
     public static function merchantDeletionBlockReason(User $user, bool $force = false): ?string
@@ -77,11 +82,16 @@ class PlatformAdminDeletionService
         $tenantId = (int) ($user->tenant_id ?? $user->id);
 
         DB::transaction(function () use ($user, $tenantId) {
-            User::query()
+            $teamMembers = User::query()
                 ->where('tenant_id', $user->id)
                 ->where('id', '!=', $user->id)
                 ->where('role', User::ROLE_TEAM)
-                ->delete();
+                ->get();
+
+            foreach ($teamMembers as $member) {
+                UserUniqueIdentity::release($member);
+                $member->delete();
+            }
 
             if (Schema::hasTable('merchant_admin_notes')) {
                 MerchantAdminNote::query()->where('merchant_user_id', $user->id)->delete();
@@ -91,8 +101,31 @@ class PlatformAdminDeletionService
                 TenantWallet::query()->where('tenant_id', $tenantId)->delete();
             }
 
+            // Produtos não têm FK para users; remove para não deixar anúncios órfãos indexáveis.
+            if (Schema::hasTable('products')) {
+                $products = Product::withTrashed()
+                    ->where('tenant_id', $tenantId)
+                    ->orderBy('id')
+                    ->get();
+
+                foreach ($products as $product) {
+                    self::deleteProduct($product);
+                }
+            }
+
+            self::forgetSessions((int) $user->id);
+            UserUniqueIdentity::release($user);
             $user->delete();
         });
+    }
+
+    private static function forgetSessions(int $userId): void
+    {
+        if ($userId <= 0 || ! Schema::hasTable('sessions') || ! Schema::hasColumn('sessions', 'user_id')) {
+            return;
+        }
+
+        DB::table('sessions')->where('user_id', $userId)->delete();
     }
 
     /**

@@ -119,9 +119,14 @@ const labelClass = 'mb-1.5 block text-[12px] font-semibold uppercase tracking-[0
             </form>
 
             <form class="h-fit rounded-[16px] border border-[#EBE2D8] bg-white p-5 sm:p-6" @submit.prevent="savePassword">
-                <h2 class="font-display text-[18px] font-bold text-[#1A1410]">Alterar senha</h2>
+                <h2 class="font-display text-[18px] font-bold text-[#1A1410]">
+                    {{ profile.must_change_password ? 'Definir nova senha' : 'Alterar senha' }}
+                </h2>
+                <p v-if="profile.must_change_password" class="mt-2 text-[13px] text-amber-800">
+                    Você recebeu uma senha provisória por e-mail. Defina uma nova senha definitiva para continuar.
+                </p>
                 <div class="mt-5 space-y-4">
-                    <div>
+                    <div v-if="!profile.must_change_password">
                         <label :class="labelClass">Senha atual</label>
                         <input v-model="passwordForm.current_password" type="password" :class="fieldClass" required autocomplete="current-password" />
                         <p v-if="passwordForm.errors.current_password" class="mt-1 text-xs text-red-600">{{ passwordForm.errors.current_password }}</p>
@@ -141,7 +146,7 @@ const labelClass = 'mb-1.5 block text-[12px] font-semibold uppercase tracking-[0
                     class="mt-6 inline-flex rounded-[12px] bg-[#1A1410] px-5 py-2.5 text-[14px] font-semibold text-white hover:bg-black disabled:opacity-50"
                     :disabled="passwordForm.processing"
                 >
-                    Atualizar senha
+                    {{ profile.must_change_password ? 'Salvar nova senha' : 'Atualizar senha' }}
                 </button>
             </form>
         </div>

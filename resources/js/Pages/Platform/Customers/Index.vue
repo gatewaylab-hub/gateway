@@ -87,7 +87,7 @@ function deleteCustomerHistory(user) {
 <template>
     <div class="space-y-6">
         <div class="flex flex-wrap items-start justify-between gap-3">
-            <p class="text-sm text-zinc-600 dark:text-zinc-400">Utilizadores com pelo menos uma compra concluída.</p>
+            <p class="text-sm text-zinc-600 dark:text-zinc-400">Contas de comprador (incluindo cadastros sem compra). Ao excluir, o e-mail e o CPF ficam livres para novo cadastro.</p>
             <a
                 :href="exportHref"
                 class="inline-flex items-center gap-2 rounded-xl border border-zinc-300 bg-white px-4 py-2 text-sm font-medium text-zinc-800 transition hover:bg-zinc-50 dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-100 dark:hover:bg-zinc-800"

@@ -20,17 +20,22 @@ class BuyerAccountService
         ?string $phone = null,
         ?string $document = null,
     ): array {
+        $createPayload = [
+            'name' => $name !== '' ? $name : $email,
+            'password' => $passwordHash,
+            'role' => User::ROLE_CLIENTE,
+            'tenant_id' => null,
+            'phone' => $phone,
+            'document' => $document,
+            'person_type' => $document ? 'pf' : null,
+        ];
+        if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'must_change_password')) {
+            $createPayload['must_change_password'] = true;
+        }
+
         $user = User::firstOrCreate(
             ['email' => $email],
-            [
-                'name' => $name !== '' ? $name : $email,
-                'password' => $passwordHash,
-                'role' => User::ROLE_CLIENTE,
-                'tenant_id' => null,
-                'phone' => $phone,
-                'document' => $document,
-                'person_type' => $document ? 'pf' : null,
-            ]
+            $createPayload
         );
 
         $wasRecentlyCreated = $user->wasRecentlyCreated;
@@ -49,6 +54,9 @@ class BuyerAccountService
             }
             if ($isMemberAreaProduct && ! $wasRecentlyCreated) {
                 $updates['password'] = $passwordHash;
+                if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'must_change_password')) {
+                    $updates['must_change_password'] = true;
+                }
             }
             $user->update($updates);
         }

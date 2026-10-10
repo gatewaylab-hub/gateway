@@ -120,7 +120,7 @@ const label = 'mb-1.5 block text-[12px] font-semibold text-[#3D332B]';
 
 <template>
     <Head title="Criar conta" />
-    <MarketplaceLayout>
+    <MarketplaceLayout compact-main>
         <div class="mx-auto max-w-[720px] px-5 py-10 sm:py-14">
             <div class="mb-8 text-center">
                 <div class="text-[12px] font-semibold uppercase tracking-[0.14em] text-[color:var(--mk-accent)]">Conta {{ appName }}</div>

@@ -1,17 +1,19 @@
 <script setup>
-import { Head, Link, useForm } from '@inertiajs/vue3';
+import { Link, useForm } from '@inertiajs/vue3';
 import { computed, ref } from 'vue';
 import MarketplaceLayout from '@/Layouts/MarketplaceLayout.vue';
 import ProductCard from '@/components/marketplace/ProductCard.vue';
 import CategoryPoster from '@/components/marketplace/CategoryPoster.vue';
 import MkIcon from '@/components/marketplace/MkIcon.vue';
 import SellerLevelBadge from '@/components/marketplace/SellerLevelBadge.vue';
+import MarketplaceSeoHead from '@/components/marketplace/MarketplaceSeoHead.vue';
 
 const props = defineProps({
     product: { type: Object, required: true },
     questions: { type: Array, default: () => [] },
     related: { type: Array, default: () => [] },
     canAsk: { type: Boolean, default: false },
+    seo: { type: Object, default: null },
 });
 
 const form = useForm({ body: '' });
@@ -96,7 +98,7 @@ function scrollRelated(dir) {
 </script>
 
 <template>
-    <Head :title="product.name" />
+    <MarketplaceSeoHead :seo="seo" />
     <MarketplaceLayout>
         <div class="mx-auto max-w-[1240px] px-5 pb-6 pt-6">
             <nav class="mb-6 flex flex-wrap items-center gap-1.5 text-[13px] text-[#8A7B6E]">
@@ -133,7 +135,8 @@ function scrollRelated(dir) {
                                 <span
                                     v-if="seller?.level?.name"
                                     class="ml-1 inline-flex -translate-y-1 items-center rounded-[6px] bg-[#1A1410] px-2 py-0.5 align-middle text-[10px] font-semibold normal-case tracking-normal text-white"
-                                >{{ seller.level.name }}</span>
+                                    :title="`Nível ${seller.level.number || 1} — ${seller.level.name}`"
+                                >Nível {{ seller.level.number || 1 }} — {{ seller.level.name }}</span>
                             </h1>
 
                             <div class="mt-4 flex flex-wrap items-center gap-2">
@@ -294,15 +297,12 @@ function scrollRelated(dir) {
                                     :href="seller.profile_url || `/perfil/${seller.username}`"
                                     class="text-[15px] font-semibold text-[color:var(--mk-accent)] hover:underline"
                                 >{{ seller.username }}</Link>
-                                <SellerLevelBadge :seller="seller" size="sm" />
+                                <SellerLevelBadge :seller="seller" size="sm" show-label />
                                 <span
                                     class="rounded-full px-1.5 py-px text-[10px] font-bold"
                                     :class="seller.is_online ? 'bg-emerald-100 text-emerald-700' : 'bg-[#EBE2D8] text-[#8A7B6E]'"
                                 >{{ seller.is_online ? 'ON' : 'OFF' }}</span>
                             </div>
-                            <p v-if="seller.level?.name" class="mt-1 text-[11px] font-medium text-[#8A7B6E]">
-                                {{ seller.level.name }}
-                            </p>
                         </div>
                         <dl class="mt-5 space-y-2 text-[13px]">
                             <div class="flex justify-between gap-3"><dt class="text-[#8A7B6E]">Membro desde</dt><dd class="font-semibold">{{ seller.member_since || '—' }}</dd></div>

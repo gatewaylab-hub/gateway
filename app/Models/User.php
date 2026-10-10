@@ -47,6 +47,7 @@ class User extends Authenticatable
         'username',
         'avatar',
         'password',
+        'must_change_password',
         'role',
         'tenant_id',
         'referral_code',
@@ -495,6 +496,7 @@ class User extends Authenticatable
         return [
             'email_verified_at' => 'datetime',
             'password' => 'hashed',
+            'must_change_password' => 'boolean',
             'merchant_fees' => 'array',
             'merchant_settlement_overrides' => 'array',
             'merchant_gateway_order' => 'array',

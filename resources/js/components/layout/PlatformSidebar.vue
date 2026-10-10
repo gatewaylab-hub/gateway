@@ -91,9 +91,9 @@ const navGroupsCore = [
         id: 'pessoas',
         label: 'Pessoas',
         items: [
-            { name: 'Infoprodutores', href: '/plataforma/usuarios', icon: Users },
+            { name: 'Infoprodutores', href: '/plataforma/usuarios', icon: Users, badgeKey: 'infoprodutores' },
             { name: 'Gerentes de Conta', href: '/plataforma/gerentes-conta', icon: ContactRound },
-            { name: 'Clientes', href: '/plataforma/clientes', icon: UserCircle2 },
+            { name: 'Clientes', href: '/plataforma/clientes', icon: UserCircle2, badgeKey: 'clientes' },
             { name: 'Verificações KYC', href: '/plataforma/verificacoes-kyc', icon: BadgeCheck, badgeKey: 'kyc' },
         ],
     },
@@ -104,7 +104,7 @@ const navGroupsCore = [
             { name: 'Transações', href: '/plataforma/transacoes', icon: ArrowLeftRight, badgeKey: 'transacoes' },
             { name: 'Transações API', href: '/plataforma/transacoes-api', icon: Code2 },
             { name: 'Disputas MED', href: '/plataforma/disputas', icon: AlertTriangle, badgeKey: 'disputas' },
-            { name: 'Produtos', href: '/plataforma/produtos', icon: Package },
+            { name: 'Produtos', href: '/plataforma/produtos', icon: Package, badgeKey: 'produtos' },
         ],
     },
     {

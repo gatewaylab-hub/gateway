@@ -253,6 +253,10 @@ async function onFile(field, event) {
     const fd = new FormData();
     fd.append('field', field);
     fd.append(field, f);
+    const csrf = document.querySelector('meta[name="csrf-token"]')?.content;
+    if (csrf) {
+        fd.append('_token', csrf);
+    }
     if (identityType.value) {
         fd.append('identity_document_type', identityType.value);
     }
@@ -261,9 +265,8 @@ async function onFile(field, event) {
     }
 
     try {
-        await axios.post('/kyc/document', fd, {
-            headers: { 'Content-Type': 'multipart/form-data' },
-        });
+        // Não forçar Content-Type: o boundary do multipart precisa ser definido pelo browser.
+        await axios.post('/kyc/document', fd);
         uploaded[field] = true;
     } catch (err) {
         fieldErrors[field] = parseAxiosError(err, field);
@@ -434,13 +437,13 @@ const fileAccept =
 
         <div
             v-else-if="isApproved"
-            class="rounded-2xl border border-[var(--color-primary)]/40 bg-[var(--color-primary)]/10 px-5 py-6 text-center shadow-sm dark:border-[var(--color-primary)]/35 dark:bg-[var(--color-primary)]/15"
+            class="rounded-2xl border border-emerald-200/90 bg-emerald-50/90 px-5 py-6 text-center shadow-sm dark:border-emerald-900/50 dark:bg-emerald-950/35"
         >
             <div class="flex justify-center">
-                <BadgeCheck class="h-12 w-12 text-[var(--color-primary)]" aria-hidden="true" />
+                <BadgeCheck class="h-12 w-12 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
             </div>
-            <h3 class="mt-4 text-base font-semibold text-zinc-900 dark:text-white">Verificação aprovada</h3>
-            <p class="mt-2 text-sm text-zinc-700 dark:text-zinc-300">
+            <h3 class="mt-4 text-base font-semibold text-emerald-950 dark:text-emerald-100">Verificação aprovada</h3>
+            <p class="mt-2 text-sm text-emerald-900/90 dark:text-emerald-200/95">
                 Sua identidade foi <strong>confirmada</strong> pela plataforma. Não é necessário enviar novos documentos.
             </p>
         </div>

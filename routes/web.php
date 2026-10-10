@@ -128,6 +128,16 @@ Route::get('/', function (\Illuminate\Http\Request $request) {
     ]);
 })->name('marketplace.home');
 
+Route::get('/sitemap.xml', \App\Http\Controllers\MarketplaceSitemapController::class)->name('marketplace.sitemap');
+Route::get('/robots.txt', function () {
+    $base = rtrim(\App\Support\PublicAppUrl::base(), '/');
+
+    return response(
+        "User-agent: *\nAllow: /\nDisallow: /plataforma\nDisallow: /dashboard\nDisallow: /painel-cliente\nDisallow: /chat\nDisallow: /login\nDisallow: /cadastro\nSitemap: {$base}/sitemap.xml\n",
+        200,
+        ['Content-Type' => 'text/plain; charset=UTF-8']
+    );
+})->name('marketplace.robots');
 Route::get('/categorias/{slug}', [\App\Http\Controllers\MarketplaceController::class, 'category'])->name('marketplace.category');
 Route::get('/buscar', [\App\Http\Controllers\MarketplaceController::class, 'search'])->name('marketplace.search');
 Route::get('/anuncio/{slug}', [\App\Http\Controllers\MarketplaceController::class, 'show'])->name('marketplace.show');
@@ -930,6 +940,7 @@ Route::middleware(['auth', 'admin.tenant', 'seller.panel', 'stacker.license', 'r
         Route::get('/vendas', [\App\Http\Controllers\VendasController::class, 'index'])->name('vendas.index');
         Route::get('/vendas/export', [\App\Http\Controllers\VendasController::class, 'export'])->name('vendas.export');
         Route::post('/vendas/{order}/resend-access-email', [\App\Http\Controllers\VendasController::class, 'resendAccessEmail'])->name('vendas.resend-access-email');
+        Route::post('/vendas/{order}/shipping-status', [\App\Http\Controllers\VendasController::class, 'updateShippingStatus'])->name('vendas.shipping-status');
         Route::post('/vendas/{order}/reembolsar', [\App\Http\Controllers\VendasController::class, 'refundManually'])->name('vendas.refund-manually');
         Route::post('/vendas/{order}/approve-manually', [\App\Http\Controllers\VendasController::class, 'approveManually'])->name('vendas.approve-manually');
         Route::get('/vendas/disputas', [\App\Http\Controllers\SellerMedDisputesController::class, 'index'])->name('disputas.index');

@@ -53,12 +53,21 @@ class LoginController extends Controller
         }
 
         // Evita redirecionar para URL antiga (ex.: /produtos/.../edit) após login via Inertia.
-        // Mantém intended se for checkout (/c/...) para voltar após entrar.
+        // Mantém intended se for checkout (/c/...) ou painel do cliente.
         $intended = $request->session()->get('url.intended');
         $redirect = $request->query('redirect');
-        if (is_string($redirect) && str_starts_with($redirect, '/c/')) {
+        $allowedRedirect = is_string($redirect) && (
+            str_starts_with($redirect, '/c/')
+            || $redirect === '/painel-cliente'
+            || str_starts_with($redirect, '/painel-cliente/')
+        );
+        if ($allowedRedirect) {
             $request->session()->put('url.intended', $redirect);
-        } elseif (! is_string($intended) || ! str_starts_with($intended, '/c/')) {
+        } elseif (! is_string($intended) || ! (
+            str_starts_with($intended, '/c/')
+            || $intended === '/painel-cliente'
+            || str_starts_with($intended, '/painel-cliente/')
+        )) {
             $request->session()->forget('url.intended');
         }
 
@@ -155,8 +164,15 @@ class LoginController extends Controller
 
             if ($user->canAccessCustomerPanel()) {
                 $request->session()->put('panel_context', 'customer');
+                if (! empty($user->must_change_password)) {
+                    return $this->inertiaOrRedirectAfterLogin($request, '/painel-cliente/conta');
+                }
                 $intended = $request->session()->get('url.intended');
-                if (is_string($intended) && str_starts_with($intended, '/c/')) {
+                if (is_string($intended) && (
+                    str_starts_with($intended, '/c/')
+                    || $intended === '/painel-cliente'
+                    || str_starts_with($intended, '/painel-cliente/')
+                )) {
                     return $this->inertiaOrRedirectAfterLogin($request, $intended);
                 }
 

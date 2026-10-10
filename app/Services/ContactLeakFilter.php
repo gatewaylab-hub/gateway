@@ -4,18 +4,23 @@ namespace App\Services;
 
 class ContactLeakFilter
 {
-    public function blockedReason(string $text): ?string
+    public function blockedReason(string $text, bool $allowEmpty = false): ?string
     {
         $normalized = trim($text);
         if ($normalized === '') {
-            return 'Mensagem vazia.';
+            return $allowEmpty ? null : 'Mensagem vazia.';
         }
 
         if (preg_match('/https?:\/\/|www\./i', $normalized)) {
             return 'Não é permitido enviar links externos.';
         }
 
-        if (preg_match('/\b(wa\.me|whatsapp|t\.me|telegram|discord\.gg|discord\.com|instagram\.com|facebook\.com|fb\.com|mailto:)\b/i', $normalized)) {
+        if (preg_match('/\b(wa\.me|api\.whatsapp|whatsapp|wpp|zap|t\.me|telegram|discord\.gg|discord\.com|instagram\.com|insta\b|ig\b|facebook\.com|fb\.com|fb\.me|mailto:|tiktok\.com|youtube\.com|youtu\.be|kwai|onlyfans)\b/i', $normalized)) {
+            return 'Não é permitido enviar contatos externos (WhatsApp, Discord, redes sociais, etc.).';
+        }
+
+        // Obfuscação comum: w h a t s a p p / whats.app / zapzap
+        if (preg_match('/w\s*h\s*a\s*t\s*s\s*a\s*p\s*p|whats[\s.\-_]*app|zap[\s.\-_]*zap|chama\s+no\s+zap|me\s+chama\s+no/i', $normalized)) {
             return 'Não é permitido enviar contatos externos (WhatsApp, Discord, redes sociais, etc.).';
         }
 
@@ -42,12 +47,12 @@ class ContactLeakFilter
         return null;
     }
 
-    public function assertAllowed(string $text): void
+    public function assertAllowed(string $text, string $field = 'body', bool $allowEmpty = false): void
     {
-        $reason = $this->blockedReason($text);
+        $reason = $this->blockedReason($text, $allowEmpty);
         if ($reason !== null) {
             throw \Illuminate\Validation\ValidationException::withMessages([
-                'body' => $reason,
+                $field => $reason,
             ]);
         }
     }

@@ -789,11 +789,17 @@ class UsersController extends Controller
             return redirect()
                 ->route('plataforma.usuarios.index')
                 ->with('error', $e->getMessage());
+        } catch (\Throwable $e) {
+            report($e);
+
+            return redirect()
+                ->route('plataforma.usuarios.index')
+                ->with('error', 'Não foi possível excluir a conta. Verifique vínculos (pedidos, carteira) ou tente exclusão forçada em massa.');
         }
 
         PlatformAuditService::log('platform.merchant.deleted', ['user_id' => $id], $request);
 
-        return redirect()->route('plataforma.usuarios.index')->with('success', 'Usuário excluído.');
+        return redirect()->route('plataforma.usuarios.index')->with('success', 'Usuário excluído. E-mail e CPF liberados para novo cadastro.');
     }
 
     public function bulkDestroy(Request $request): RedirectResponse

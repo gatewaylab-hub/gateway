@@ -154,7 +154,6 @@ const pme = props.produto.checkout_config?.payment_methods_enabled ?? {};
 const form = useForm({
     name: props.produto.name,
     notification_name: props.produto.notification_name ?? '',
-    support_email: props.produto.support_email ?? '',
     description: props.produto.description ?? '',
     category: props.produto.category ?? '',
     marketplace_category_id: props.produto.marketplace_category_id ?? '',
@@ -1193,7 +1192,6 @@ const submitOptions = {
 function appendCoreProductFields(fd) {
     fd.append('name', form.name);
     fd.append('notification_name', form.notification_name ?? '');
-    fd.append('support_email', form.support_email ?? '');
     fd.append('description', form.description ?? '');
     fd.append('category', form.category || 'outros');
     fd.append('marketplace_category_id', form.marketplace_category_id ?? '');
@@ -1454,25 +1452,6 @@ function submit() {
                                     </p>
                                     <p v-if="form.errors.notification_name" class="mt-1.5 text-sm text-red-600 dark:text-red-400">
                                         {{ form.errors.notification_name }}
-                                    </p>
-                                </div>
-                                <div>
-                                    <label class="mb-1.5 block text-sm font-medium text-zinc-700 dark:text-zinc-300">
-                                        E-mail para Suporte
-                                    </label>
-                                    <input
-                                        v-model="form.support_email"
-                                        type="email"
-                                        maxlength="255"
-                                        placeholder="suporte@suaempresa.com"
-                                        :class="inputClass"
-                                    />
-                                    <p class="mt-1 text-xs text-zinc-500">
-                                        Este e-mail será informado ao comprador para entrar em contato
-                                        (se deixado em branco será usado o padrão do infoprodutor).
-                                    </p>
-                                    <p v-if="form.errors.support_email" class="mt-1.5 text-sm text-red-600 dark:text-red-400">
-                                        {{ form.errors.support_email }}
                                     </p>
                                 </div>
                                 <div>

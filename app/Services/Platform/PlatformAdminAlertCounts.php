@@ -3,6 +3,7 @@
 namespace App\Services\Platform;
 
 use App\Models\MedDispute;
+use App\Models\Product;
 use App\Models\RefundRequest;
 use App\Models\User;
 use App\Models\Withdrawal;
@@ -24,7 +25,42 @@ class PlatformAdminAlertCounts
             'financeiro' => $this->withdrawalsPendingCount(),
             'disputas' => $this->medDisputesOpenCount(),
             'transacoes' => $this->refundRequestsPendingCount(),
+            'infoprodutores' => $this->merchantsPendingCount(),
+            'clientes' => $this->newClientsCount(),
+            'produtos' => $this->productsPendingApprovalCount(),
         ];
+    }
+
+    public function merchantsPendingCount(): int
+    {
+        if (! Schema::hasColumn('users', 'account_status')) {
+            return 0;
+        }
+
+        return (int) User::query()
+            ->where('role', User::ROLE_INFOPRODUTOR)
+            ->whereNotNull('tenant_id')
+            ->where('account_status', 'pending')
+            ->count();
+    }
+
+    public function newClientsCount(): int
+    {
+        return (int) User::query()
+            ->where('role', User::ROLE_CLIENTE)
+            ->where('created_at', '>=', now()->subDays(7))
+            ->count();
+    }
+
+    public function productsPendingApprovalCount(): int
+    {
+        if (! Schema::hasTable('products') || ! Schema::hasColumn('products', 'approval_status')) {
+            return 0;
+        }
+
+        return (int) Product::query()
+            ->where('approval_status', Product::APPROVAL_PENDING)
+            ->count();
     }
 
     public function kycPendingCount(): int

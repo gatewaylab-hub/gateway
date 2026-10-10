@@ -2,6 +2,7 @@
 import { Link } from '@inertiajs/vue3';
 import CategoryPoster from './CategoryPoster.vue';
 import MkIcon from './MkIcon.vue';
+import SellerLevelBadge from './SellerLevelBadge.vue';
 
 defineProps({
     product: { type: Object, required: true },
@@ -85,12 +86,11 @@ function isAuto(product) {
                     />
                 </span>
                 <span class="truncate font-medium">{{ product.seller.username }}</span>
-                <img
-                    v-if="product.seller.level?.image"
-                    :src="product.seller.level.image"
-                    :title="product.seller.level.name"
-                    class="h-4 w-4 rounded-full object-cover"
-                    alt=""
+                <SellerLevelBadge
+                    v-if="product.seller.level"
+                    :seller="product.seller"
+                    size="sm"
+                    :show-count="false"
                 />
                 <span class="ml-auto shrink-0 tabular-nums" :class="dark ? 'text-white/40' : 'text-[#A3958A]'">
                     {{ product.seller.sales_count }} vendas

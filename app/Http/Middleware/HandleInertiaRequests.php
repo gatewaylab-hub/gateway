@@ -5,6 +5,8 @@ namespace App\Http\Middleware;
 use App\Models\User;
 use App\Models\MemberNotification;
 use App\Models\MemberPushSubscription;
+use App\Models\OrderConversation;
+use App\Models\OrderMessage;
 use App\Models\Product;
 use App\Services\InertiaSharedPropsCache;
 use App\Services\StorageService;
@@ -29,6 +31,8 @@ use App\Support\ReferralProgramSettings;
 use App\Support\ProductApprovalSettings;
 use App\Services\ProductApprovalService;
 use App\Support\MemberAreaAdminPreview;
+use App\Support\MarketplaceSeoSettings;
+use App\Support\PlatformCompanySettings;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Schema;
 use Inertia\Middleware;
@@ -320,6 +324,7 @@ class HandleInertiaRequests extends Middleware
             'member_certificate' => $memberCertificate,
             'member_area_admin_preview' => $memberAreaAdminPreview,
             'customer_panel' => $customerPanel,
+            'chat_unread_count' => $user ? $this->chatUnreadCountFor($user) : 0,
             'seller_dashboard_template' => ($user && $user->canAccessSellerPanel() && ! $customerPanel)
                 ? SellerDashboardTemplate::current()
                 : SellerDashboardTemplate::DEFAULT,
@@ -359,6 +364,8 @@ class HandleInertiaRequests extends Middleware
                 ? \App\Services\PixGoAccess::sidebarLabel()
                 : \App\Services\PixGoAccess::DEFAULT_SIDEBAR_LABEL,
             'legal' => $sharedCache->legalPublicLinks(),
+            'platform_company' => PlatformCompanySettings::publicPayload(),
+            'marketplace_seo' => MarketplaceSeoSettings::publicPayload(),
         ];
 
         if ($user && ($user->canAccessSellerPanel() || $user->canAccessPlatformPanel())) {
@@ -378,6 +385,39 @@ class HandleInertiaRequests extends Middleware
         }
 
         return $shared;
+    }
+
+    private function chatUnreadCountFor(User $user): int
+    {
+        if (! Schema::hasTable('order_messages') || ! Schema::hasTable('order_conversations')) {
+            return 0;
+        }
+
+        $userId = (int) $user->id;
+        $sellerOwnerId = $user->canAccessSellerPanel()
+            ? (int) ($user->tenant_id ?: $user->id)
+            : null;
+
+        $conversationIds = OrderConversation::query()
+            ->where(function ($q) use ($userId, $sellerOwnerId) {
+                $q->where('buyer_id', $userId)->orWhere('seller_id', $userId);
+                if ($sellerOwnerId && $sellerOwnerId !== $userId) {
+                    $q->orWhere('seller_id', $sellerOwnerId);
+                }
+            })
+            ->pluck('id');
+
+        if ($conversationIds->isEmpty()) {
+            return 0;
+        }
+
+        return (int) OrderMessage::query()
+            ->whereIn('order_conversation_id', $conversationIds)
+            ->whereNull('read_at')
+            ->where(function ($q) use ($userId) {
+                $q->whereNull('user_id')->orWhere('user_id', '!=', $userId);
+            })
+            ->count();
     }
 
     private function pageTitleForRoute(?string $name): ?string

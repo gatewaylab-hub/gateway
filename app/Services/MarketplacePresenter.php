@@ -55,6 +55,7 @@ class MarketplacePresenter
                 'image' => $current['image'] ?? null,
                 'threshold' => $current['threshold'] ?? null,
                 'description' => $current['description'] ?? null,
+                'number' => max(1, count($level['unlocked_levels'] ?? [])),
             ] : null,
             'next_level' => $level['next_level'] ? [
                 'name' => $level['next_level']['name'] ?? null,

@@ -149,6 +149,12 @@ const chipClass = (active) =>
                     <button type="button" class="rounded-[10px] px-3.5 py-2 text-[12px] font-semibold transition" :class="chipClass(filter === 'all')" @click="filter = 'all'">Todos</button>
                     <button v-if="hasAccess" type="button" class="rounded-[10px] px-3.5 py-2 text-[12px] font-semibold transition" :class="chipClass(filter === 'access')" @click="filter = 'access'">Com acesso</button>
                     <button v-if="hasGranted" type="button" class="rounded-[10px] px-3.5 py-2 text-[12px] font-semibold transition" :class="chipClass(filter === 'granted')" @click="filter = 'granted'">Liberados</button>
+                    <Link
+                        href="/buscar"
+                        class="inline-flex items-center gap-1.5 rounded-[10px] bg-[color:var(--mk-accent)] px-3.5 py-2 text-[12px] font-semibold text-white hover:brightness-95"
+                    >
+                        Nova compra <MkIcon name="arrow-right" :size="13" />
+                    </Link>
                 </div>
             </div>
 
@@ -319,6 +325,23 @@ const chipClass = (active) =>
                         <p class="text-sm font-semibold text-[#1A1410]">Entrega</p>
                         <p v-for="(line, idx) in detailsRow.shipping.lines" :key="idx" class="mt-1 text-sm text-[#6B5E54]">{{ line }}</p>
                         <p v-if="detailsRow.shipping.delivery_label" class="mt-2 text-xs text-[#8A7B6E]">Prazo estimado: {{ detailsRow.shipping.delivery_label }}</p>
+                        <p v-if="detailsRow.shipping.tracking_code" class="mt-2 text-xs font-medium text-[#1A1410]">
+                            Rastreio: {{ detailsRow.shipping.tracking_code }}
+                        </p>
+                        <ol v-if="detailsRow.shipping.steps?.length" class="mt-4 space-y-2">
+                            <li
+                                v-for="step in detailsRow.shipping.steps"
+                                :key="step.key"
+                                class="flex items-start gap-2 text-sm"
+                                :class="step.active ? 'font-semibold text-[#1A1410]' : (step.done ? 'text-emerald-700' : 'text-[#A3958A]')"
+                            >
+                                <span
+                                    class="mt-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[10px]"
+                                    :class="step.done || step.active ? 'bg-emerald-600 text-white' : 'bg-[#E2D7CB] text-[#8A7B6E]'"
+                                >{{ step.done || step.active ? '✓' : '' }}</span>
+                                <span>{{ step.label }}</span>
+                            </li>
+                        </ol>
                     </div>
 
                     <p v-if="detailsRow.access_hint" class="mt-4 text-sm text-[#6B5E54]">{{ detailsRow.access_hint }}</p>
@@ -340,13 +363,6 @@ const chipClass = (active) =>
                         >
                             Abrir chat
                         </Link>
-                        <a
-                            v-if="detailsRow.support_email"
-                            :href="`mailto:${detailsRow.support_email}`"
-                            class="inline-flex w-full items-center justify-center gap-1.5 rounded-[12px] border border-[#E2D7CB] px-3 py-2.5 text-sm font-semibold text-[#3D332B] hover:border-[#1A1410]"
-                        >
-                            Falar com o vendedor
-                        </a>
                         <button
                             v-if="detailsRow.can_request_refund"
                             type="button"

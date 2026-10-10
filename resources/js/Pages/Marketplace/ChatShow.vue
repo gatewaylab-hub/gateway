@@ -29,6 +29,9 @@ function scrollToBottom() {
 }
 
 function send() {
+    if (form.processing || !form.body.trim()) {
+        return;
+    }
     form.post(`/chat/${props.conversation.order_id}`, {
         preserveScroll: true,
         onSuccess: () => {
@@ -42,6 +45,10 @@ let timer = null;
 onMounted(() => {
     nextTick(scrollToBottom);
     timer = setInterval(() => {
+        // Evita cancelar o POST de envio: o reload do Inertia aborta a visita anterior.
+        if (form.processing) {
+            return;
+        }
         router.reload({
             only: ['conversation'],
             preserveScroll: true,

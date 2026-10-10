@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\User;
 use App\Support\BrazilianDocuments;
 use App\Support\LoginTurnstileSettings;
+use App\Support\NormalizedEmail;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -30,9 +31,11 @@ class CustomerRegistrationController extends Controller
 
     public function store(Request $request): RedirectResponse
     {
+        $request->merge(['email' => NormalizedEmail::normalize($request->input('email'))]);
+
         $validated = $request->validate([
             'name' => ['required', 'string', 'max:120'],
-            'email' => ['required', 'string', 'email', 'max:255', 'unique:users,email'],
+            'email' => ['required', 'string', 'email', 'max:255'],
             'phone' => ['required', 'string', 'max:24'],
             'document' => ['required', 'string', 'max:14'],
             'birth_date' => ['required', 'date', 'before:'.now()->subYears(18)->format('Y-m-d')],
@@ -50,6 +53,10 @@ class CustomerRegistrationController extends Controller
             'accept_terms.accepted' => 'Aceite os termos para continuar.',
             'address_state.size' => 'Informe a UF com 2 letras.',
         ]);
+
+        if (NormalizedEmail::isTaken($validated['email'])) {
+            throw ValidationException::withMessages(['email' => 'Este e-mail já está em uso.']);
+        }
 
         $cpf = BrazilianDocuments::digits($validated['document']);
         if (! BrazilianDocuments::isValidCpf($cpf)) {
@@ -72,7 +79,7 @@ class CustomerRegistrationController extends Controller
 
         $user = User::query()->create([
             'name' => trim($validated['name']),
-            'email' => strtolower(trim($validated['email'])),
+            'email' => $validated['email'],
             'phone' => $phone,
             'person_type' => 'pf',
             'document' => $cpf,

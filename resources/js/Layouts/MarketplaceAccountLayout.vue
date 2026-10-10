@@ -1,6 +1,6 @@
 <script setup>
 import { computed } from 'vue';
-import { Link, usePage } from '@inertiajs/vue3';
+import { Link, router, usePage } from '@inertiajs/vue3';
 import MarketplaceLayout from '@/Layouts/MarketplaceLayout.vue';
 import MkIcon from '@/components/marketplace/MkIcon.vue';
 
@@ -17,19 +17,25 @@ const path = computed(() => {
     }
 });
 
+const chatUnread = computed(() => Number(page.props.chat_unread_count || 0));
+
 const items = computed(() => [
     { href: '/painel-cliente', label: 'Minhas compras', icon: 'box', match: (p) => p === '/painel-cliente' },
-    { href: '/chat', label: 'Chats', icon: 'chat', match: (p) => p.startsWith('/chat') },
+    { href: '/chat', label: 'Chats', icon: 'chat', match: (p) => p.startsWith('/chat'), badge: chatUnread.value },
     { href: '/painel-cliente/conta', label: 'Minha conta', icon: 'user', match: (p) => p.startsWith('/painel-cliente/conta') },
 ]);
 
 function active(item) {
     return item.match(path.value);
 }
+
+function logout() {
+    router.post('/logout');
+}
 </script>
 
 <template>
-    <MarketplaceLayout>
+    <MarketplaceLayout hide-account-nav>
         <div class="border-b border-[#EBE2D8] bg-white/70">
             <div class="mx-auto flex max-w-[1240px] flex-col gap-4 px-5 py-5 sm:flex-row sm:items-end sm:justify-between">
                 <div>
@@ -48,7 +54,26 @@ function active(item) {
                     >
                         <MkIcon :name="item.icon" :size="15" />
                         {{ item.label }}
+                        <span
+                            v-if="item.badge > 0"
+                            class="ml-0.5 inline-flex min-w-[18px] items-center justify-center rounded-full bg-[color:var(--mk-accent)] px-1.5 py-0.5 text-[10px] font-bold leading-none text-white"
+                        >{{ item.badge > 99 ? '99+' : item.badge }}</span>
                     </Link>
+                    <Link
+                        href="/buscar"
+                        class="inline-flex items-center gap-2 rounded-[10px] border border-[#E2D7CB] bg-white px-3.5 py-2 text-[13px] font-semibold text-[#3D332B] transition hover:border-[#1A1410]"
+                    >
+                        <MkIcon name="store" :size="15" />
+                        Nova compra
+                    </Link>
+                    <button
+                        type="button"
+                        class="inline-flex items-center gap-2 rounded-[10px] border border-[#E2D7CB] bg-white px-3.5 py-2 text-[13px] font-semibold text-[#3D332B] transition hover:border-[#1A1410]"
+                        @click="logout"
+                    >
+                        <MkIcon name="logout" :size="15" />
+                        Sair
+                    </button>
                 </nav>
             </div>
         </div>

@@ -1,5 +1,6 @@
 <script setup>
-import { ref, computed } from 'vue';
+import { ref, computed, watch } from 'vue';
+import { router } from '@inertiajs/vue3';
 import { X, ExternalLink } from 'lucide-vue-next';
 
 const props = defineProps({
@@ -10,6 +11,40 @@ const props = defineProps({
 const emit = defineEmits(['close']);
 
 const activeTab = ref('venda');
+
+const shippingSteps = [
+    { key: 'preparing', label: 'Pedido sendo preparado' },
+    { key: 'collected', label: 'Pedido coletado' },
+    { key: 'in_transit', label: 'Pedido em trânsito' },
+    { key: 'delivered', label: 'Pedido entregue' },
+];
+
+const shippingStatus = ref('');
+const shippingTracking = ref('');
+const shippingSaving = ref(false);
+
+watch(
+    () => props.venda,
+    (v) => {
+        shippingStatus.value = v?.shipping_status || 'preparing';
+        shippingTracking.value = v?.shipping_tracking_code || '';
+    },
+    { immediate: true }
+);
+
+function saveShippingStatus() {
+    if (!props.venda?.id || shippingSaving.value) return;
+    shippingSaving.value = true;
+    router.post(`/vendas/${props.venda.id}/shipping-status`, {
+        shipping_status: shippingStatus.value,
+        shipping_tracking_code: shippingTracking.value,
+    }, {
+        preserveScroll: true,
+        onFinish: () => {
+            shippingSaving.value = false;
+        },
+    });
+}
 
 function trackingValue(key) {
     const v = props.venda;
@@ -299,6 +334,33 @@ const shippingDeliveryLabel = computed(() => {
                                 </p>
                                 <div v-if="shippingAddressLines.length" class="text-sm text-zinc-700 dark:text-zinc-300">
                                     <p v-for="(line, i) in shippingAddressLines" :key="i">{{ line }}</p>
+                                </div>
+                                <div class="mt-3 space-y-2 border-t border-emerald-200/80 pt-3 dark:border-emerald-900">
+                                    <label class="block text-xs font-medium uppercase tracking-wide text-emerald-800 dark:text-emerald-300">
+                                        Status do envio
+                                    </label>
+                                    <select
+                                        v-model="shippingStatus"
+                                        class="w-full rounded-lg border border-emerald-300 bg-white px-2.5 py-2 text-sm dark:border-emerald-800 dark:bg-zinc-900"
+                                    >
+                                        <option v-for="step in shippingSteps" :key="step.key" :value="step.key">
+                                            {{ step.label }}
+                                        </option>
+                                    </select>
+                                    <input
+                                        v-model="shippingTracking"
+                                        type="text"
+                                        placeholder="Código de rastreio (opcional)"
+                                        class="w-full rounded-lg border border-emerald-300 bg-white px-2.5 py-2 text-sm dark:border-emerald-800 dark:bg-zinc-900"
+                                    />
+                                    <button
+                                        type="button"
+                                        class="rounded-lg bg-emerald-700 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-800 disabled:opacity-50"
+                                        :disabled="shippingSaving"
+                                        @click="saveShippingStatus"
+                                    >
+                                        Atualizar entrega
+                                    </button>
                                 </div>
                             </div>
                             <div class="space-y-1">

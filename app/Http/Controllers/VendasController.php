@@ -19,6 +19,7 @@ use App\Services\OrderFeeBreakdownService;
 use App\Services\TeamAccessService;
 use App\Support\CardInstallmentEconomics;
 use App\Support\OrderManualRefund;
+use App\Support\OrderShippingStatus;
 use App\Support\SaleOrigin;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
@@ -1108,6 +1109,34 @@ class VendasController extends Controller
             'success' => false,
             'message' => $result->message,
         ], 422);
+    }
+
+    public function updateShippingStatus(Request $request, Order $order): RedirectResponse
+    {
+        $tenantId = auth()->user()->tenant_id;
+        if ((int) $order->tenant_id !== (int) $tenantId) {
+            abort(404);
+        }
+
+        $validated = $request->validate([
+            'shipping_status' => ['required', 'string', 'in:'.implode(',', OrderShippingStatus::values())],
+            'shipping_tracking_code' => ['nullable', 'string', 'max:120'],
+        ]);
+
+        $status = OrderShippingStatus::resolve($validated['shipping_status']);
+        abort_unless($status !== null, 422);
+
+        $meta = is_array($order->metadata) ? $order->metadata : [];
+        $timeline = is_array($meta['shipping_timeline'] ?? null) ? $meta['shipping_timeline'] : [];
+        $timeline[$status] = now()->toIso8601String();
+        $meta['shipping_timeline'] = $timeline;
+
+        $order->shipping_status = $status;
+        $order->shipping_tracking_code = trim((string) ($validated['shipping_tracking_code'] ?? '')) ?: null;
+        $order->metadata = $meta;
+        $order->save();
+
+        return back()->with('success', 'Status de entrega atualizado.');
     }
 
     public function refundManually(Request $request, Order $order, ManualOrderRefundService $refundService): JsonResponse

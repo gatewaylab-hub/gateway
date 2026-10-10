@@ -92,6 +92,7 @@ class CustomerPanelController extends Controller
                 'address_neighborhood' => $user->address_neighborhood,
                 'address_city' => $user->address_city,
                 'address_state' => $user->address_state,
+                'must_change_password' => (bool) ($user->must_change_password ?? false),
             ],
         ]);
     }
@@ -139,23 +140,34 @@ class CustomerPanelController extends Controller
 
     public function updatePassword(Request $request): RedirectResponse
     {
+        $user = $request->user();
+        $mustChange = (bool) ($user->must_change_password ?? false);
+
         $validated = $request->validate([
-            'current_password' => ['required', 'string'],
+            'current_password' => [$mustChange ? 'nullable' : 'required', 'string'],
             'password' => ['required', 'string', 'confirmed', Password::defaults()],
         ]);
 
-        $user = $request->user();
-        if (! Hash::check($validated['current_password'], $user->password)) {
-            throw ValidationException::withMessages([
-                'current_password' => 'Senha atual incorreta.',
-            ]);
+        if (! $mustChange) {
+            if (! Hash::check($validated['current_password'] ?? '', $user->password)) {
+                throw ValidationException::withMessages([
+                    'current_password' => 'Senha atual incorreta.',
+                ]);
+            }
         }
 
-        $user->forceFill([
+        $payload = [
             'password' => Hash::make($validated['password']),
-        ])->save();
+        ];
+        if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'must_change_password')) {
+            $payload['must_change_password'] = false;
+        }
 
-        return back()->with('success', 'Senha atualizada.');
+        $user->forceFill($payload)->save();
+
+        return back()->with('success', $mustChange
+            ? 'Nova senha definida. Você já pode usar a conta normalmente.'
+            : 'Senha atualizada.');
     }
 
     public function requestRefund(Request $request): RedirectResponse
@@ -420,7 +432,14 @@ class CustomerPanelController extends Controller
     }
 
     /**
-     * @return array{lines: list<string>, delivery_label: ?string}|null
+     * @return array{
+     *   lines: list<string>,
+     *   delivery_label: ?string,
+     *   status: ?string,
+     *   status_label: ?string,
+     *   tracking_code: ?string,
+     *   steps: list<array{key: string, label: string, done: bool, active: bool, at: ?string}>
+     * }|null
      */
     private function shippingSummary(Order $order, ?Product $product): ?array
     {
@@ -461,13 +480,32 @@ class CustomerPanelController extends Controller
                 : ((int) $min).'–'.((int) $max).' dias úteis';
         }
 
-        if ($lines === [] && $deliveryLabel === null) {
+        $status = \App\Support\OrderShippingStatus::resolve($order->shipping_status);
+        $statusIndex = \App\Support\OrderShippingStatus::stepIndex($status);
+        $timeline = is_array($meta['shipping_timeline'] ?? null) ? $meta['shipping_timeline'] : [];
+        $steps = array_map(function (array $step) use ($statusIndex, $timeline) {
+            $idx = \App\Support\OrderShippingStatus::stepIndex($step['key']);
+
+            return [
+                'key' => $step['key'],
+                'label' => $step['label'],
+                'done' => $statusIndex >= 0 && $idx <= $statusIndex,
+                'active' => $statusIndex === $idx,
+                'at' => isset($timeline[$step['key']]) ? (string) $timeline[$step['key']] : null,
+            ];
+        }, \App\Support\OrderShippingStatus::steps());
+
+        if ($lines === [] && $deliveryLabel === null && $status === null) {
             return null;
         }
 
         return [
             'lines' => $lines,
             'delivery_label' => $deliveryLabel,
+            'status' => $status,
+            'status_label' => $status ? \App\Support\OrderShippingStatus::label($status) : null,
+            'tracking_code' => $order->shipping_tracking_code,
+            'steps' => $steps,
         ];
     }
 

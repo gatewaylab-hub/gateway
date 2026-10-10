@@ -1,5 +1,5 @@
 <script setup>
-import { Head, Link, usePage } from '@inertiajs/vue3';
+import { Head, Link, router, usePage } from '@inertiajs/vue3';
 import { computed, onMounted, onUnmounted } from 'vue';
 import MkIcon from '@/components/marketplace/MkIcon.vue';
 import MarketplaceBrand from '@/components/marketplace/MarketplaceBrand.vue';
@@ -8,6 +8,10 @@ import { useMarketplaceBranding } from '@/composables/useMarketplaceBranding';
 const props = defineProps({
     title: { type: String, default: '' },
     theme: { type: Object, default: null },
+    /** Auth/cadastro: conteúdo no topo, sem stretch do main (evita buraco branco antes do rodapé). */
+    compactMain: { type: Boolean, default: false },
+    /** Esconde atalhos Minha conta/Mensagens no header (já existem na subnav da conta). */
+    hideAccountNav: { type: Boolean, default: false },
 });
 
 const page = usePage();
@@ -23,6 +27,35 @@ const topbarItems = computed(() => {
 });
 const showTopbar = computed(() => theme.value.topbar_enabled !== false);
 const user = () => page.props.auth?.user;
+const accountHref = computed(() => {
+    const u = user();
+    if (!u) return '/login';
+    if (u.role === 'platform_admin' || u.role === 'admin') return '/plataforma';
+    if (u.role === 'infoprodutor' || u.role === 'team') return '/dashboard';
+    return '/painel-cliente';
+});
+const accountLabel = computed(() => {
+    const u = user();
+    if (!u) return 'Minha conta';
+    if (u.role === 'platform_admin' || u.role === 'admin') return 'Plataforma';
+    if (u.role === 'infoprodutor' || u.role === 'team') return 'Painel';
+    return 'Minha conta';
+});
+const platformCompany = computed(() => page.props.platform_company || {});
+const socialLinks = computed(() => {
+    const social = page.props.marketplace_seo?.social || {};
+    return [
+        { key: 'instagram', label: 'Instagram', href: social.instagram },
+        { key: 'facebook', label: 'Facebook', href: social.facebook },
+        { key: 'x', label: 'X', href: social.x },
+        { key: 'youtube', label: 'YouTube', href: social.youtube },
+        { key: 'tiktok', label: 'TikTok', href: social.tiktok },
+        { key: 'discord', label: 'Discord', href: social.discord },
+    ].filter((item) => item.href);
+});
+const logout = () => {
+    router.post('/logout');
+};
 const currentQuery = () => {
     try {
         return new URL(page.url, 'http://x').searchParams.get('q') || '';
@@ -103,16 +136,25 @@ onUnmounted(() => {
                         <MkIcon name="search" :size="18" />
                     </Link>
                     <template v-if="user()">
-                        <Link href="/chat" class="hidden items-center gap-1.5 rounded-lg px-3 py-2 text-[14px] font-medium text-[#3D332B] hover:bg-[#F1EAE2] sm:inline-flex">
-                            <MkIcon name="chat" :size="17" /> Mensagens
-                        </Link>
-                        <Link
-                            :href="user().role === 'infoprodutor' || user().role === 'team' ? '/dashboard' : '/painel-cliente'"
-                            class="inline-flex items-center gap-2 rounded-[10px] bg-[#1A1410] px-4 py-2.5 text-[14px] font-semibold text-white hover:bg-black"
-                        >
-                            <MkIcon name="user" :size="16" />
-                            {{ user().role === 'infoprodutor' || user().role === 'team' ? 'Painel' : 'Minha conta' }}
-                        </Link>
+                        <template v-if="!hideAccountNav">
+                            <Link href="/chat" class="hidden items-center gap-1.5 rounded-lg px-3 py-2 text-[14px] font-medium text-[#3D332B] hover:bg-[#F1EAE2] sm:inline-flex">
+                                <MkIcon name="chat" :size="17" /> Mensagens
+                            </Link>
+                            <Link
+                                :href="accountHref"
+                                class="inline-flex items-center gap-2 rounded-[10px] bg-[#1A1410] px-4 py-2.5 text-[14px] font-semibold text-white hover:bg-black"
+                            >
+                                <MkIcon name="user" :size="16" />
+                                {{ accountLabel }}
+                            </Link>
+                            <button
+                                type="button"
+                                class="inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-[14px] font-medium text-[#3D332B] hover:bg-[#F1EAE2]"
+                                @click="logout"
+                            >
+                                <MkIcon name="logout" :size="16" /> Sair
+                            </button>
+                        </template>
                     </template>
                     <template v-else>
                         <Link href="/login" class="rounded-lg px-3 py-2 text-[14px] font-medium text-[#3D332B] hover:bg-[#F1EAE2]">Entrar</Link>
@@ -126,7 +168,7 @@ onUnmounted(() => {
             </div>
         </header>
 
-        <main class="flex-1">
+        <main :class="compactMain ? '' : 'flex-1'">
             <slot />
         </main>
 
@@ -162,10 +204,27 @@ onUnmounted(() => {
                             <li><Link href="/termos-de-uso" class="hover:text-white">Termos de uso</Link></li>
                             <li><Link href="/politica-privacidade" class="hover:text-white">Privacidade</Link></li>
                         </ul>
+                        <div v-if="socialLinks.length" class="mt-6 flex flex-wrap gap-2">
+                            <a
+                                v-for="item in socialLinks"
+                                :key="item.key"
+                                :href="item.href"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                class="rounded-lg border border-white/15 px-2.5 py-1.5 text-[12px] font-semibold text-[#CDBFB2] hover:border-white/40 hover:text-white"
+                            >{{ item.label }}</a>
+                        </div>
                     </div>
                 </div>
                 <div class="flex flex-col items-start justify-between gap-3 border-t border-white/10 py-6 text-[12px] text-[#7D6F63] sm:flex-row sm:items-center">
-                    <span>© {{ new Date().getFullYear() }} {{ appName }}</span>
+                    <div class="space-y-1">
+                        <div>© {{ new Date().getFullYear() }} {{ appName }}</div>
+                        <div v-if="platformCompany.legal_name || platformCompany.cnpj_formatted" class="text-[#6B5E54]">
+                            <span v-if="platformCompany.legal_name">{{ platformCompany.legal_name }}</span>
+                            <span v-if="platformCompany.legal_name && platformCompany.cnpj_formatted"> · </span>
+                            <span v-if="platformCompany.cnpj_formatted">CNPJ {{ platformCompany.cnpj_formatted }}</span>
+                        </div>
+                    </div>
                     <span>Pagamentos via PIX e cartão · Suporte por chat</span>
                 </div>
             </div>

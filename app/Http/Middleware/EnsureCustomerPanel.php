@@ -11,8 +11,12 @@ class EnsureCustomerPanel
     public function handle(Request $request, Closure $next): Response
     {
         $user = $request->user();
-        if (! $user || ! $user->canAccessCustomerPanel()) {
-            abort(403, 'Acesso não autorizado.');
+        if (! $user) {
+            return redirect()->guest(route('login'));
+        }
+
+        if (! $user->canAccessCustomerPanel()) {
+            return redirect()->to($user->defaultAuthenticatedHomeUrl());
         }
 
         return $next($request);

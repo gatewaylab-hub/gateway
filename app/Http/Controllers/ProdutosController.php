@@ -186,7 +186,6 @@ class ProdutosController extends Controller
         $validated = $request->validate([
             'name' => ['required', 'string', 'max:255'],
             'notification_name' => ['nullable', 'string', 'max:80'],
-            'support_email' => ['nullable', 'email', 'max:255'],
             'slug' => ['nullable', 'string', 'max:255'],
             'description' => ['nullable', 'string'],
             'category' => ['nullable', 'string', 'in:'.implode(',', Product::categoryKeys())],
@@ -212,14 +211,18 @@ class ProdutosController extends Controller
             $nn = HtmlSanitizer::plainText($validated['notification_name'] ?? '', 80);
             $validated['notification_name'] = $nn !== '' ? $nn : null;
         }
-        if (array_key_exists('support_email', $validated)) {
-            $supportEmail = strtolower(trim((string) ($validated['support_email'] ?? '')));
-            $validated['support_email'] = ($supportEmail !== '' && filter_var($supportEmail, FILTER_VALIDATE_EMAIL))
-                ? $supportEmail
-                : null;
-        }
+        // Canal de suporte externo removido — comunicação fica no chat da plataforma.
+        unset($validated['support_email']);
+        $validated['support_email'] = null;
         if (array_key_exists('description', $validated)) {
             $validated['description'] = HtmlSanitizer::plainTextMultiline($validated['description'], 20000) ?: null;
+            if (! empty($validated['description'])) {
+                app(\App\Services\ContactLeakFilter::class)->assertAllowed(
+                    (string) $validated['description'],
+                    'description',
+                    true
+                );
+            }
         }
 
         $tenantId = auth()->user()->tenant_id;
@@ -678,7 +681,6 @@ class ProdutosController extends Controller
         $validated = $request->validate([
             'name' => ['required', 'string', 'max:255'],
             'notification_name' => ['nullable', 'string', 'max:80'],
-            'support_email' => ['nullable', 'email', 'max:255'],
             'description' => ['nullable', 'string'],
             'category' => ['nullable', 'string', 'in:'.implode(',', Product::categoryKeys())],
             'marketplace_category_id' => ['nullable', 'integer', 'exists:marketplace_categories,id'],
@@ -763,14 +765,18 @@ class ProdutosController extends Controller
             $nn = HtmlSanitizer::plainText($validated['notification_name'] ?? '', 80);
             $validated['notification_name'] = $nn !== '' ? $nn : null;
         }
-        if (array_key_exists('support_email', $validated)) {
-            $supportEmail = strtolower(trim((string) ($validated['support_email'] ?? '')));
-            $validated['support_email'] = ($supportEmail !== '' && filter_var($supportEmail, FILTER_VALIDATE_EMAIL))
-                ? $supportEmail
-                : null;
-        }
+        // Canal de suporte externo removido — comunicação fica no chat da plataforma.
+        unset($validated['support_email']);
+        $validated['support_email'] = null;
         if (array_key_exists('description', $validated)) {
             $validated['description'] = HtmlSanitizer::plainTextMultiline($validated['description'], 20000) ?: null;
+            if (! empty($validated['description'])) {
+                app(\App\Services\ContactLeakFilter::class)->assertAllowed(
+                    (string) $validated['description'],
+                    'description',
+                    true
+                );
+            }
         }
         if (isset($validated['email_template']) && is_array($validated['email_template'])) {
             if (array_key_exists('from_name', $validated['email_template'])) {

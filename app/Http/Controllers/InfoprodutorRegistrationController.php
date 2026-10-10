@@ -291,7 +291,7 @@ class InfoprodutorRegistrationController extends Controller
         $rules = [
             'person_type' => ['required', 'string', Rule::in(['pf', 'pj'])],
             'name' => ['required', 'string', 'max:255'],
-            'email' => ['required', 'string', 'email', 'max:255', 'unique:users,email'],
+            'email' => ['required', 'string', 'email', 'max:255'],
             'phone' => ['required', 'string', 'max:32'],
             'birth_date' => ['required', 'date', 'before:'.now()->subYears(18)->format('Y-m-d')],
             'document' => ['required', 'string', 'max:20'],
@@ -313,10 +313,13 @@ class InfoprodutorRegistrationController extends Controller
         ];
 
         $validated = $request->validate($rules, [
-            'email.unique' => 'Este e-mail já está em uso.',
             'birth_date.before' => 'É necessário ter pelo menos 18 anos.',
             'accept_terms_privacy.accepted' => 'Você precisa aceitar os Termos de Uso e a Política de Privacidade.',
         ]);
+
+        if (NormalizedEmail::isTaken($validated['email'])) {
+            return back()->withErrors(['email' => 'Este e-mail já está em uso.'])->withInput();
+        }
 
         if (NormalizedEmail::isReservedForRegistration($validated['email'])) {
             PlatformAuditService::log('security.registration_blocked_reserved_email', [
@@ -494,7 +497,7 @@ class InfoprodutorRegistrationController extends Controller
         $rules = [
             'person_type' => ['required', 'string', Rule::in(['pf', 'pj'])],
             'name' => ['required', 'string', 'max:255'],
-            'email' => ['required', 'string', 'email', 'max:255', Rule::unique('users', 'email')->ignore($user->id)],
+            'email' => ['required', 'string', 'email', 'max:255'],
             'phone' => ['required', 'string', 'max:32'],
             'birth_date' => ['required', 'date', 'before:'.now()->subYears(18)->format('Y-m-d')],
             'document' => ['required', 'string', 'max:20'],
@@ -516,10 +519,13 @@ class InfoprodutorRegistrationController extends Controller
         ];
 
         $validated = $request->validate($rules, [
-            'email.unique' => 'Este e-mail já está em uso.',
             'birth_date.before' => 'É necessário ter pelo menos 18 anos.',
             'accept_terms_privacy.accepted' => 'Você precisa aceitar os Termos de Uso e a Política de Privacidade.',
         ]);
+
+        if (NormalizedEmail::isTaken($validated['email'], (int) $user->id)) {
+            return back()->withErrors(['email' => 'Este e-mail já está em uso.'])->withInput();
+        }
 
         if (NormalizedEmail::isReservedForRegistration($validated['email'])) {
             PlatformAuditService::log('security.registration_blocked_reserved_email', [
